@@ -15,10 +15,15 @@ import {
   Search,
   Check,
   Loader2,
+  FileSpreadsheet,
+  FileArchive,
+  FileText,
+  File as GenericFileIcon,
 } from 'lucide-react';
 import { Message, useChatStore } from '../../stores/chatStore';
 import MarkdownContent from '@/components/common/MarkdownContent';
 import TodoListCard, { TodoItem } from '@/components/agent/TodoListCard';
+import { isImageAttachment, classifyAttachment, formatFileSize } from '@/lib/chatAttachment';
 
 interface ToolStatusEvent {
   tool: string;
@@ -408,23 +413,65 @@ const MessageBubble: React.FC<{
           <ReferenceLinks metadata={msg.metadata.sources} />
         )}
 
-        {/* 用户消息附带的图片缩略图 */}
+        {/* 用户消息附带的文件/图片附件展示 */}
         {isUser && Array.isArray(msg.metadata?.attachments) && msg.metadata.attachments.length > 0 && (
           <div className='flex flex-wrap gap-2 justify-end mb-2 max-w-[85%]'>
-            {msg.metadata.attachments.map((att: any) => (
-              <button
-                key={att.id || att.path}
-                onClick={() => window.electronAPI?.showInFolder?.(att.path)}
-                className='w-24 h-24 rounded-xl overflow-hidden border border-[#353535] bg-[#1a1a1a] hover:border-blue-500/50 transition-colors cursor-pointer'
-                title={`${att.name || "图片"} · 点击在 Finder 中显示`}
-              >
-                <img
-                  src={`local-media://${encodeURI(att.path)}`}
-                  alt={att.name || "图片"}
-                  className='w-full h-full object-cover'
-                />
-              </button>
-            ))}
+            {msg.metadata.attachments.map((att: any) => {
+              const isImg = isImageAttachment(att.name || "", att.mime || "");
+              const category = classifyAttachment(att.name || "", att.mime || "");
+
+              if (isImg) {
+                return (
+                  <button
+                    key={att.id || att.path}
+                    onClick={() => window.electronAPI?.showInFolder?.(att.path)}
+                    className='w-24 h-24 rounded-xl overflow-hidden border border-[#353535] bg-[#1a1a1a] hover:border-blue-500/50 transition-colors cursor-pointer flex-shrink-0 shadow-sm'
+                    title={`${att.name || "图片"} (${formatFileSize(att.size)}) · 点击在 Finder 中显示`}
+                  >
+                    <img
+                      src={`local-media://${encodeURI(att.path)}`}
+                      alt={att.name || "图片"}
+                      className='w-full h-full object-cover'
+                    />
+                  </button>
+                );
+              }
+
+              return (
+                <button
+                  key={att.id || att.path}
+                  onClick={() => window.electronAPI?.showInFolder?.(att.path)}
+                  className='flex items-center gap-2.5 px-3 py-2 rounded-xl border border-[#353535] bg-[#1c1c1c] hover:bg-[#222222] hover:border-blue-500/50 transition-all cursor-pointer shadow-sm text-left max-w-[240px]'
+                  title={`${att.name} (${formatFileSize(att.size)}) · 点击在 Finder 中显示`}
+                >
+                  <div className='w-7 h-7 rounded-lg bg-[#252525] border border-[#383838] flex items-center justify-center flex-shrink-0'>
+                    {category === "spreadsheet" && (
+                      <FileSpreadsheet size={15} className='text-emerald-400' />
+                    )}
+                    {category === "text" && (
+                      <FileCode size={15} className='text-blue-400' />
+                    )}
+                    {category === "document" && (
+                      <FileText size={15} className='text-rose-400' />
+                    )}
+                    {category === "archive" && (
+                      <FileArchive size={15} className='text-amber-400' />
+                    )}
+                    {category === "binary" && (
+                      <GenericFileIcon size={15} className='text-purple-400' />
+                    )}
+                  </div>
+                  <div className='flex flex-col min-w-0'>
+                    <span className='text-xs font-medium text-neutral-200 truncate'>
+                      {att.name}
+                    </span>
+                    <span className='text-[10px] text-neutral-500 font-mono'>
+                      {formatFileSize(att.size)}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         )}
 

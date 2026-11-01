@@ -188,51 +188,155 @@ function encodeAttachmentForModel(attachment) {
   return { mime, base64: buffer.toString("base64"), bytes: buffer.length };
 }
 
-function buildMultimodalMessages(messages) {
+const TEXT_LIKE_EXTS = new Set([
+  "md", "markdown", "txt", "text", "log", "json", "json5", "jsonl",
+  "yaml", "yml", "toml", "xml", "html", "htm", "css", "scss", "less",
+  "js", "jsx", "ts", "tsx", "mjs", "cjs",
+  "py", "pyw", "java", "go", "rs", "c", "h", "cpp", "hpp", "cc", "cxx",
+  "cs", "php", "rb", "swift", "kt", "kts", "dart", "scala",
+  "sh", "bash", "zsh", "fish", "bat", "cmd", "ps1",
+  "sql", "env", "ini", "conf", "config", "dockerfile", "makefile", "gemfile"
+]);
+
+const SPREADSHEET_EXTS = new Set(["xlsx", "xls", "csv", "tsv", "parquet"]);
+const DOCUMENT_EXTS = new Set(["pdf", "docx", "doc", "pptx", "ppt", "epub", "rtf", "odt"]);
+const ARCHIVE_EXTS = new Set(["zip", "tar", "gz", "tgz", "7z", "rar", "bz2", "xz"]);
+
+function getAttachmentExtension(filename) {
+  const parts = String(filename || "").split(".");
+  return parts.length > 1 ? (parts.pop() || "").toLowerCase() : "";
+}
+
+function isImageFile(att) {
+  const ext = getAttachmentExtension(att?.name || att?.path);
+  const mime = String(att?.mime || "").toLowerCase();
+  return (
+    mime.startsWith("image/") ||
+    IMAGE_MIME_EXT[mime] !== undefined ||
+    ["png", "jpg", "jpeg", "webp", "gif", "bmp", "ico", "svg"].includes(ext)
+  );
+}
+
+function isTextLikeFile(filename, mime) {
+  const ext = getAttachmentExtension(filename);
+  const lowerMime = String(mime || "").toLowerCase();
+  return (
+    TEXT_LIKE_EXTS.has(ext) ||
+    lowerMime.startsWith("text/") ||
+    lowerMime.includes("json") ||
+    lowerMime.includes("javascript")
+  );
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes < 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function buildAttachmentMessages(messages) {
   const withImages = [];
   messages.forEach((msg, index) => {
-    if (msg.role === "user" && Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+    if (msg.role === "user" && Array.isArray(msg.attachments) && msg.attachments.some(isImageFile)) {
       withImages.push(index);
     }
   });
-  const injectIndexes = new Set(withImages.slice(-2));
+  const injectImageIndexes = new Set(withImages.slice(-2));
 
   let imageCount = 0;
-  let imageBytes = 0;
+  let textAttachmentCount = 0;
+  let binaryAttachmentCount = 0;
 
   const result = messages.map((msg, index) => {
     if (!Array.isArray(msg.attachments) || msg.attachments.length === 0) return msg;
 
-    const text = extractTextContent(msg.content);
+    let baseText = extractTextContent(msg.content);
+    const images = [];
+    const inlinedSections = [];
 
-    if (!injectIndexes.has(index)) {
-      const omitted = text.replace(/\[image #\d+\]/g, (token) => `${token.slice(0, -1)}: omitted]`);
-      return { role: msg.role, content: omitted || "[历史图片已省略]" };
+    for (const attachment of msg.attachments) {
+      if (!attachment || !attachment.path || !fs.existsSync(attachment.path)) continue;
+
+      // 通路 1: 图像多模态流
+      if (isImageFile(attachment)) {
+        if (!injectImageIndexes.has(index)) {
+          baseText = baseText.replace(attachment.placeholder || "", `[图片已省略]`);
+          continue;
+        }
+        const encoded = encodeAttachmentForModel(attachment);
+        if (encoded) {
+          images.push({
+            type: "image_url",
+            image_url: { url: `data:${encoded.mime};base64,${encoded.base64}` },
+          });
+          imageCount += 1;
+        }
+        continue;
+      }
+
+      // 通路 2: 文本轻量内联流 (代码、文档、配置等)
+      if (isTextLikeFile(attachment.name, attachment.mime)) {
+        try {
+          let text = fs.readFileSync(attachment.path, "utf-8");
+          let truncated = false;
+          if (text.length > 80000) {
+            text = text.slice(0, 80000);
+            truncated = true;
+          }
+          const ext = getAttachmentExtension(attachment.name);
+          const lang = ext || "text";
+          inlinedSections.push(
+            `### 用户上传的文本附件: ${attachment.name}\n\`\`\`${lang}\n${text}\n\`\`\`${
+              truncated ? "\n[该文件超过 80,000 字符，已做安全截断]" : ""
+            }`
+          );
+          textAttachmentCount += 1;
+        } catch (e) {
+          inlinedSections.push(`### 用户上传的文本附件: ${attachment.name} (读取失败: ${e.message})`);
+        }
+        continue;
+      }
+
+      // 通路 3: 复杂表格、文档与二进制数据流 (注入绝对路径与工具指引)
+      const ext = getAttachmentExtension(attachment.name);
+      let guide = "该文件已保存在上述本地路径。请根据需要，调用相应工具或通过 run_command 运行脚本读取和分析该文件。";
+      if (SPREADSHEET_EXTS.has(ext)) {
+        guide = "该文件为结构化表格数据，已保存在上述本地绝对路径。请优先通过 run_command 运行 Python 脚本 (如 python3 -c 'import pandas as pd...') 读取工作表内容并开展统计与分析。";
+      } else if (DOCUMENT_EXTS.has(ext)) {
+        guide = "该文件为办公排版文档，已保存在上述本地绝对路径。请根据任务需要，通过 run_command 调用对应解析脚本读取和提取正文。";
+      } else if (ARCHIVE_EXTS.has(ext)) {
+        guide = "该文件为压缩归档包，已保存在上述本地绝对路径。如需查看内容，可通过 run_command 执行 unzip/tar 查看文件列表或解压提取。";
+      }
+
+      inlinedSections.push(
+        [
+          `### 用户上传的文件附件: ${attachment.name}`,
+          `- 本地存储绝对路径: ${attachment.path}`,
+          `- 文件大小: ${formatBytes(attachment.size)}`,
+          `- 格式扩展名: .${ext || "bin"}`,
+          `【系统指引】${guide}`,
+        ].join("\n")
+      );
+      binaryAttachmentCount += 1;
     }
 
-    const images = [];
-    for (const attachment of msg.attachments) {
-      const encoded = encodeAttachmentForModel(attachment);
-      if (!encoded) continue;
-      images.push({
-        type: "image_url",
-        image_url: { url: `data:${encoded.mime};base64,${encoded.base64}` },
-      });
-      imageCount += 1;
-      imageBytes += encoded.bytes;
+    let finalPrompt = baseText;
+    if (inlinedSections.length > 0) {
+      finalPrompt = `${finalPrompt}\n\n【用户上传的文件附件内容与路径指引】:\n${inlinedSections.join("\n\n")}`;
     }
 
     if (images.length === 0) {
-      return { role: msg.role, content: text };
+      return { role: msg.role, content: finalPrompt };
     }
 
     return {
       role: msg.role,
-      content: [{ type: "text", text: text || "请查看以下图片。" }, ...images],
+      content: [{ type: "text", text: finalPrompt || "请查看以下附件与图片。" }, ...images],
     };
   });
 
-  return { messages: result, imageCount, imageBytes };
+  return { messages: result, imageCount, textAttachmentCount, binaryAttachmentCount };
 }
 
 /**
@@ -648,18 +752,36 @@ app.whenReady().then(() => {
     "save-chat-attachment",
     safeHandler((event, { sessionId, name, mime, base64 }) => {
       if (!sessionId || !base64) throw new Error("附件参数不完整");
-      const processed = processAttachmentImage(base64, mime);
+      const cleanName = name || "attachment";
+      const isImg = isImageFile({ name: cleanName, mime });
+
+      if (isImg) {
+        const processed = processAttachmentImage(base64, mime);
+        const id = crypto.randomUUID();
+        const ext = extFromMime(processed.mime, cleanName);
+        const saved = storageService.saveAttachmentBuffer(sessionId, id, ext, processed.buffer);
+        return {
+          id,
+          path: saved.path,
+          width: processed.width,
+          height: processed.height,
+          size: saved.size,
+          mime: processed.mime,
+          name: cleanName,
+        };
+      }
+
+      // 非图片文件（代码、文本、表格、PDF、压缩包等）原样无损落盘
+      const buffer = Buffer.from(base64, "base64");
       const id = crypto.randomUUID();
-      const ext = extFromMime(processed.mime, name);
-      const saved = storageService.saveAttachmentBuffer(sessionId, id, ext, processed.buffer);
+      const ext = getAttachmentExtension(cleanName) || "bin";
+      const saved = storageService.saveAttachmentBuffer(sessionId, id, ext, buffer);
       return {
         id,
         path: saved.path,
-        width: processed.width,
-        height: processed.height,
         size: saved.size,
-        mime: processed.mime,
-        name: name || `${id}.${ext}`,
+        mime: mime || "application/octet-stream",
+        name: cleanName,
       };
     })
   );
@@ -893,11 +1015,15 @@ app.whenReady().then(() => {
         const availableSkills = storageService.getSkills(sessionWorkDir);
         const memories = storageService.getMemories(sessionWorkDir);
 
-        const hasImageAttachments = apiMessages.some(
+        const hasAnyAttachments = apiMessages.some(
           (m) => Array.isArray(m.attachments) && m.attachments.length > 0
         );
 
-        if (hasImageAttachments && !supportsVision) {
+        const hasRealImageAttachments = apiMessages.some(
+          (m) => Array.isArray(m.attachments) && m.attachments.some(isImageFile)
+        );
+
+        if (hasRealImageAttachments && !supportsVision) {
           event.reply(
             `chat-stream-error-${sessionId}`,
             "当前模型不支持图片输入，请切换到支持视觉的模型"
@@ -905,14 +1031,12 @@ app.whenReady().then(() => {
           return;
         }
 
-        if (hasImageAttachments) {
-          const multimodal = buildMultimodalMessages(apiMessages);
-          apiMessages = multimodal.messages;
-          if (multimodal.imageCount > 0) {
-            console.log(
-              `[chat-image] resolved ${multimodal.imageCount} images, bytes=${multimodal.imageBytes}`
-            );
-          }
+        if (hasAnyAttachments) {
+          const attached = buildAttachmentMessages(apiMessages);
+          apiMessages = attached.messages;
+          console.log(
+            `[attachment-pipeline] resolved ${attached.imageCount} images / ${attached.textAttachmentCount} text inlines / ${attached.binaryAttachmentCount} file guides`
+          );
         }
 
         const memoryIndex = storageService.getMemoryIndex(sessionWorkDir);

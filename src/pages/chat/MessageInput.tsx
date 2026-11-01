@@ -1,10 +1,24 @@
 import React, { useRef, useEffect, useMemo, useState } from "react";
-import { Send, FolderGit2, ChevronDown, Image as ImageIcon, X } from "lucide-react";
+import {
+  Send,
+  FolderGit2,
+  ChevronDown,
+  Paperclip,
+  X,
+  FileSpreadsheet,
+  FileCode,
+  FileText,
+  FileArchive,
+  File as GenericFileIcon,
+} from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import MentionPopover, { type MentionPosition } from "@/pages/chat/MentionPopover";
 import {
   MAX_CHAT_ATTACHMENTS,
   MAX_CHAT_ATTACHMENT_BYTES,
+  classifyAttachment,
+  formatFileSize,
+  getFileExtension,
   type DraftChatAttachment,
 } from "@/lib/chatAttachment";
 import {
@@ -134,26 +148,22 @@ const MessageInput: React.FC<Props> = ({
   const addFiles = (files: File[]) => {
     if (!onChangeAttachments) return;
 
-    const images = files.filter((file) => file.type.startsWith("image/"));
-    if (images.length === 0) {
-      onNotify?.("仅支持图片文件");
-      return;
-    }
+    if (files.length === 0) return;
 
     const remaining = MAX_CHAT_ATTACHMENTS - attachments.length;
     if (remaining <= 0) {
-      onNotify?.(`最多只能添加 ${MAX_CHAT_ATTACHMENTS} 张图片`);
+      onNotify?.(`单条消息最多只能添加 ${MAX_CHAT_ATTACHMENTS} 个附件`);
       return;
     }
 
     const accepted: File[] = [];
-    for (const file of images) {
+    for (const file of files) {
       if (accepted.length >= remaining) {
-        onNotify?.(`最多只能添加 ${MAX_CHAT_ATTACHMENTS} 张图片`);
+        onNotify?.(`最多只能添加 ${MAX_CHAT_ATTACHMENTS} 个附件，其余文件已忽略`);
         break;
       }
       if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
-        onNotify?.(`图片 ${file.name || ""} 超过 10MB，已跳过`);
+        onNotify?.(`文件 ${file.name || ""} 超过 20MB 限制，已跳过`);
         continue;
       }
       accepted.push(file);
@@ -162,24 +172,32 @@ const MessageInput: React.FC<Props> = ({
 
     const usedNumbers = new Set(
       attachments.map((item) => {
-        const matched = item.placeholder.match(/\d+/);
-        return matched ? Number(matched[0]) : 0;
+        const matched = item.placeholder.match(/#(d+)/);
+        return matched ? Number(matched[1]) : 0;
       })
     );
 
     let nextNumber = 1;
     const drafts: DraftChatAttachment[] = accepted.map((file) => {
       while (usedNumbers.has(nextNumber)) nextNumber += 1;
-      const placeholder = `[image #${nextNumber}]`;
+      const category = classifyAttachment(file.name, file.type);
+      const extension = getFileExtension(file.name);
+      const placeholder =
+        category === "image"
+          ? `[image #${nextNumber}]`
+          : `[file #${nextNumber}: ${file.name}]`;
       usedNumbers.add(nextNumber);
+
       return {
         id: crypto.randomUUID(),
         file,
-        name: file.name || `image-${nextNumber}.png`,
-        mime: file.type || "image/png",
+        name: file.name || `file-${nextNumber}`,
+        mime: file.type || "application/octet-stream",
         size: file.size,
-        previewUrl: URL.createObjectURL(file),
+        previewUrl: category === "image" ? URL.createObjectURL(file) : "",
         placeholder,
+        category,
+        extension,
       };
     });
 
@@ -207,7 +225,9 @@ const MessageInput: React.FC<Props> = ({
     const target = attachments.find((item) => item.id === id);
     if (!target) return;
 
-    URL.revokeObjectURL(target.previewUrl);
+    if (target.previewUrl) {
+      URL.revokeObjectURL(target.previewUrl);
+    }
     onChangeAttachments(attachments.filter((item) => item.id !== id));
 
     if (target.placeholder && value.includes(target.placeholder)) {
@@ -221,7 +241,7 @@ const MessageInput: React.FC<Props> = ({
 
     const files: File[] = [];
     for (const item of Array.from(items as DataTransferItemList)) {
-      if (item.kind === "file" && item.type.startsWith("image/")) {
+      if (item.kind === "file") {
         const file = item.getAsFile();
         if (file) files.push(file);
       }
@@ -356,27 +376,60 @@ const MessageInput: React.FC<Props> = ({
             : "border-[#2d2d2d] focus-within:border-[#3e3e3e]"
         }`}
       >
-        {/* 图片附件缩略图条 */}
+        {/* 多类型附件预览条 (支持图片缩略图与多样化文件胶囊卡片) */}
         {attachments.length > 0 && (
           <div className="flex gap-2 px-4 pt-3 pb-1 overflow-x-auto custom-scrollbar">
             {attachments.map((item) => (
               <div
                 key={item.id}
-                className="relative w-16 h-16 rounded-lg overflow-hidden border border-[#353535] bg-[#141414] flex-shrink-0 group"
-                title={`${item.name} · ${item.placeholder}`}
+                className="relative flex-shrink-0 group rounded-xl overflow-hidden border border-[#353535] bg-[#141414]"
+                title={`${item.name} (${formatFileSize(item.size)}) · ${item.placeholder}`}
               >
-                <img src={item.previewUrl} alt={item.name} className="w-full h-full object-cover" />
+                {item.category === "image" && item.previewUrl ? (
+                  <div className="relative w-16 h-16">
+                    <img src={item.previewUrl} alt={item.name} className="w-full h-full object-cover" />
+                    <span className="absolute bottom-0 left-0 right-0 text-[9px] leading-4 bg-black/70 text-neutral-300 text-center font-mono truncate px-1">
+                      {item.placeholder}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 px-3 py-2 h-14 max-w-[200px] select-none">
+                    <div className="w-8 h-8 rounded-lg bg-[#222222] border border-[#333333] flex items-center justify-center flex-shrink-0">
+                      {item.category === "spreadsheet" && (
+                        <FileSpreadsheet size={16} className="text-emerald-400" />
+                      )}
+                      {item.category === "text" && (
+                        <FileCode size={16} className="text-blue-400" />
+                      )}
+                      {item.category === "document" && (
+                        <FileText size={16} className="text-rose-400" />
+                      )}
+                      {item.category === "archive" && (
+                        <FileArchive size={16} className="text-amber-400" />
+                      )}
+                      {item.category === "binary" && (
+                        <GenericFileIcon size={16} className="text-purple-400" />
+                      )}
+                    </div>
+                    <div className="flex flex-col min-w-0 pr-4">
+                      <span className="text-xs font-medium text-neutral-200 truncate" title={item.name}>
+                        {item.name}
+                      </span>
+                      <span className="text-[10px] text-neutral-500 font-mono">
+                        {formatFileSize(item.size)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 <button
                   type="button"
                   onClick={() => removeAttachment(item.id)}
-                  className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 text-neutral-300 hover:text-white hover:bg-rose-600 flex items-center justify-center transition-colors"
-                  title="移除图片"
+                  className="absolute top-1 right-1 w-4 h-4 rounded-full bg-black/80 text-neutral-300 hover:text-white hover:bg-rose-600 flex items-center justify-center transition-colors shadow-sm"
+                  title="移除此附件"
                 >
                   <X size={10} />
                 </button>
-                <span className="absolute bottom-0 left-0 right-0 text-[9px] leading-4 bg-black/60 text-neutral-300 text-center font-mono">
-                  {item.placeholder}
-                </span>
               </div>
             ))}
           </div>
@@ -391,7 +444,7 @@ const MessageInput: React.FC<Props> = ({
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             onBlur={() => window.setTimeout(() => setMention(null), 150)}
-            placeholder="输入消息或任务，输入 @ 引用文件，粘贴或拖入图片，Enter 发送，Shift + Enter 换行..."
+            placeholder="输入消息或任务，输入 @ 引用资源，粘贴或拖入图片、表格、文档，Enter 发送，Shift + Enter 换行..."
             style={{ border: 'none', outline: 'none', boxShadow: 'none' }}
             className="chat-textarea-seamless w-full max-h-44 min-h-[46px] bg-transparent text-neutral-100 placeholder-neutral-500 resize-none border-none outline-none ring-0 focus:ring-0 focus:outline-none focus:border-none shadow-none text-sm leading-relaxed scroll-smooth"
             rows={1}
@@ -401,11 +454,10 @@ const MessageInput: React.FC<Props> = ({
         {/* 底部功能栏 (彻底移除 border-t 割裂线条，自然与文本区融为一体) */}
         <div className="flex items-center justify-between px-4 pb-3 pt-0">
           <div className="flex items-center gap-2">
-            {/* 图片上传按钮 */}
+            {/* 全格式文件上传按钮 */}
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
               multiple
               className="hidden"
               onChange={(e) => {
@@ -419,9 +471,9 @@ const MessageInput: React.FC<Props> = ({
               onClick={() => fileInputRef.current?.click()}
               disabled={!onChangeAttachments || attachments.length >= MAX_CHAT_ATTACHMENTS}
               className="flex items-center justify-center w-7 h-7 rounded-lg text-neutral-400 hover:text-white bg-[#161616] hover:bg-[#222222] border border-[#2d2d2d] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              title={`添加图片 (最多 ${MAX_CHAT_ATTACHMENTS} 张)`}
+              title={`添加附件 (支持图片、代码、表格、文档等，最多 ${MAX_CHAT_ATTACHMENTS} 个)`}
             >
-              <ImageIcon size={13} />
+              <Paperclip size={13} />
             </button>
             {/* 工作空间目录按钮 (优先展示项目工作空间名称) */}
             {onSelectWorkDir && (
