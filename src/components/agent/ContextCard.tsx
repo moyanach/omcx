@@ -72,7 +72,7 @@ export const ContextCard: React.FC = () => {
       >
         <span className='flex items-center gap-2 min-w-0'>
           <span className='font-semibold text-sm text-neutral-200 tracking-wide'>
-            Context
+            上下文
           </span>
           {lastCompaction && (
             <span

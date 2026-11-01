@@ -34,7 +34,7 @@ export const ConnectorsCard: React.FC = () => {
         className='w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/[0.02] transition-colors'
       >
         <span className='font-semibold text-sm text-neutral-200 tracking-wide'>
-          Connectors
+          连接器
         </span>
         <div className='text-neutral-400'>
           {isOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}

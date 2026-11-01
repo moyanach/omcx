@@ -34,6 +34,10 @@ export const WorkspaceCard: React.FC = () => {
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const currentWorkDir = activeSession?.workDir;
 
+  const [folderGitMap, setFolderGitMap] = useState<
+    Record<string, { isGit: boolean; branch?: string }>
+  >({});
+
   useEffect(() => {
     fetchWorkspaces();
   }, []);
@@ -44,6 +48,33 @@ export const WorkspaceCard: React.FC = () => {
       ws.folders.some((f) => f.path === currentWorkDir) ||
       ws.id === activeSession?.workDir
   ) || workspaces[0];
+
+  // 异步获取各工作空间目录当前的 Git 分支状态
+  useEffect(() => {
+    let alive = true;
+    if (currentWorkspace?.folders && window.electronAPI?.getWorkspaceGitStatus) {
+      Promise.all(
+        currentWorkspace.folders.map(async (folder) => {
+          try {
+            const status = await window.electronAPI.getWorkspaceGitStatus(folder.path);
+            return [folder.path, status] as const;
+          } catch {
+            return [folder.path, { isGit: false }] as const;
+          }
+        })
+      ).then((entries) => {
+        if (!alive) return;
+        const nextMap: Record<string, { isGit: boolean; branch?: string }> = {};
+        for (const [folderPath, status] of entries) {
+          nextMap[folderPath] = { isGit: !!status?.isGit, branch: status?.branch };
+        }
+        setFolderGitMap(nextMap);
+      });
+    }
+    return () => {
+      alive = false;
+    };
+  }, [currentWorkspace?.folders, currentWorkDir]);
 
   // 打开编辑弹窗 (对应参考图 8)
   const handleOpenEditModal = (ws?: WorkspaceItem) => {
@@ -94,7 +125,7 @@ export const WorkspaceCard: React.FC = () => {
           >
             <FolderGit2 size={15} className='text-blue-400' />
             <span className='font-semibold text-xs text-neutral-200 tracking-wide uppercase'>
-              当前工作空间 (Workspace)
+              当前工作空间
             </span>
             <div className='text-neutral-500 ml-auto mr-2'>
               {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -167,9 +198,30 @@ export const WorkspaceCard: React.FC = () => {
                           </span>
                         )}
                       </div>
-                      <span className='text-[10px] text-neutral-500 font-mono truncate max-w-[120px]'>
-                        {folder.path.split(/[\\/]/).filter(Boolean).slice(-2).join('/')}
-                      </span>
+
+                      {/* 优先展示 Git 分支；非 Git 项目降级展示路径 */}
+                      {(() => {
+                        const gitInfo = folderGitMap[folder.path];
+                        if (gitInfo?.isGit && gitInfo.branch) {
+                          return (
+                            <span
+                              className='flex items-center gap-1 text-[10px] text-blue-400 font-mono flex-shrink-0'
+                              title={`当前 Git 分支: ${gitInfo.branch}`}
+                            >
+                              <GitBranch size={10} className='text-blue-400 flex-shrink-0' />
+                              <span className='truncate max-w-[110px]'>{gitInfo.branch}</span>
+                            </span>
+                          );
+                        }
+                        return (
+                          <span
+                            className='text-[10px] text-neutral-500 font-mono truncate max-w-[120px]'
+                            title={folder.path}
+                          >
+                            {folder.path.split(/[\\/]/).filter(Boolean).slice(-2).join('/')}
+                          </span>
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>
