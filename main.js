@@ -1048,8 +1048,9 @@ app.whenReady().then(() => {
         const mentionUserMsg = apiMessages.slice().reverse().find((m) => m.role === "user");
         const mentionText = extractTextContent(mentionUserMsg?.content);
         let mentionBlock = "";
+        let mentionContext = null;
         if (mentionText) {
-          const mentionContext = buildMentionContext(mentionText, sessionWorkDir, allowedFolders, {
+          mentionContext = buildMentionContext(mentionText, sessionWorkDir, allowedFolders, {
             skills: availableSkills,
             mcpServers: storageService.getMcpServers(sessionWorkDir),
           });
@@ -1092,6 +1093,13 @@ app.whenReady().then(() => {
           `[context] ${initialContext.sections.map((section) => `${section.name}=${section.chars}`).join(" ")}`
         );
 
+        // 精准提取 Skills 所占用的实际 Token 数量 (支持可用索引与 @skill 显式激活)
+        let currentSkillsTokens =
+          initialContext.sections.find((s) => s.name === "skills")?.tokens || 0;
+        if (mentionContext && Array.isArray(mentionContext.skills) && mentionContext.skills.length > 0) {
+          currentSkillsTokens += estimateTokens(mentionBlock);
+        }
+
         const systemIndex = apiMessages.findIndex((m) => m.role === "system");
         const baseSystemContent = systemIndex >= 0 ? apiMessages[systemIndex].content || "" : "";
         if (systemIndex >= 0) {
@@ -1103,6 +1111,11 @@ app.whenReady().then(() => {
         const refreshSystemInstruction = () => {
           const rebuilt = buildInstruction();
           systemInstruction = composeSystemInstruction(rebuilt);
+          currentSkillsTokens =
+            rebuilt.sections.find((s) => s.name === "skills")?.tokens || 0;
+          if (mentionContext && Array.isArray(mentionContext.skills) && mentionContext.skills.length > 0) {
+            currentSkillsTokens += estimateTokens(mentionBlock);
+          }
           const idx = apiMessages.findIndex((m) => m.role === "system");
           if (idx >= 0) {
             apiMessages[idx].content = baseSystemContent
@@ -1199,13 +1212,17 @@ app.whenReady().then(() => {
         });
 
         const initialTools = enableTools ? toolRegistry.getToolDefinitions() : [];
-        const initMetrics = calculateContextMetrics({
-          messages: apiMessages,
-          tools: initialTools,
-          systemPrompt: systemInstruction,
-          activeSkills: [],
-          maxTokensLimit: contextLimit,
-        });
+
+        const computeContextMetrics = () =>
+          calculateContextMetrics({
+            messages: apiMessages,
+            tools: initialTools,
+            systemPrompt: systemInstruction,
+            skillsTokens: currentSkillsTokens,
+            maxTokensLimit: contextLimit,
+          });
+
+        const initMetrics = computeContextMetrics();
         event.reply(`chat-stream-context-metrics-${sessionId}`, initMetrics);
 
         const MAX_TOOL_ROUNDS = Number(storageService.getConfig("max_tool_rounds")) || 5000;
@@ -1403,13 +1420,7 @@ app.whenReady().then(() => {
           }
 
           // 每轮后更新 Context 计量
-          const updatedMetrics = calculateContextMetrics({
-            messages: apiMessages,
-            tools: initialTools,
-            systemPrompt: systemInstruction,
-            activeSkills: [],
-            maxTokensLimit: contextLimit,
-          });
+          const updatedMetrics = computeContextMetrics();
           event.reply(`chat-stream-context-metrics-${sessionId}`, updatedMetrics);
         }
 
@@ -1435,13 +1446,7 @@ app.whenReady().then(() => {
         }
 
         // 最终推送一次 Context
-        const finalMetrics = calculateContextMetrics({
-          messages: apiMessages,
-          tools: initialTools,
-          systemPrompt: systemInstruction,
-          activeSkills: [],
-          maxTokensLimit: contextLimit,
-        });
+        const finalMetrics = computeContextMetrics();
         event.reply(`chat-stream-context-metrics-${sessionId}`, finalMetrics);
 
         // 结束时通知前端，由前端单源原子落盘 (消除主进程重复双写导致的消息被覆盖Bug)
