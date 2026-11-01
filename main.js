@@ -422,7 +422,7 @@ function createWindow() {
 
 // 3. 注册 IPC 事件与生命周期
 app.whenReady().then(() => {
-  // 3.1 初始化 ~/.agnes 配置文件与环境
+  // 3.1 初始化 ~/.omcx 配置文件与环境
   storageService.initStorage();
 
   // 3.2 注册特权协议

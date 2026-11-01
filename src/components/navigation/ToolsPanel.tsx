@@ -37,7 +37,7 @@ ${editingSkill.prompt.trim()}
     // 通过 Electron 保存技能文件
     if (window.electronAPI?.executeTool) {
       await window.electronAPI.executeTool('write_file', {
-        path: `.agnes/skills/${editingSkill.name.trim()}.md`,
+        path: `.omcx/skills/${editingSkill.name.trim()}.md`,
         content: skillContent,
       });
       refreshMcpAndSkills(activeSession?.workDir);
@@ -319,7 +319,7 @@ ${editingSkill.prompt.trim()}
                 onClick={handleSaveMcp}
                 className='w-full py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors'
               >
-                保存到 ~/.agnes/mcp.json
+                保存到 ~/.omcx/mcp.json
               </button>
             </div>
           )}

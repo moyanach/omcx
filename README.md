@@ -49,7 +49,7 @@
 - 主题偏好持久化到本地
 
 ### ⚙️ 设置管理
-- 模型可视化 CRUD（支持 Agnes / Ollama / OpenAI / Custom 服务商）
+- 模型可视化 CRUD（支持 DeepSeek / OpenAI / Ollama / Custom 服务商）
 - 搜索引擎配置（DuckDuckGo / Tavily）
 - 文件保存目录选择
 
@@ -122,8 +122,8 @@ npm run pack
 ## 📁 项目结构
 
 ```
-agnesAI/
-├── main.js                  # Electron 主进程（窗口管理、IPC、SQLite、API 代理）
+omcx/
+├── main.js                  # Electron 主进程（窗口管理、IPC、存储服务、API 代理）
 ├── preload.js               # contextBridge 暴露 API 给渲染进程
 ├── index.html               # Vite 入口 HTML
 ├── package.json
@@ -196,15 +196,15 @@ agnesAI/
 │                 Electron 主进程 (main.js)             │
 │  ┌──────────┐  ┌────────────┐  ┌─────────────────┐  │
 │  │ 窗口管理  │  │ IPC Handler│  │  API Proxy      │  │
-│  │          │  │ (19 个)    │  │  (fetch → Agnes) │  │
+│  │          │  │ (20+ 个)   │  │  (fetch → LLMs) │  │
 │  └──────────┘  └────────────┘  └─────────────────┘  │
 │                     │          ┌──────────────────┐  │
-│                     │          │  SQLite (5 张表)  │  │
-│                     │          │  agnes_data.db    │  │
+│                     │          │  本地存储服务     │  │
+│                     │          │  ~/.omcx/        │  │
 │                     │          └──────────────────┘  │
 │                     │          ┌──────────────────┐  │
 │                     │          │  搜索引擎         │  │
-│                     │          │  四级 fallback    │  │
+│                     │          │  多级 fallback   │  │
 │                     │          └──────────────────┘  │
 └─────────────────────┼───────────────────────────────┘
                       │ IPC (contextBridge)
@@ -228,25 +228,26 @@ agnesAI/
 | 变量 | 用途 | 默认值 |
 |------|------|--------|
 | `VITE_DEV_SERVER` | 指定 Vite 开发服务器 URL | 无（加载 `dist/`） |
-| `DEBUG_AGNES` | 调试模式，自动打开 DevTools | 无 |
+| `OMCX_HOME` | 指定本地配置与存储目录 | `~/.omcx` |
+| `DEBUG_OMCX` | 调试模式，自动打开 DevTools | 无 |
 
-### SQLite 数据库 (`agnes_data.db`)
+### 本地存储架构 (`~/.omcx/`)
 
-| 表 | 说明 |
+| 文件/目录 | 说明 |
 |----|------|
-| `config` | 键值配置（主题、保存路径、API Key 等） |
-| `chat_sessions` | 聊天会话 |
-| `chat_messages` | 聊天消息 |
-| `media_tasks` | 媒体生成任务历史 |
-| `llm_models` | 多模型配置 |
+| `config.json` | 键值配置（主题、保存路径、API Key、多模型配置） |
+| `mcp.json` | 兼容 Claude Desktop / Cursor 标准的 MCP 外部连接器配置 |
+| `skills/` | 本地声明式技能扩展库 (Prompt 规范) |
+| `memory/` | Agent 长期记忆库 (`MEMORY.md` 索引 + 知识文档) |
+| `sessions/` | 会话与消息持久化、附件图片与输出产物 |
 
 预置默认模型：
 
 | 模型 ID | 类型 |
 |---------|------|
-| `agnes-2.0-flash` | chat |
-| `agnes-image-2.1-flash` | image |
-| `agnes-video-v2.0` | video |
+| `gpt-4o` | chat (OpenAI 协议兼容) |
+| `claude-3-5-sonnet` | chat (Anthropic API / 代理兼容) |
+| `qwen2.5-coder:7b` | chat (Ollama 本地私有化) |
 
 ---
 

@@ -3,8 +3,7 @@ const path = require("path");
 const os = require("os");
 
 const USER_HOME = os.homedir();
-const LEGACY_AGNES_HOME = path.join(USER_HOME, ".agnes");
-let OMCX_HOME = process.env.OMCX_HOME || process.env.AGNES_HOME || path.join(USER_HOME, ".omcx");
+let OMCX_HOME = process.env.OMCX_HOME || path.join(USER_HOME, ".omcx");
 let CONFIG_FILE = path.join(OMCX_HOME, "config.json");
 let MCP_FILE = path.join(OMCX_HOME, "mcp.json");
 let SKILLS_DIR = path.join(OMCX_HOME, "skills");
@@ -20,22 +19,6 @@ function updatePaths(newRoot) {
   MEMORY_DIR = path.join(OMCX_HOME, "memory");
   SESSIONS_DIR = path.join(OMCX_HOME, "sessions");
   SESSIONS_INDEX_FILE = path.join(SESSIONS_DIR, "index.json");
-}
-
-/**
- * 平滑迁移旧版本 ~/.agnes 数据至全新的 ~/.omcx
- */
-function migrateFromLegacyAgnes() {
-  try {
-    if (!fs.existsSync(OMCX_HOME) && fs.existsSync(LEGACY_AGNES_HOME)) {
-      console.log(`[storageService] 检测到旧版本数据目录 ${LEGACY_AGNES_HOME}，正在平滑迁移至 ${OMCX_HOME}...`);
-      ensureDir(OMCX_HOME);
-      fs.cpSync(LEGACY_AGNES_HOME, OMCX_HOME, { recursive: true });
-      console.log(`[storageService] 数据平滑迁移完成！已保留全部历史会话、模型配置与密钥。`);
-    }
-  } catch (err) {
-    console.error(`[storageService] 迁移旧版本数据失败:`, err.message);
-  }
 }
 
 /**
@@ -93,11 +76,9 @@ function writeJsonSafe(filePath, data) {
 }
 
 /**
- * 初始化全局 ~/.omcx 目录结构与默认配置文件（带旧版本平滑迁移）
+ * 初始化全局 ~/.omcx 目录结构与默认配置文件
  */
 function initStorage() {
-  migrateFromLegacyAgnes();
-
   ensureDir(OMCX_HOME);
   ensureDir(SKILLS_DIR);
   ensureDir(MEMORY_DIR);
@@ -182,7 +163,7 @@ tools: [read_file, search_code, list_directory]
   // 4. 初始化 Memory
   const memoryIndexPath = path.join(MEMORY_DIR, "MEMORY.md");
   if (!fs.existsSync(memoryIndexPath)) {
-    const memoryIndexContent = `# Agnes AI Agent 记忆库索引
+    const memoryIndexContent = `# OMCX Agent 记忆库索引
 
 - [用户编码偏好与技术栈约定](user_profile.md)
 `;
@@ -534,18 +515,12 @@ function getMcpServers(workDir = null) {
   const globalMcp = readJsonSafe(MCP_FILE, { mcpServers: {} });
   let servers = { ...(globalMcp.mcpServers || {}) };
 
-  // 若存在项目级 .omcx/mcp.json 或旧版 .agnes/mcp.json，就地合并
+  // 若存在项目级 .omcx/mcp.json，就地合并
   if (workDir) {
-    const projectMcpCandidates = [
-      path.join(workDir, ".omcx", "mcp.json"),
-      path.join(workDir, ".agnes", "mcp.json"),
-    ];
-    for (const projectMcpFile of projectMcpCandidates) {
-      if (fs.existsSync(projectMcpFile)) {
-        const projectMcp = readJsonSafe(projectMcpFile, { mcpServers: {} });
-        servers = { ...servers, ...(projectMcp.mcpServers || {}) };
-        break;
-      }
+    const projectMcpFile = path.join(workDir, ".omcx", "mcp.json");
+    if (fs.existsSync(projectMcpFile)) {
+      const projectMcp = readJsonSafe(projectMcpFile, { mcpServers: {} });
+      servers = { ...servers, ...(projectMcp.mcpServers || {}) };
     }
   }
 
@@ -686,7 +661,6 @@ function getSkills(workDir = null) {
   const globalDirs = [
     path.join(USER_HOME, ".agents", "skills"),
     path.join(USER_HOME, ".omcx", "skills"),
-    path.join(USER_HOME, ".agnes", "skills"),
   ];
 
   for (const dir of globalDirs) {
@@ -703,7 +677,6 @@ function getSkills(workDir = null) {
     const projectDirs = [
       path.join(workDir, ".agents", "skills"),
       path.join(workDir, ".omcx", "skills"),
-      path.join(workDir, ".agnes", "skills"),
     ];
 
     for (const dir of projectDirs) {
@@ -746,27 +719,21 @@ function getMemories(workDir = null) {
 
   // 项目级记忆
   if (workDir) {
-    const memDirCandidates = [
-      path.join(workDir, ".omcx", "memory"),
-      path.join(workDir, ".agnes", "memory"),
-    ];
-    for (const projMemDir of memDirCandidates) {
-      if (fs.existsSync(projMemDir)) {
-        const files = fs.readdirSync(projMemDir);
-        for (const file of files) {
-          if (file.endsWith(".md") && file !== "MEMORY.md") {
-            const fp = path.join(projMemDir, file);
-            const content = fs.readFileSync(fp, "utf-8");
-            memories.push({
-              id: `project:${file}`,
-              name: file.replace(/\.md$/, ""),
-              path: fp,
-              content,
-              scope: "project",
-            });
-          }
+    const projMemDir = path.join(workDir, ".omcx", "memory");
+    if (fs.existsSync(projMemDir)) {
+      const files = fs.readdirSync(projMemDir);
+      for (const file of files) {
+        if (file.endsWith(".md") && file !== "MEMORY.md") {
+          const fp = path.join(projMemDir, file);
+          const content = fs.readFileSync(fp, "utf-8");
+          memories.push({
+            id: `project:${file}`,
+            name: file.replace(/\.md$/, ""),
+            path: fp,
+            content,
+            scope: "project",
+          });
         }
-        break;
       }
     }
   }
@@ -806,19 +773,13 @@ function getMemoryIndex(workDir) {
   }
 
   if (workDir) {
-    const projectIndexCandidates = [
-      path.join(workDir, ".omcx", "memory", "MEMORY.md"),
-      path.join(workDir, ".agnes", "memory", "MEMORY.md"),
-    ];
-    for (const projectIndex of projectIndexCandidates) {
-      if (fs.existsSync(projectIndex)) {
-        indexes.push({
-          scope: "project",
-          path: projectIndex,
-          content: fs.readFileSync(projectIndex, "utf-8"),
-        });
-        break;
-      }
+    const projectIndex = path.join(workDir, ".omcx", "memory", "MEMORY.md");
+    if (fs.existsSync(projectIndex)) {
+      indexes.push({
+        scope: "project",
+        path: projectIndex,
+        content: fs.readFileSync(projectIndex, "utf-8"),
+      });
     }
   }
 
@@ -951,7 +912,6 @@ function addRecentProject(proj) {
 
 module.exports = {
   OMCX_HOME,
-  AGNES_HOME: OMCX_HOME,
   initStorage,
   getAllConfig,
   getConfig,

@@ -232,7 +232,7 @@ function buildWorkspaceSection(matchedWorkspace, workDir) {
     return `【用户选定的目标工作空间: ${matchedWorkspace.name}】
 挂载源文件夹列表:
 ${folderLines}
-重要约束：用户当前询问、分析和修改的代码目标正是上述文件夹！所有工具调用 (list_directory, search_code, read_file, edit_file) 必须严格限定在上述目录内！严禁分析客户端软件自身的目录 (/opt/apps/agnesAI)！`;
+重要约束：用户当前询问、分析和修改的代码目标正是上述文件夹！所有工具调用 (list_directory, search_code, read_file, edit_file) 必须严格限定在上述目录内！严禁分析客户端软件自身的源码目录！`;
   }
 
   if (workDir) {

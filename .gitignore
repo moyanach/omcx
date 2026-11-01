@@ -1,7 +1,5 @@
-# Sensitive — Agnes API key
+# Sensitive keys & local configs
 key.txt
-
-# 用户本地配置（模型选择、模型列表缓存）
 config.json
 dist/
 release/
@@ -32,7 +30,5 @@ CLAUDE.md
 AGENTS.md
 
 .workbuddy/
-.agnes/
-.agnes_local/
 .omcx/
 .omcx_local/
