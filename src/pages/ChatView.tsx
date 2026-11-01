@@ -42,7 +42,7 @@ const ChatView: React.FC = () => {
   } = useChatStore();
 
   const { activeView } = useAppStore();
-  const { isGenerating, sendMessage, retryMessage } = useStreamChat();
+  const { isGenerating, sendMessage, retryMessage, cancelMessage } = useStreamChat();
 
   const [input, setInput] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
@@ -361,6 +361,7 @@ const ChatView: React.FC = () => {
                   attachments={attachments}
                   onChangeAttachments={setAttachments}
                   onNotify={showToast}
+                  onCancel={cancelMessage}
                   selectedModel={selectedModel}
                   chatModels={availableChatModels}
                   onChangeModel={(val) => {

@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   executeTool: (name, args) => ipcRenderer.invoke("execute-tool", { name, args }),
 
   respondPermission: (id, allow) => ipcRenderer.send("chat-permission-response", { id, allow }),
+  cancelChat: (sessionId) => ipcRenderer.send("chat-cancel", sessionId),
 
   // ─── 流式 Agent 调用 ───────────────────────────────
   streamChat: (

@@ -166,7 +166,10 @@ export function useStreamChat() {
             const durationMs = Date.now() - startTime;
             const durationFormatted = formatDuration(durationMs);
             const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
-            const finalContent = accumulatedContent || endPayload?.content || "";
+            const finalContent =
+              accumulatedContent ||
+              endPayload?.content ||
+              (endPayload?.metadata?.cancelled ? "已停止生成。" : "");
 
             const finalMeta = {
               ...(typeof endMeta === "object" && endMeta ? endMeta : {}),
@@ -281,7 +284,10 @@ export function useStreamChat() {
             const durationMs = Date.now() - startTime;
             const durationFormatted = formatDuration(durationMs);
             const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
-            const finalContent = accumulatedContent || endPayload?.content || "";
+            const finalContent =
+              accumulatedContent ||
+              endPayload?.content ||
+              (endPayload?.metadata?.cancelled ? "已停止生成。" : "");
 
             const finalMeta = {
               ...(typeof endMeta === "object" && endMeta ? endMeta : {}),
@@ -349,5 +355,12 @@ export function useStreamChat() {
     ],
   );
 
-  return { isGenerating, sendMessage, retryMessage };
+  const cancelMessage = useCallback(() => {
+    if (!activeSessionId) return;
+    if (window.electronAPI?.cancelChat) {
+      window.electronAPI.cancelChat(activeSessionId);
+    }
+  }, [activeSessionId]);
+
+  return { isGenerating, sendMessage, retryMessage, cancelMessage };
 }

@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Paperclip,
   X,
+  Square,
   FileSpreadsheet,
   FileCode,
   FileText,
@@ -50,6 +51,9 @@ interface Props {
   attachments?: DraftChatAttachment[];
   onChangeAttachments?: (next: DraftChatAttachment[]) => void;
   onNotify?: (message: string) => void;
+
+  // 中断当前生成任务
+  onCancel?: () => void;
 }
 
 const MENTION_TRIGGER = /(?:^|[\s(（[【"'`\u4e00-\u9fa5])@([^\s@]*)$/;
@@ -68,6 +72,7 @@ const MessageInput: React.FC<Props> = ({
   attachments = [] as DraftChatAttachment[],
   onChangeAttachments,
   onNotify,
+  onCancel,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -319,6 +324,13 @@ const MessageInput: React.FC<Props> = ({
       return;
     }
 
+    // 生成中按 Esc 直接中断当前任务
+    if (e.key === "Escape" && isGenerating) {
+      e.preventDefault();
+      onCancel?.();
+      return;
+    }
+
     if (e.key === "Enter") {
       if (e.shiftKey) return;
       e.preventDefault();
@@ -521,24 +533,31 @@ const MessageInput: React.FC<Props> = ({
             )}
           </div>
 
-          {/* 右侧发送按钮 */}
+          {/* 右侧发送 / 停止按钮 */}
           <div>
-            <button
-              onClick={onSend}
-              disabled={!value.trim() || isGenerating || disabled}
-              className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all ${
-                value.trim() && !isGenerating && !disabled
-                  ? "bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/30 active:scale-95 cursor-pointer"
-                  : "bg-[#252525] text-neutral-500 cursor-not-allowed border border-[#303030]"
-              }`}
-              title="发送 (Enter)"
-            >
-              {isGenerating ? (
-                <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
+            {isGenerating ? (
+              <button
+                type="button"
+                onClick={() => onCancel?.()}
+                className="w-8 h-8 rounded-xl flex items-center justify-center bg-rose-500/15 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 hover:border-rose-500 transition-all shadow-md shadow-rose-600/10 active:scale-95 cursor-pointer"
+                title="停止生成 (Esc)"
+              >
+                <Square size={11} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                onClick={onSend}
+                disabled={!value.trim() || disabled}
+                className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all ${
+                  value.trim() && !disabled
+                    ? "bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/30 active:scale-95 cursor-pointer"
+                    : "bg-[#252525] text-neutral-500 cursor-not-allowed border border-[#303030]"
+                }`}
+                title="发送 (Enter)"
+              >
                 <Send size={14} className={value.trim() ? "translate-x-0.5 -translate-y-0.5" : ""} />
-              )}
-            </button>
+              </button>
+            )}
           </div>
         </div>
       </div>

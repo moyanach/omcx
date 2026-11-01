@@ -935,6 +935,21 @@ app.whenReady().then(() => {
     }
   });
 
+  // --- 活动流式会话中断与取消管理器 ---
+  const activeStreamSessions = new Map();
+  ipcMain.on("chat-cancel", (event, sessionId) => {
+    const active = activeStreamSessions.get(sessionId);
+    if (active) {
+      active.cancelled = true;
+      try {
+        active.abortController.abort();
+      } catch (e) {
+        // 忽略中断异常
+      }
+      console.log(`[chat-cancel] session ${sessionId} cancellation requested`);
+    }
+  });
+
   // --- 流式聊天与 Agent 执行循环 ---
   ipcMain.on(
     "chat-request",
@@ -987,6 +1002,18 @@ app.whenReady().then(() => {
       toolRegistry.setContext("workDir", sessionWorkDir);
       toolRegistry.setContext("allowedFolders", allowedFolders);
       toolRegistry.setContext("checkPermission", checkPermissionFn);
+
+      // 注册当前会话的中断控制器与流式状态（声明在 try 外部，便于 catch/finally 安全访问）
+      const sessionAbort = {
+        abortController: new AbortController(),
+        cancelled: false,
+      };
+      activeStreamSessions.set(sessionId, sessionAbort);
+
+      const initialTodos = [];
+      let fullGeneratedText = "";
+      let toolRound = 0;
+      const executedToolSteps = [];
 
       try {
         const headers = {
@@ -1041,8 +1068,6 @@ app.whenReady().then(() => {
 
         const memoryIndex = storageService.getMemoryIndex(sessionWorkDir);
         const projectRules = storageService.getProjectInstructions(sessionWorkDir);
-
-        const initialTodos = [];
 
         // 自动装配用户通过 @ 显式引用的技能、MCP 与文件/目录上下文
         const mentionUserMsg = apiMessages.slice().reverse().find((m) => m.role === "user");
@@ -1226,9 +1251,6 @@ app.whenReady().then(() => {
         event.reply(`chat-stream-context-metrics-${sessionId}`, initMetrics);
 
         const MAX_TOOL_ROUNDS = Number(storageService.getConfig("max_tool_rounds")) || 5000;
-        let toolRound = 0;
-        let fullGeneratedText = "";
-        const executedToolSteps = [];
 
         function sendData(delta) {
           fullGeneratedText += delta;
@@ -1248,6 +1270,7 @@ app.whenReady().then(() => {
           const resp = await fetch(`${modelBaseUrl}/chat/completions`, {
             method: "POST",
             headers,
+            signal: sessionAbort.abortController.signal,
             body: JSON.stringify(requestBodyFinal),
           });
 
@@ -1264,6 +1287,14 @@ app.whenReady().then(() => {
           let usage = null;
 
           while (true) {
+            if (sessionAbort.cancelled) {
+              try {
+                await reader.cancel();
+              } catch (e) {
+                // 忽略取消读取异常
+              }
+              break;
+            }
             const { done, value } = await reader.read();
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
@@ -1327,6 +1358,8 @@ app.whenReady().then(() => {
             requestBody.tool_choice = "auto";
           }
 
+          if (sessionAbort.cancelled) break;
+
           const result = await (async () => {
             await maybeCompact("preflight");
             try {
@@ -1339,6 +1372,8 @@ app.whenReady().then(() => {
             }
           })();
 
+          if (sessionAbort.cancelled) break;
+
           if (!enableTools || result.toolCalls.length === 0) {
             break;
           }
@@ -1346,6 +1381,8 @@ app.whenReady().then(() => {
           toolRound++;
 
           for (const tc of result.toolCalls) {
+            if (sessionAbort.cancelled) break;
+
             let args = {};
             try {
               args = JSON.parse(tc.function.arguments);
@@ -1425,7 +1462,8 @@ app.whenReady().then(() => {
         }
 
         // 若大模型在工具调用结束后未给出最终文本回答，强制进行最终一轮总结输出
-        if (!fullGeneratedText.trim() && toolRound > 0) {
+        // 注意：用户已主动取消时不再发起总结请求
+        if (!sessionAbort.cancelled && !fullGeneratedText.trim() && toolRound > 0) {
           apiMessages.push({
             role: "user",
             content: "请基于以上工具执行获取到的全部信息、代码与事实，给出条理清晰、完整详尽的总结分析与答复。",
@@ -1453,6 +1491,7 @@ app.whenReady().then(() => {
         event.reply(`chat-stream-end-${sessionId}`, {
           content: fullGeneratedText,
           metadata: {
+            cancelled: !!sessionAbort.cancelled,
             toolRounds: toolRound,
             toolSteps: executedToolSteps,
             todos: initialTodos,
@@ -1483,8 +1522,27 @@ app.whenReady().then(() => {
           // 忽略旁路任务触发异常
         }
       } catch (err) {
-        console.error(`[chat-stream error ${sessionId}]`, err);
-        event.reply(`chat-stream-error-${sessionId}`, err.message);
+        if (err.name === "AbortError" || sessionAbort.cancelled) {
+          console.log(`[chat-stream] session ${sessionId} cancelled by user`);
+          try {
+            event.reply(`chat-stream-end-${sessionId}`, {
+              content: fullGeneratedText,
+              metadata: {
+                cancelled: true,
+                toolRounds: toolRound,
+                toolSteps: executedToolSteps,
+                todos: initialTodos,
+              },
+            });
+          } catch (e) {
+            // 忽略已关闭窗口的 reply 异常
+          }
+        } else {
+          console.error(`[chat-stream error ${sessionId}]`, err);
+          event.reply(`chat-stream-error-${sessionId}`, err.message);
+        }
+      } finally {
+        activeStreamSessions.delete(sessionId);
       }
     }
   );
