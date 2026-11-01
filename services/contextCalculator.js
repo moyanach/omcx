@@ -26,6 +26,25 @@ function estimateTokens(text) {
 }
 
 /**
+ * 估算消息内容 Token（兼容 OpenAI 多模态 content 数组）
+ */
+function estimateContentTokens(content) {
+  if (Array.isArray(content)) {
+    let tokens = 0;
+    for (const part of content) {
+      if (!part) continue;
+      if (part.type === "text") {
+        tokens += estimateTokens(part.text || "");
+      } else if (part.type === "image_url") {
+        tokens += 1500;
+      }
+    }
+    return tokens;
+  }
+  return estimateTokens(content);
+}
+
+/**
  * 计算完整的上下文分布数据
  * @param {object} params
  * @param {Array} params.messages - 历史对话消息
@@ -44,7 +63,7 @@ function calculateContextMetrics({
   // 1. Messages Token
   let messagesTokens = 0;
   for (const msg of messages) {
-    messagesTokens += estimateTokens(msg.content);
+    messagesTokens += estimateContentTokens(msg.content);
     if (msg.tool_calls) {
       messagesTokens += estimateTokens(msg.tool_calls);
     }

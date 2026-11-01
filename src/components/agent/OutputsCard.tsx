@@ -44,7 +44,7 @@ export const OutputsCard: React.FC = () => {
   };
 
   return (
-    <div className='bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl overflow-hidden transition-all duration-200'>
+    <div className='bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl overflow-hidden transition-all duration-200 select-none titlebar-no-drag'>
       {/* 头部标题与折叠开关 */}
       <button
         onClick={() => setIsOpen(!isOpen)}
@@ -58,9 +58,9 @@ export const OutputsCard: React.FC = () => {
         </div>
       </button>
 
-      {/* 折叠内容 */}
+      {/* 折叠内容 (支持产物较多时的局部顺畅滚动) */}
       {isOpen && (
-        <div className='px-4 pb-3.5 pt-0.5 flex flex-col gap-1.5'>
+        <div className='px-4 pb-3.5 pt-0.5 flex flex-col gap-1.5 max-h-[140px] overflow-y-auto custom-scrollbar pr-1 overscroll-contain'>
           {displayOutputs.map((item) => (
             <div
               key={item.id}

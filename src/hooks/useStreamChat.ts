@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { useChatStore } from "../stores/chatStore";
+import { useChatStore, type ChatAttachment } from "../stores/chatStore";
 
 interface StreamCallbacks {
   onToolStatus?: (status: {
@@ -9,6 +9,30 @@ interface StreamCallbacks {
     result?: any;
     callId?: string;
   }) => void;
+  onPermissionRequest?: (perm: {
+    id: string;
+    path: string;
+    action: string;
+    reason: string;
+  }) => void;
+  onTodosUpdate?: (todos: any[]) => void;
+  onCompaction?: (data: {
+    beforeTokens: number;
+    afterTokens: number;
+    keptMessages: number;
+    summarizedMessages: number;
+    at: number;
+  }) => void;
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  return `${mins}m ${secs}s`;
 }
 
 function parseErrorDetails(err: string) {
@@ -87,16 +111,21 @@ export function useStreamChat() {
       selectedModel: string,
       enableTools: boolean,
       callbacks?: StreamCallbacks,
+      attachments?: ChatAttachment[],
     ) => {
       if (!activeSessionId || !text.trim()) return;
 
       setIsGenerating(true);
+      const startTime = Date.now();
 
       const userMsg = {
         id: crypto.randomUUID(),
         role: "user" as const,
         content: text.trim(),
-        createdAt: Date.now(),
+        createdAt: startTime,
+        ...(attachments && attachments.length > 0
+          ? { metadata: { attachments } }
+          : {}),
       };
       await addMessage(activeSessionId, userMsg);
 
@@ -110,12 +139,16 @@ export function useStreamChat() {
       await addMessage(activeSessionId, assistantMsg, true);
 
       const currentMsgs = messages[activeSessionId] || [];
-      const contextMsgs = [...currentMsgs, userMsg].map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      const contextMsgs = [...currentMsgs, userMsg].map((m) => {
+        const attachmentList = m.metadata?.attachments;
+        return Array.isArray(attachmentList) && attachmentList.length > 0
+          ? { role: m.role, content: m.content, attachments: attachmentList }
+          : { role: m.role, content: m.content };
+      });
 
       let accumulatedContent = "";
+      const currentSession = useChatStore.getState().sessions.find((s) => s.id === activeSessionId);
+      const currentWorkDir = currentSession?.workDir || null;
 
       if (window.electronAPI?.streamChat) {
         window.electronAPI.streamChat(
@@ -123,20 +156,32 @@ export function useStreamChat() {
           contextMsgs,
           selectedModel,
           enableTools,
+          currentWorkDir,
           (delta: string) => {
             accumulatedContent += delta;
             appendMessageDelta(activeSessionId, assistantMsgId, delta);
           },
-          (metadata: any) => {
+          (endPayload: any) => {
             setIsGenerating(false);
+            const durationMs = Date.now() - startTime;
+            const durationFormatted = formatDuration(durationMs);
+            const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
+            const finalContent = accumulatedContent || endPayload?.content || "";
+
+            const finalMeta = {
+              ...(typeof endMeta === "object" && endMeta ? endMeta : {}),
+              durationMs,
+              durationFormatted,
+            };
+
             saveMessageToDb(activeSessionId, {
               id: assistantMsgId,
               role: "assistant",
-              content: accumulatedContent,
+              content: finalContent,
               createdAt: Date.now(),
-              metadata: metadata?.length > 0 ? metadata : null,
+              metadata: finalMeta,
             });
-            updateMessageMetadata(activeSessionId, assistantMsgId, metadata);
+            updateMessageMetadata(activeSessionId, assistantMsgId, finalMeta);
           },
           (err: string) => {
             const errorContent = formatErrorContent(err);
@@ -158,6 +203,17 @@ export function useStreamChat() {
           },
           () => {
             refreshOutputs(activeSessionId);
+            const currentSession = useChatStore.getState().sessions.find((s) => s.id === activeSessionId);
+            useChatStore.getState().refreshGitStatus(currentSession?.workDir);
+          },
+          (permData: any) => {
+            callbacks?.onPermissionRequest?.(permData);
+          },
+          (todos: any) => {
+            callbacks?.onTodosUpdate?.(todos);
+          },
+          (data: any) => {
+            callbacks?.onCompaction?.(data);
           }
         );
       } else {
@@ -185,6 +241,7 @@ export function useStreamChat() {
     ) => {
       if (!activeSessionId || !window.electronAPI?.streamChat) return;
       setIsGenerating(true);
+      const startTime = Date.now();
 
       try {
         await truncateMessages(activeSessionId, msgId);
@@ -198,32 +255,48 @@ export function useStreamChat() {
         };
         await addMessage(activeSessionId, assistantMsg, true);
 
-        const keptMsgs = (messages[activeSessionId] || []).map((m) => ({
-          role: m.role,
-          content: m.content,
-        }));
+        const keptMsgs = (messages[activeSessionId] || []).map((m) => {
+          const attachmentList = m.metadata?.attachments;
+          return Array.isArray(attachmentList) && attachmentList.length > 0
+            ? { role: m.role, content: m.content, attachments: attachmentList }
+            : { role: m.role, content: m.content };
+        });
 
         let accumulatedContent = "";
+        const currentSession = useChatStore.getState().sessions.find((s) => s.id === activeSessionId);
+        const currentWorkDir = currentSession?.workDir || null;
 
         window.electronAPI.streamChat(
           activeSessionId,
           keptMsgs,
           selectedModel,
           enableTools,
+          currentWorkDir,
           (delta: string) => {
             accumulatedContent += delta;
             appendMessageDelta(activeSessionId, assistantMsgId, delta);
           },
-          (metadata: any) => {
+          (endPayload: any) => {
             setIsGenerating(false);
+            const durationMs = Date.now() - startTime;
+            const durationFormatted = formatDuration(durationMs);
+            const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
+            const finalContent = accumulatedContent || endPayload?.content || "";
+
+            const finalMeta = {
+              ...(typeof endMeta === "object" && endMeta ? endMeta : {}),
+              durationMs,
+              durationFormatted,
+            };
+
             saveMessageToDb(activeSessionId, {
               id: assistantMsgId,
               role: "assistant",
-              content: accumulatedContent,
+              content: finalContent,
               createdAt: Date.now(),
-              metadata: metadata?.length > 0 ? metadata : null,
+              metadata: finalMeta,
             });
-            updateMessageMetadata(activeSessionId, assistantMsgId, metadata);
+            updateMessageMetadata(activeSessionId, assistantMsgId, finalMeta);
           },
           (err: string) => {
             const errorContent = formatErrorContent(err);
@@ -245,6 +318,17 @@ export function useStreamChat() {
           },
           () => {
             refreshOutputs(activeSessionId);
+            const currentSession = useChatStore.getState().sessions.find((s) => s.id === activeSessionId);
+            useChatStore.getState().refreshGitStatus(currentSession?.workDir);
+          },
+          (permData: any) => {
+            callbacks?.onPermissionRequest?.(permData);
+          },
+          (todos: any) => {
+            callbacks?.onTodosUpdate?.(todos);
+          },
+          (data: any) => {
+            callbacks?.onCompaction?.(data);
           }
         );
       } catch (err) {

@@ -27,27 +27,17 @@ function getProjectRoot() {
 const PROJECT_ROOT = getProjectRoot();
 const DEFAULT_ROOT = PROJECT_ROOT;
 
-function resolveRoot(workDir) {
-  if (workDir && fs.existsSync(workDir)) {
-    return path.resolve(workDir);
-  }
-  return DEFAULT_ROOT;
-}
+const { resolveWorkspacePath } = require("./pathResolver");
 
-function isPathAllowed(targetPath, rootPath) {
-  const resolved = path.resolve(targetPath);
-  const resolvedRoot = path.resolve(rootPath);
-  const relativePath = path.relative(resolvedRoot, resolved);
-  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
-}
-
-function resolveSafePath(userPath, workDir) {
-  const rootPath = resolveRoot(workDir);
-  const target = path.resolve(rootPath, userPath);
-  if (!isPathAllowed(target, rootPath)) {
-    throw new Error(`路径 "${userPath}" 超出工作目录范围（${rootPath}），不允许访问`);
+async function checkSafePath(userPath, workDir, allowedFolders, checkPermissionFn, actionDesc = "访问") {
+  const { resolvedPath, isExternal } = resolveWorkspacePath(userPath, workDir, allowedFolders);
+  if (isExternal && typeof checkPermissionFn === "function") {
+    const isAllowed = await checkPermissionFn(resolvedPath, actionDesc);
+    if (!isAllowed) {
+      throw new Error(`用户已拒绝授权访问工作空间外部路径: ${resolvedPath}`);
+    }
   }
-  return target;
+  return resolvedPath;
 }
 
 // ─── 工具: read_file ─────────────────────────────────────────
@@ -64,8 +54,13 @@ class ReadFileTool extends StructuredTool {
     });
   }
 
-  async _call({ path: filePath, maxLines = 200, offset = 0, __workDir }) {
-    const targetPath = resolveSafePath(filePath, __workDir);
+  async _call({ path: filePath, maxLines = 200, offset = 0, __workDir, __allowedFolders, __checkPermission }) {
+    let targetPath;
+    try {
+      targetPath = await checkSafePath(filePath, __workDir, __allowedFolders, __checkPermission, "读取");
+    } catch (err) {
+      return JSON.stringify({ success: false, error: err.message });
+    }
 
     if (!fs.existsSync(targetPath)) {
       return JSON.stringify({ success: false, error: `文件不存在: ${filePath}` });
@@ -125,8 +120,13 @@ class WriteFileTool extends StructuredTool {
     });
   }
 
-  async _call({ path: filePath, content, description, __workDir }) {
-    const targetPath = resolveSafePath(filePath, __workDir);
+  async _call({ path: filePath, content, description, __workDir, __allowedFolders, __checkPermission }) {
+    let targetPath;
+    try {
+      targetPath = await checkSafePath(filePath, __workDir, __allowedFolders, __checkPermission, "写入/创建");
+    } catch (err) {
+      return JSON.stringify({ success: false, error: err.message });
+    }
 
     // 检查父目录是否存在
     const parentDir = path.dirname(targetPath);
@@ -167,9 +167,15 @@ class ListDirectoryTool extends StructuredTool {
     });
   }
 
-  async _call({ path: dirPath = ".", depth = 1, __workDir }) {
-    const rootPath = resolveRoot(__workDir);
-    const targetPath = resolveSafePath(dirPath, __workDir);
+  async _call({ path: dirPath = ".", depth = 1, __workDir, __allowedFolders, __checkPermission }) {
+    let targetPath;
+    try {
+      targetPath = await checkSafePath(dirPath, __workDir, __allowedFolders, __checkPermission, "浏览目录");
+    } catch (err) {
+      return JSON.stringify({ success: false, error: err.message });
+    }
+
+    const rootPath = targetPath;
 
     if (!fs.existsSync(targetPath)) {
       return JSON.stringify({ success: false, error: `目录不存在: ${dirPath}` });
@@ -234,9 +240,12 @@ class SearchCodeTool extends StructuredTool {
     });
   }
 
-  async _call({ query, include, maxResults = 20, contextLines = 0, __workDir }) {
+  async _call({ query, include, maxResults = 20, contextLines = 0, __workDir, __allowedFolders }) {
     try {
-      const rootPath = resolveRoot(__workDir);
+      const searchTargets = Array.isArray(__allowedFolders) && __allowedFolders.length > 0
+        ? __allowedFolders.map((f) => `"${path.resolve(f)}"`).join(" ")
+        : `"${path.resolve(__workDir || DEFAULT_ROOT)}"`;
+
       let cmd = `rg -n --no-heading`;
       if (contextLines > 0) {
         cmd += ` -C ${contextLines}`;
@@ -246,7 +255,7 @@ class SearchCodeTool extends StructuredTool {
         cmd += ` -g "${include}"`;
       }
       cmd += ` --glob '!node_modules' --glob '!.git' --glob '!dist'`;
-      cmd += ` "${rootPath}"`;
+      cmd += ` ${searchTargets}`;
 
       const stdout = execSync(cmd, {
         encoding: "utf-8",

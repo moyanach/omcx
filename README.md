@@ -1,8 +1,8 @@
-# Agnes AI Desktop
+# OMCX Desktop
 
-一个基于 Electron + React 的 macOS AI 桌面客户端，集成 **AI 聊天对话**、**AI 图像生成**、**AI 视频生成** 三大核心能力，支持 AI Agent 工具调用。
+基于 Electron + React 的专业 AI Coding Agent 桌面客户端，专注于大型复杂项目的持续迭代、代码审查与高成功率自主功能实现。
 
-> 包名: `moyana-ai-desktop` · 版本: v2.0.0 · App ID: `com.moyana.ai.desktop`
+> 包名: `omcx-desktop` · 版本: v2.0.0 · App ID: `com.omcx.desktop`
 
 ---
 

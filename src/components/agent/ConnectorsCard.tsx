@@ -27,7 +27,7 @@ export const ConnectorsCard: React.FC = () => {
   ];
 
   return (
-    <div className='bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl overflow-hidden transition-all duration-200'>
+    <div className='bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl overflow-hidden transition-all duration-200 select-none titlebar-no-drag'>
       {/* 头部标题与折叠开关 */}
       <button
         onClick={() => setIsOpen(!isOpen)}
@@ -72,7 +72,7 @@ export const ConnectorsCard: React.FC = () => {
 
           {/* 底部快速查看提示 */}
           <div className='pt-1 flex items-center justify-between text-[11px] text-neutral-400 border-t border-[#262626] mt-1'>
-            <span>来源: ~/.agnes/mcp.json</span>
+            <span>来源: ~/.omcx/mcp.json</span>
             <span className='hover:text-neutral-300 cursor-pointer flex items-center gap-0.5'>
               管理 <ExternalLink size={10} />
             </span>

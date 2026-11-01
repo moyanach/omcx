@@ -3,22 +3,39 @@ const path = require("path");
 const os = require("os");
 
 const USER_HOME = os.homedir();
-let AGNES_HOME = process.env.AGNES_HOME || path.join(USER_HOME, ".agnes");
-let CONFIG_FILE = path.join(AGNES_HOME, "config.json");
-let MCP_FILE = path.join(AGNES_HOME, "mcp.json");
-let SKILLS_DIR = path.join(AGNES_HOME, "skills");
-let MEMORY_DIR = path.join(AGNES_HOME, "memory");
-let SESSIONS_DIR = path.join(AGNES_HOME, "sessions");
+const LEGACY_AGNES_HOME = path.join(USER_HOME, ".agnes");
+let OMCX_HOME = process.env.OMCX_HOME || process.env.AGNES_HOME || path.join(USER_HOME, ".omcx");
+let CONFIG_FILE = path.join(OMCX_HOME, "config.json");
+let MCP_FILE = path.join(OMCX_HOME, "mcp.json");
+let SKILLS_DIR = path.join(OMCX_HOME, "skills");
+let MEMORY_DIR = path.join(OMCX_HOME, "memory");
+let SESSIONS_DIR = path.join(OMCX_HOME, "sessions");
 let SESSIONS_INDEX_FILE = path.join(SESSIONS_DIR, "index.json");
 
 function updatePaths(newRoot) {
-  AGNES_HOME = newRoot;
-  CONFIG_FILE = path.join(AGNES_HOME, "config.json");
-  MCP_FILE = path.join(AGNES_HOME, "mcp.json");
-  SKILLS_DIR = path.join(AGNES_HOME, "skills");
-  MEMORY_DIR = path.join(AGNES_HOME, "memory");
-  SESSIONS_DIR = path.join(AGNES_HOME, "sessions");
+  OMCX_HOME = newRoot;
+  CONFIG_FILE = path.join(OMCX_HOME, "config.json");
+  MCP_FILE = path.join(OMCX_HOME, "mcp.json");
+  SKILLS_DIR = path.join(OMCX_HOME, "skills");
+  MEMORY_DIR = path.join(OMCX_HOME, "memory");
+  SESSIONS_DIR = path.join(OMCX_HOME, "sessions");
   SESSIONS_INDEX_FILE = path.join(SESSIONS_DIR, "index.json");
+}
+
+/**
+ * 平滑迁移旧版本 ~/.agnes 数据至全新的 ~/.omcx
+ */
+function migrateFromLegacyAgnes() {
+  try {
+    if (!fs.existsSync(OMCX_HOME) && fs.existsSync(LEGACY_AGNES_HOME)) {
+      console.log(`[storageService] 检测到旧版本数据目录 ${LEGACY_AGNES_HOME}，正在平滑迁移至 ${OMCX_HOME}...`);
+      ensureDir(OMCX_HOME);
+      fs.cpSync(LEGACY_AGNES_HOME, OMCX_HOME, { recursive: true });
+      console.log(`[storageService] 数据平滑迁移完成！已保留全部历史会话、模型配置与密钥。`);
+    }
+  } catch (err) {
+    console.error(`[storageService] 迁移旧版本数据失败:`, err.message);
+  }
 }
 
 /**
@@ -31,12 +48,12 @@ function ensureDir(dirPath) {
     }
   } catch (err) {
     if (err.code === "EPERM" || err.code === "EACCES") {
-      const defaultUserAgnes = path.join(USER_HOME, ".agnes");
-      const fallbackRoot = path.join(process.cwd(), ".agnes_local");
+      const defaultUserOmcx = path.join(USER_HOME, ".omcx");
+      const fallbackRoot = path.join(process.cwd(), ".omcx_local");
       console.warn(`[storageService] 访问 ${dirPath} 权限不足，回退到本地目录: ${fallbackRoot}`);
       updatePaths(fallbackRoot);
-      const targetPath = dirPath.startsWith(defaultUserAgnes)
-        ? dirPath.replace(defaultUserAgnes, fallbackRoot)
+      const targetPath = dirPath.startsWith(defaultUserOmcx)
+        ? dirPath.replace(defaultUserOmcx, fallbackRoot)
         : fallbackRoot;
       if (!fs.existsSync(targetPath)) {
         fs.mkdirSync(targetPath, { recursive: true });
@@ -76,10 +93,12 @@ function writeJsonSafe(filePath, data) {
 }
 
 /**
- * 初始化全局 ~/.agnes 目录结构与默认配置文件
+ * 初始化全局 ~/.omcx 目录结构与默认配置文件（带旧版本平滑迁移）
  */
 function initStorage() {
-  ensureDir(AGNES_HOME);
+  migrateFromLegacyAgnes();
+
+  ensureDir(OMCX_HOME);
   ensureDir(SKILLS_DIR);
   ensureDir(MEMORY_DIR);
   ensureDir(SESSIONS_DIR);
@@ -191,7 +210,7 @@ category: user_preference
     writeJsonSafe(SESSIONS_INDEX_FILE, []);
   }
 
-  console.log(`[storageService] 已就绪，根目录: ${AGNES_HOME}`);
+  console.log(`[storageService] 已就绪，根目录: ${OMCX_HOME}`);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -213,22 +232,75 @@ function setConfig(key, value) {
   return writeJsonSafe(CONFIG_FILE, cfg);
 }
 
+const VISION_MODEL_HINTS = [
+  "gpt-4o",
+  "gpt-4.1",
+  "gpt-4-turbo",
+  "gpt-4-vision",
+  "gpt-5",
+  "claude-3",
+  "claude-4",
+  "claude-sonnet",
+  "claude-opus",
+  "claude-haiku",
+  "gemini",
+  "glm-4v",
+  "glm-4.5v",
+  "glm-4.6v",
+  "qwen-vl",
+  "qwen2-vl",
+  "qwen2.5-vl",
+  "qwen3-vl",
+  "llava",
+  "pixtral",
+  "vision",
+  "internvl",
+  "minicpm-v",
+  "moondream",
+  "yi-vl",
+];
+
+function inferVisionSupport(modelId) {
+  const id = String(modelId || "").toLowerCase();
+  if (!id) return false;
+  return VISION_MODEL_HINTS.some((hint) => id.includes(hint));
+}
+
+function normalizeVisionFlag(model) {
+  if (typeof model?.supports_vision === "boolean") return model.supports_vision;
+  return inferVisionSupport(model?.model_id || model?.modelId || model?.name);
+}
+
 function getModels() {
   const cfg = getAllConfig();
-  return cfg.llm_models || [];
+  return (cfg.llm_models || []).map((model) => ({
+    ...model,
+    supports_vision: normalizeVisionFlag(model),
+  }));
 }
 
 function addModel(model) {
   const cfg = getAllConfig();
   if (!cfg.llm_models) cfg.llm_models = [];
+  const normalized = {
+    id: model.id,
+    model_id: model.model_id || model.modelId,
+    name: model.name || model.model_id || model.modelId,
+    type: model.type || "chat",
+    provider: model.provider || "openai",
+    base_url: model.base_url || model.baseUrl || "https://api.openai.com/v1",
+    api_key: model.api_key !== undefined ? model.api_key : (model.apiKey || ""),
+    context_limit: Number(model.context_limit || model.contextLimit) || 128000,
+    supports_vision: normalizeVisionFlag(model),
+  };
   const idx = cfg.llm_models.findIndex((m) => m.id === model.id);
   if (idx >= 0) {
-    cfg.llm_models[idx] = { ...cfg.llm_models[idx], ...model };
+    cfg.llm_models[idx] = { ...cfg.llm_models[idx], ...normalized };
   } else {
-    cfg.llm_models.push(model);
+    cfg.llm_models.push(normalized);
   }
   writeJsonSafe(CONFIG_FILE, cfg);
-  return { success: true };
+  return { success: true, model: normalized };
 }
 
 function deleteModel(modelId) {
@@ -252,28 +324,97 @@ function getSessionFilePath(sessionId) {
   return path.join(SESSIONS_DIR, `${sessionId}.json`);
 }
 
+function getSessionAttachmentsDir(sessionId) {
+  return path.join(SESSIONS_DIR, sessionId, "attachments");
+}
+
+function saveAttachmentBuffer(sessionId, id, ext, buffer) {
+  const dir = getSessionAttachmentsDir(sessionId);
+  ensureDir(dir);
+  const filePath = path.join(dir, `${id}.${ext}`);
+  fs.writeFileSync(filePath, buffer);
+  return { id, path: filePath, size: buffer.length };
+}
+
+function isSessionAttachmentPath(filePath) {
+  if (!filePath || typeof filePath !== "string") return false;
+  const resolved = path.resolve(filePath);
+  const root = path.resolve(SESSIONS_DIR);
+  const relative = path.relative(root, resolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+  const segments = relative.split(path.sep);
+  return segments.length >= 3 && segments[1] === "attachments";
+}
+
+function deleteAttachmentFile(filePath) {
+  if (!isSessionAttachmentPath(filePath)) {
+    return { success: false, error: "非法附件路径" };
+  }
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+function deleteSessionAttachments(sessionId) {
+  const sessionDir = path.join(SESSIONS_DIR, sessionId);
+  try {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+  } catch (err) {
+    console.error(`[storageService] 删除会话附件目录失败: ${err.message}`);
+  }
+}
+
 function saveSession(session) {
   const sessions = getSessions();
   const idx = sessions.findIndex((s) => s.id === session.id);
+  const existing = idx >= 0 ? sessions[idx] : {};
   const now = Date.now();
+
+  // 智能继承与兼容提取 work_dir (双向支持 work_dir 与 workDir，未传则 100% 继承已有值，绝不冲刷为 null)
+  let resolvedWorkDir = existing.work_dir || null;
+  if (session.work_dir !== undefined) {
+    resolvedWorkDir = session.work_dir || null;
+  } else if (session.workDir !== undefined) {
+    resolvedWorkDir = session.workDir || null;
+  }
+
+  // 智能继承 title
+  const resolvedTitle = session.title !== undefined ? (session.title || "新会话") : (existing.title || "新会话");
+
+  // 智能继承 model
+  const resolvedModel = session.model !== undefined ? (session.model || "") : (existing.model || "");
+
+  // 智能继承 archived
+  const resolvedArchived = session.archived !== undefined ? !!session.archived : !!existing.archived;
+
+  // 智能继承 title_source (default / generated / custom)
+  const resolvedTitleSource =
+    session.title_source !== undefined
+      ? session.title_source
+      : existing.title_source || "default";
 
   const sessionSummary = {
     id: session.id,
-    title: session.title || "新会话",
-    model: session.model || "model_chat_default",
-    work_dir: session.work_dir || null,
+    title: resolvedTitle,
+    title_source: resolvedTitleSource,
+    model: resolvedModel,
+    work_dir: resolvedWorkDir,
+    archived: resolvedArchived,
     updated_at: session.updated_at || now,
-    created_at: session.created_at || now,
+    created_at: existing.created_at || session.created_at || now,
   };
 
   if (idx >= 0) {
-    sessions[idx] = { ...sessions[idx], ...sessionSummary };
+    sessions[idx] = { ...existing, ...sessionSummary };
   } else {
     sessions.unshift(sessionSummary);
   }
   writeJsonSafe(SESSIONS_INDEX_FILE, sessions);
 
-  // 保证单会话文件存在
+  // 保证单会话文件存在且字段同步更新
   const filePath = getSessionFilePath(session.id);
   const detail = readJsonSafe(filePath, {
     ...sessionSummary,
@@ -281,12 +422,33 @@ function saveSession(session) {
     outputs: [],
   });
   detail.title = sessionSummary.title;
+  detail.title_source = sessionSummary.title_source;
   detail.model = sessionSummary.model;
   detail.work_dir = sessionSummary.work_dir;
+  detail.archived = sessionSummary.archived;
   detail.updated_at = sessionSummary.updated_at;
   writeJsonSafe(filePath, detail);
 
   return { success: true, session: sessionSummary };
+}
+
+/**
+ * 异步旁路更新 AI 生成的会话标题 (CAS 状态机：若已被用户手动自定义过则坚决不覆盖)
+ */
+function updateSessionGeneratedTitle(sessionId, title) {
+  const sessions = getSessions();
+  const target = sessions.find((s) => s.id === sessionId);
+  if (!target) return false;
+
+  // 铁律：用户手动起的标题绝对不覆盖
+  if (target.title_source === "custom") {
+    return false;
+  }
+
+  target.title = title;
+  target.title_source = "generated";
+  saveSession(target);
+  return true;
 }
 
 function deleteSession(sessionId) {
@@ -302,6 +464,7 @@ function deleteSession(sessionId) {
       console.error(`[storageService] 删除会话文件失败: ${err.message}`);
     }
   }
+  deleteSessionAttachments(sessionId);
   return { success: true };
 }
 
@@ -320,18 +483,27 @@ function addMessage(sessionId, message) {
   });
 
   const msgId = message.id || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const existingIdx = detail.messages.findIndex((m) => m.id === msgId);
+
   const fullMsg = {
     id: msgId,
     session_id: sessionId,
     role: message.role,
-    content: message.content || "",
+    content: message.content !== undefined ? message.content : "",
     tool_calls: message.tool_calls || null,
     tool_call_id: message.tool_call_id || null,
-    created_at: message.created_at || Date.now(),
-    metadata: message.metadata || null,
+    created_at: message.created_at || (existingIdx >= 0 ? detail.messages[existingIdx].created_at : Date.now()),
+    metadata: message.metadata !== undefined ? message.metadata : (existingIdx >= 0 ? detail.messages[existingIdx].metadata : null),
   };
 
-  detail.messages.push(fullMsg);
+  if (existingIdx >= 0) {
+    // 严格原子覆盖更新 (Upsert)，防止并发产生重复空消息
+    detail.messages[existingIdx] = fullMsg;
+  } else {
+    // 仅当不存在该 ID 时才追加新消息
+    detail.messages.push(fullMsg);
+  }
+
   detail.updated_at = Date.now();
   writeJsonSafe(filePath, detail);
 
@@ -362,12 +534,18 @@ function getMcpServers(workDir = null) {
   const globalMcp = readJsonSafe(MCP_FILE, { mcpServers: {} });
   let servers = { ...(globalMcp.mcpServers || {}) };
 
-  // 若存在项目级 .agnes/mcp.json，就地合并
+  // 若存在项目级 .omcx/mcp.json 或旧版 .agnes/mcp.json，就地合并
   if (workDir) {
-    const projectMcpFile = path.join(workDir, ".agnes", "mcp.json");
-    if (fs.existsSync(projectMcpFile)) {
-      const projectMcp = readJsonSafe(projectMcpFile, { mcpServers: {} });
-      servers = { ...servers, ...(projectMcp.mcpServers || {}) };
+    const projectMcpCandidates = [
+      path.join(workDir, ".omcx", "mcp.json"),
+      path.join(workDir, ".agnes", "mcp.json"),
+    ];
+    for (const projectMcpFile of projectMcpCandidates) {
+      if (fs.existsSync(projectMcpFile)) {
+        const projectMcp = readJsonSafe(projectMcpFile, { mcpServers: {} });
+        servers = { ...servers, ...(projectMcp.mcpServers || {}) };
+        break;
+      }
     }
   }
 
@@ -391,13 +569,19 @@ function saveGlobalMcpServers(serversMap) {
 // 技能 (Skills) 扫描与读取
 // ─────────────────────────────────────────────────────────────
 
-function parseSkillMarkdown(filePath, scope = "global") {
+function parseSkillMarkdown(filePath, scope = "global", defaultName = null) {
   try {
+    const realStat = fs.statSync(filePath);
+    if (!realStat.isFile()) return null;
+
     const content = fs.readFileSync(filePath, "utf-8");
     const filename = path.basename(filePath);
-    let name = filename.replace(/\.md$/i, "");
+    const parentDirName = path.basename(path.dirname(filePath));
+    const isSkillIndex = /^skill\.md$/i.test(filename);
+    let name = defaultName || (isSkillIndex ? parentDirName : filename.replace(/\.md$/i, ""));
     let description = "";
     let tools = [];
+    let version = "";
     let promptBody = content;
 
     const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
@@ -405,17 +589,21 @@ function parseSkillMarkdown(filePath, scope = "global") {
       const yaml = frontmatterMatch[1];
       promptBody = frontmatterMatch[2].trim();
 
-      const nameMatch = yaml.match(/name:\s*(.+)/);
-      if (nameMatch) name = nameMatch[1].trim();
+      const nameMatch = yaml.match(/^name:\s*(.+)$/m);
+      if (nameMatch) name = nameMatch[1].trim().replace(/^['"]|['"]$/g, "");
 
-      const descMatch = yaml.match(/description:\s*(.+)/);
-      if (descMatch) description = descMatch[1].trim();
+      const descMatch = yaml.match(/^description:\s*(.+)$/m);
+      if (descMatch) description = descMatch[1].trim().replace(/^['"]|['"]$/g, "");
 
-      const toolsMatch = yaml.match(/tools:\s*\[(.*?)\]/);
+      const versionMatch = yaml.match(/^version:\s*(.+)$/m);
+      if (versionMatch) version = versionMatch[1].trim().replace(/^['"]|['"]$/g, "");
+
+      const toolsMatch = yaml.match(/^tools:\s*(?:\[(.*?)\]|(.+))$/m);
       if (toolsMatch) {
-        tools = toolsMatch[1]
+        const rawTools = toolsMatch[1] !== undefined ? toolsMatch[1] : toolsMatch[2];
+        tools = (rawTools || "")
           .split(",")
-          .map((t) => t.trim())
+          .map((t) => t.trim().replace(/^['"]|['"]$/g, ""))
           .filter(Boolean);
       }
     }
@@ -428,6 +616,7 @@ function parseSkillMarkdown(filePath, scope = "global") {
       prompt: promptBody,
       scope,
       filePath,
+      version: version || undefined,
     };
   } catch (err) {
     console.error(`[storageService] 解析 Skill 失败 (${filePath}):`, err.message);
@@ -435,35 +624,99 @@ function parseSkillMarkdown(filePath, scope = "global") {
   }
 }
 
-function getSkills(workDir = null) {
-  const skills = [];
+function scanSkillsDir(targetDir, scope = "global") {
+  const result = [];
+  if (!targetDir || !fs.existsSync(targetDir)) return result;
 
-  // 全局 Skills
-  if (fs.existsSync(SKILLS_DIR)) {
-    const files = fs.readdirSync(SKILLS_DIR);
-    for (const file of files) {
-      if (file.endsWith(".md")) {
-        const item = parseSkillMarkdown(path.join(SKILLS_DIR, file), "global");
-        if (item) skills.push(item);
+  try {
+    const entries = fs.readdirSync(targetDir);
+    for (const entry of entries) {
+      if (entry.startsWith(".")) continue;
+      const fullPath = path.join(targetDir, entry);
+
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
       }
-    }
-  }
 
-  // 项目级 Skills
-  if (workDir) {
-    const projectSkillsDir = path.join(workDir, ".agnes", "skills");
-    if (fs.existsSync(projectSkillsDir)) {
-      const files = fs.readdirSync(projectSkillsDir);
-      for (const file of files) {
-        if (file.endsWith(".md")) {
-          const item = parseSkillMarkdown(path.join(projectSkillsDir, file), "project");
-          if (item) skills.push(item);
+      if (stat.isFile() && entry.endsWith(".md")) {
+        const item = parseSkillMarkdown(fullPath, scope);
+        if (item) result.push(item);
+      } else if (stat.isDirectory()) {
+        const candidates = ["SKILL.md", "skill.md", `${entry}.md`];
+        let found = false;
+        for (const candidate of candidates) {
+          const subPath = path.join(fullPath, candidate);
+          if (fs.existsSync(subPath)) {
+            const item = parseSkillMarkdown(subPath, scope, entry);
+            if (item) {
+              result.push(item);
+              found = true;
+              break;
+            }
+          }
+        }
+        if (!found) {
+          try {
+            const subEntries = fs.readdirSync(fullPath);
+            const mdFile = subEntries.find((f) => f.endsWith(".md") && !f.startsWith("."));
+            if (mdFile) {
+              const item = parseSkillMarkdown(path.join(fullPath, mdFile), scope, entry);
+              if (item) result.push(item);
+            }
+          } catch {
+            // 忽略子目录读取错误
+          }
         }
       }
     }
+  } catch (err) {
+    console.error(`[storageService] 扫描 Skills 目录失败 (${targetDir}):`, err.message);
   }
 
-  return skills;
+  return result;
+}
+
+function getSkills(workDir = null) {
+  const skillsMap = new Map();
+
+  // 1. 全局路径扫描 (scope: "global")
+  const globalDirs = [
+    path.join(USER_HOME, ".agents", "skills"),
+    path.join(USER_HOME, ".omcx", "skills"),
+    path.join(USER_HOME, ".agnes", "skills"),
+  ];
+
+  for (const dir of globalDirs) {
+    const items = scanSkillsDir(dir, "global");
+    for (const item of items) {
+      if (!skillsMap.has(item.name)) {
+        skillsMap.set(item.name, item);
+      }
+    }
+  }
+
+  // 2. 项目专属路径扫描 (scope: "project"，优先覆盖全局同名技能)
+  if (workDir) {
+    const projectDirs = [
+      path.join(workDir, ".agents", "skills"),
+      path.join(workDir, ".omcx", "skills"),
+      path.join(workDir, ".agnes", "skills"),
+    ];
+
+    for (const dir of projectDirs) {
+      const items = scanSkillsDir(dir, "project");
+      for (const item of items) {
+        skillsMap.set(item.name, item);
+      }
+    }
+  }
+
+  const list = Array.from(skillsMap.values());
+  list.sort((a, b) => a.name.localeCompare(b.name));
+  return list;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -493,26 +746,83 @@ function getMemories(workDir = null) {
 
   // 项目级记忆
   if (workDir) {
-    const projMemDir = path.join(workDir, ".agnes", "memory");
-    if (fs.existsSync(projMemDir)) {
-      const files = fs.readdirSync(projMemDir);
-      for (const file of files) {
-        if (file.endsWith(".md") && file !== "MEMORY.md") {
-          const fp = path.join(projMemDir, file);
-          const content = fs.readFileSync(fp, "utf-8");
-          memories.push({
-            id: `project:${file}`,
-            name: file.replace(/\.md$/, ""),
-            path: fp,
-            content,
-            scope: "project",
-          });
+    const memDirCandidates = [
+      path.join(workDir, ".omcx", "memory"),
+      path.join(workDir, ".agnes", "memory"),
+    ];
+    for (const projMemDir of memDirCandidates) {
+      if (fs.existsSync(projMemDir)) {
+        const files = fs.readdirSync(projMemDir);
+        for (const file of files) {
+          if (file.endsWith(".md") && file !== "MEMORY.md") {
+            const fp = path.join(projMemDir, file);
+            const content = fs.readFileSync(fp, "utf-8");
+            memories.push({
+              id: `project:${file}`,
+              name: file.replace(/\.md$/, ""),
+              path: fp,
+              content,
+              scope: "project",
+            });
+          }
         }
+        break;
       }
     }
   }
 
   return memories;
+}
+
+const PROJECT_RULES_BUDGET = 8000;
+
+function getProjectInstructions(workDir) {
+  const instructions = [];
+  if (!workDir) return instructions;
+
+  for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+    const filePath = path.join(workDir, name);
+    if (!fs.existsSync(filePath)) continue;
+    let content = fs.readFileSync(filePath, "utf-8");
+    if (content.length > PROJECT_RULES_BUDGET) {
+      content = `${content.slice(0, PROJECT_RULES_BUDGET)}\n…(已截断，原始长度 ${content.length} 字符)`;
+    }
+    instructions.push({ name, path: filePath, content });
+  }
+
+  return instructions;
+}
+
+function getMemoryIndex(workDir) {
+  const indexes = [];
+
+  const globalIndex = path.join(MEMORY_DIR, "MEMORY.md");
+  if (fs.existsSync(globalIndex)) {
+    indexes.push({
+      scope: "global",
+      path: globalIndex,
+      content: fs.readFileSync(globalIndex, "utf-8"),
+    });
+  }
+
+  if (workDir) {
+    const projectIndexCandidates = [
+      path.join(workDir, ".omcx", "memory", "MEMORY.md"),
+      path.join(workDir, ".agnes", "memory", "MEMORY.md"),
+    ];
+    for (const projectIndex of projectIndexCandidates) {
+      if (fs.existsSync(projectIndex)) {
+        indexes.push({
+          scope: "project",
+          path: projectIndex,
+          content: fs.readFileSync(projectIndex, "utf-8"),
+        });
+        break;
+      }
+    }
+  }
+
+  return indexes;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -542,6 +852,71 @@ function addSessionOutput(sessionId, outputItem) {
     writeJsonSafe(filePath, detail);
   }
   return detail.outputs;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 多源文件夹工作空间管理 (Multi-Folder Workspaces)
+// ─────────────────────────────────────────────────────────────
+
+function getWorkspaces() {
+  const cfg = getAllConfig();
+  if (Array.isArray(cfg.workspaces) && cfg.workspaces.length > 0) {
+    return cfg.workspaces;
+  }
+  // 预置完全符合参考图 8 的初始多目录工作空间
+  const initialWorkspaces = [
+    {
+      id: "ws_default",
+      name: "notifycenter",
+      folders: [
+        { path: "/opt/projects/notifycenter", name: "notifycenter", isPrimary: true },
+        { path: "/opt/projects/silence-fastapi", name: "silence-fastapi", isPrimary: false },
+        { path: "/opt/projects/alarmcenter-fastapi", name: "alarmcenter-fastapi", isPrimary: false },
+      ],
+      updatedAt: Date.now(),
+    },
+    {
+      id: "ws_current",
+      name: "OMCX (当前工程)",
+      folders: [
+        { path: process.cwd(), name: "OMCX", isPrimary: true },
+      ],
+      updatedAt: Date.now() - 3600000,
+    },
+  ];
+  return initialWorkspaces;
+}
+
+function saveWorkspace(ws) {
+  const cfg = getAllConfig();
+  if (!Array.isArray(cfg.workspaces)) {
+    cfg.workspaces = getWorkspaces();
+  }
+  const idx = cfg.workspaces.findIndex((w) => w.id === ws.id);
+  const now = Date.now();
+  const item = {
+    id: ws.id || `ws_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    name: ws.name || "新工作空间",
+    folders: Array.isArray(ws.folders) ? ws.folders : [],
+    updatedAt: now,
+  };
+
+  if (idx >= 0) {
+    cfg.workspaces[idx] = item;
+  } else {
+    cfg.workspaces.unshift(item);
+  }
+  writeJsonSafe(CONFIG_FILE, cfg);
+  return { success: true, workspace: item };
+}
+
+function deleteWorkspace(id) {
+  const cfg = getAllConfig();
+  if (Array.isArray(cfg.workspaces)) {
+    cfg.workspaces = cfg.workspaces.filter((w) => w.id !== id);
+    writeJsonSafe(CONFIG_FILE, cfg);
+  }
+  return { success: true };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -575,7 +950,8 @@ function addRecentProject(proj) {
 }
 
 module.exports = {
-  AGNES_HOME,
+  OMCX_HOME,
+  AGNES_HOME: OMCX_HOME,
   initStorage,
   getAllConfig,
   getConfig,
@@ -585,16 +961,27 @@ module.exports = {
   deleteModel,
   getRecentProjects,
   addRecentProject,
+  getWorkspaces,
+  saveWorkspace,
+  deleteWorkspace,
   getSessions,
   saveSession,
+  updateSessionGeneratedTitle,
   deleteSession,
   getMessages,
   addMessage,
   deleteMessagesAfter,
+  saveAttachmentBuffer,
+  deleteAttachmentFile,
+  deleteSessionAttachments,
+  isSessionAttachmentPath,
+  inferVisionSupport,
   getMcpServers,
   saveGlobalMcpServers,
   getSkills,
   getMemories,
+  getMemoryIndex,
+  getProjectInstructions,
   getSessionOutputs,
   addSessionOutput,
 };

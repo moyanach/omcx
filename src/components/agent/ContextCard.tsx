@@ -4,7 +4,7 @@ import { useChatStore } from '@/stores/chatStore';
 
 export const ContextCard: React.FC = () => {
   const [isOpen, setIsOpen] = useState(true);
-  const { contextMetrics, messages, activeSessionId } = useChatStore();
+  const { contextMetrics, messages, activeSessionId, lastCompaction } = useChatStore();
 
   const activeMsgs = activeSessionId ? messages[activeSessionId] || [] : [];
 
@@ -64,14 +64,24 @@ export const ContextCard: React.FC = () => {
   ];
 
   return (
-    <div className='bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl overflow-hidden transition-all duration-200'>
+    <div className='bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl overflow-hidden transition-all duration-200 select-none titlebar-no-drag'>
       {/* 头部标题与折叠开关 */}
       <button
         onClick={() => setIsOpen(!isOpen)}
         className='w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/[0.02] transition-colors'
       >
-        <span className='font-semibold text-sm text-neutral-200 tracking-wide'>
-          Context
+        <span className='flex items-center gap-2 min-w-0'>
+          <span className='font-semibold text-sm text-neutral-200 tracking-wide'>
+            Context
+          </span>
+          {lastCompaction && (
+            <span
+              className='px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono flex-shrink-0'
+              title={`上次压缩：${lastCompaction.beforeTokens.toLocaleString()} → ${lastCompaction.afterTokens.toLocaleString()} tokens · ${new Date(lastCompaction.at).toLocaleTimeString()}`}
+            >
+              已压缩
+            </span>
+          )}
         </span>
         <div className='text-neutral-400'>
           {isOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}

@@ -6,18 +6,34 @@ const {
   dialog,
   shell,
   net,
+  nativeImage,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
+const http = require("http");
 const { pathToFileURL } = require("url");
 const crypto = require("crypto");
 
 // 引入核心业务服务
 const storageService = require("./services/storageService");
 const { getWorkspaceGitStatus } = require("./services/workspaceGitService");
-const { calculateContextMetrics } = require("./services/contextCalculator");
+const { calculateContextMetrics, estimateTokens } = require("./services/contextCalculator");
 const { toolRegistry } = require("./utils/toolRegistry");
 const { performWebSearch, scrapePageContent } = require("./utils/tools/webTools");
+const { listWorkspaceFiles } = require("./utils/tools/fileIndexer");
+const { buildMentionContext } = require("./utils/tools/mentionResolver");
+const { buildSystemContext } = require("./utils/contextBuilder");
+const {
+  estimateMessagesTokens,
+  getThresholds,
+  shouldMicroCompact,
+  microCompact,
+  truncateToolResult,
+  compactMessages,
+  hardTruncate,
+  isContextOverflowError,
+} = require("./services/contextCompactor");
 
 // 注册特权协议 (必须在 app.whenReady() 之前调用)
 protocol.registerSchemesAsPrivileged([
@@ -61,6 +77,165 @@ function getSearchConfig() {
 }
 
 /**
+ * 匹配工作目录所属的多目录工作空间，返回挂载的全部源文件夹
+ */
+function getWorkspaceFolders(workDir) {
+  if (!workDir || typeof workDir !== "string" || !workDir.trim()) {
+    return { matchedWorkspace: null, allowedFolders: [] };
+  }
+  const resolvedDir = path.resolve(workDir.trim());
+  const matchedWorkspace =
+    storageService
+      .getWorkspaces()
+      .find((ws) => Array.isArray(ws.folders) && ws.folders.some((f) => f.path === workDir.trim())) || null;
+  const allowedFolders = matchedWorkspace?.folders
+    ? matchedWorkspace.folders.map((f) => path.resolve(f.path))
+    : [resolvedDir];
+  return { matchedWorkspace, allowedFolders };
+}
+
+const IMAGE_MAX_EDGE = 2000;
+const IMAGE_INLINE_MAX_BYTES = 1.5 * 1024 * 1024;
+const IMAGE_MIME_EXT = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/bmp": "bmp",
+};
+
+function extFromMime(mime, name) {
+  const byMime = IMAGE_MIME_EXT[String(mime || "").toLowerCase()];
+  if (byMime) return byMime;
+  const ext = path.extname(String(name || "")).replace(".", "").toLowerCase();
+  return ext || "png";
+}
+
+function processAttachmentImage(base64, mime) {
+  const input = Buffer.from(String(base64 || ""), "base64");
+  if (input.length === 0) throw new Error("图片内容为空");
+
+  const image = nativeImage.createFromBuffer(input);
+  if (image.isEmpty()) throw new Error("无法识别的图片格式");
+
+  let { width, height } = image.getSize();
+  let buffer = input;
+  let outMime = mime || "image/png";
+
+  if (width > IMAGE_MAX_EDGE || height > IMAGE_MAX_EDGE) {
+    const scale = IMAGE_MAX_EDGE / Math.max(width, height);
+    const resized = image.resize({
+      width: Math.max(1, Math.round(width * scale)),
+      height: Math.max(1, Math.round(height * scale)),
+      quality: "good",
+    });
+    const resizedSize = resized.getSize();
+    width = resizedSize.width;
+    height = resizedSize.height;
+    const useJpeg = /jpe?g/i.test(outMime);
+    buffer = useJpeg ? resized.toJPEG(90) : resized.toPNG();
+    outMime = useJpeg ? "image/jpeg" : "image/png";
+  }
+
+  return { buffer, width, height, mime: outMime };
+}
+
+function extractTextContent(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((part) => part && part.type === "text")
+      .map((part) => part.text || "")
+      .join("\n");
+  }
+  return "";
+}
+
+function encodeAttachmentForModel(attachment) {
+  if (!attachment || !attachment.path) return null;
+  if (!storageService.isSessionAttachmentPath(attachment.path)) return null;
+  if (!fs.existsSync(attachment.path)) return null;
+
+  let buffer = fs.readFileSync(attachment.path);
+  let mime = attachment.mime || "image/png";
+
+  if (buffer.length > IMAGE_INLINE_MAX_BYTES) {
+    const image = nativeImage.createFromBuffer(buffer);
+    if (!image.isEmpty()) {
+      const { width, height } = image.getSize();
+      let scale = Math.min(1, 1600 / Math.max(width, height));
+      let resized = image.resize({
+        width: Math.max(1, Math.round(width * scale)),
+        height: Math.max(1, Math.round(height * scale)),
+        quality: "good",
+      });
+      buffer = resized.toJPEG(85);
+      mime = "image/jpeg";
+
+      if (buffer.length > IMAGE_INLINE_MAX_BYTES) {
+        scale *= 0.75;
+        resized = image.resize({
+          width: Math.max(1, Math.round(width * scale)),
+          height: Math.max(1, Math.round(height * scale)),
+          quality: "good",
+        });
+        buffer = resized.toJPEG(80);
+      }
+    }
+  }
+
+  return { mime, base64: buffer.toString("base64"), bytes: buffer.length };
+}
+
+function buildMultimodalMessages(messages) {
+  const withImages = [];
+  messages.forEach((msg, index) => {
+    if (msg.role === "user" && Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+      withImages.push(index);
+    }
+  });
+  const injectIndexes = new Set(withImages.slice(-2));
+
+  let imageCount = 0;
+  let imageBytes = 0;
+
+  const result = messages.map((msg, index) => {
+    if (!Array.isArray(msg.attachments) || msg.attachments.length === 0) return msg;
+
+    const text = extractTextContent(msg.content);
+
+    if (!injectIndexes.has(index)) {
+      const omitted = text.replace(/\[image #\d+\]/g, (token) => `${token.slice(0, -1)}: omitted]`);
+      return { role: msg.role, content: omitted || "[历史图片已省略]" };
+    }
+
+    const images = [];
+    for (const attachment of msg.attachments) {
+      const encoded = encodeAttachmentForModel(attachment);
+      if (!encoded) continue;
+      images.push({
+        type: "image_url",
+        image_url: { url: `data:${encoded.mime};base64,${encoded.base64}` },
+      });
+      imageCount += 1;
+      imageBytes += encoded.bytes;
+    }
+
+    if (images.length === 0) {
+      return { role: msg.role, content: text };
+    }
+
+    return {
+      role: msg.role,
+      content: [{ type: "text", text: text || "请查看以下图片。" }, ...images],
+    };
+  });
+
+  return { messages: result, imageCount, imageBytes };
+}
+
+/**
  * 统一获取模型配置（优先匹配 models 列表，回退到全局配置）
  */
 function getModelConfig(model, defaultModelId = "gpt-4o") {
@@ -74,8 +249,117 @@ function getModelConfig(model, defaultModelId = "gpt-4o") {
   const modelApiKey = matched?.api_key || globalCfg.apiKey;
   const provider = matched?.provider || "openai";
   const apiModelId = matched?.model_id || model || defaultModelId;
+  const contextLimit = matched?.context_limit || 128000;
+  const supportsVision =
+    typeof matched?.supports_vision === "boolean"
+      ? matched.supports_vision
+      : storageService.inferVisionSupport(apiModelId);
 
-  return { modelBaseUrl, modelApiKey, provider, apiModelId };
+  return { modelBaseUrl, modelApiKey, provider, apiModelId, contextLimit, supportsVision };
+}
+
+const LITE_MODEL_HINTS = [
+  "mini",
+  "flash",
+  "haiku",
+  "v3",
+  "turbo",
+  "small",
+  "7b",
+  "8b",
+  "3b",
+];
+
+function pickLiteModel(currentModelId) {
+  const allModels = storageService.getModels();
+  const usable = allModels.filter((m) => m.api_key || m.provider === "ollama");
+  const found = usable.find((m) => {
+    const id = (m.model_id || m.id || "").toLowerCase();
+    return LITE_MODEL_HINTS.some((hint) => id.includes(hint));
+  });
+  return found?.id || currentModelId;
+}
+
+/**
+ * 异步旁路会话标题生成器 (Fire-and-forget Asynchronous Sidecar)
+ */
+async function generateSessionTitleSidecar(sessionId, userPrompt, currentModelId, webContents) {
+  try {
+    const session = storageService.getSessions().find((s) => s.id === sessionId);
+    if (!session || session.title_source === "custom") {
+      return; // 用户已自定义过标题，绝不覆盖
+    }
+
+    const cleanPrompt = String(userPrompt || "").trim();
+    if (!cleanPrompt || cleanPrompt.length < 2) return;
+
+    const liteModelChoice = pickLiteModel(currentModelId);
+    const { modelBaseUrl, modelApiKey, apiModelId } = getModelConfig(liteModelChoice, "gpt-4o");
+    if (!modelBaseUrl || (!modelApiKey && liteModelChoice !== "ollama")) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeoutTimer = setTimeout(() => controller.abort(), 6000);
+
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    if (modelApiKey) {
+      headers["Authorization"] = `Bearer ${modelApiKey}`;
+    }
+
+    const response = await fetch(`${modelBaseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: apiModelId,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是会话命名助手。根据用户提问的核心意图，提炼出一个简短、精准的中文标题（4到10个汉字）。禁止回答问题，禁止输出任何标点符号、引号、书名号或“标题：”等前缀，直接输出纯文本标题本身。",
+          },
+          {
+            role: "user",
+            content: `<message>\n${cleanPrompt.slice(0, 400)}\n</message>`,
+          },
+        ],
+        max_tokens: 30,
+        temperature: 0.2,
+        stream: false,
+        reasoning_effort: "none",
+      }),
+    });
+
+    clearTimeout(timeoutTimer);
+
+    if (!response.ok) return;
+
+    const data = await response.json();
+    let rawTitle = data?.choices?.[0]?.message?.content?.trim();
+    if (!rawTitle) return;
+
+    // 输出清洗
+    let title = rawTitle
+      .replace(/^[`"'“‘《【\[(（\s]+|[`"'”’》】\])）\s]+$/g, "")
+      .replace(/^(会话标题|会话名称|标题|Title|Topic)[：:]\s*/i, "")
+      .trim();
+
+    title = title.split(/\r?\n/)[0].trim().slice(0, 20);
+
+    if (title.length >= 2) {
+      const updated = storageService.updateSessionGeneratedTitle(sessionId, title);
+      if (updated && webContents && !webContents.isDestroyed()) {
+        webContents.send("session-title-updated", { sessionId, title });
+        console.log(`[title-sidecar] generated title for ${sessionId}: "${title}"`);
+      }
+    }
+  } catch (err) {
+    // 旁路任务静默失败，绝不打扰主流程
+  }
 }
 
 /**
@@ -97,6 +381,7 @@ let mainWindow = null;
 // 2. 创建主窗口
 function createWindow() {
   mainWindow = new BrowserWindow({
+    title: "OMCX Desktop",
     width: 1400,
     height: 900,
     minWidth: 1080,
@@ -113,12 +398,17 @@ function createWindow() {
     },
   });
 
-  const isDev = !app.isPackaged && process.env.NODE_ENV === "development";
-  if (isDev) {
-    mainWindow.loadURL("http://localhost:5173");
-  } else {
-    mainWindow.loadURL("app://dist/index.html");
-  }
+  // 默认直接同步加载本地打包产物，杜绝异步探活挂起与黑屏
+  mainWindow.loadURL("app://dist/index.html");
+
+  // 监听渲染进程日志与失败事件
+  mainWindow.webContents.on("console-message", (event, level, message, line, sourceId) => {
+    console.log(`[Renderer Log] ${message} (${sourceId}:${line})`);
+  });
+
+  mainWindow.webContents.on("did-fail-load", (event, errorCode, errorDescription, validatedURL) => {
+    console.error(`[main did-fail-load] code: ${errorCode}, desc: ${errorDescription}, url: ${validatedURL}`);
+  });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
@@ -172,26 +462,51 @@ app.whenReady().then(() => {
   });
 
   protocol.handle("app", async (request) => {
-    const url = new URL(request.url);
-    let filePath;
-    if (url.host === "dist") {
-      filePath = path.join(__dirname, "dist", decodeURIComponent(url.pathname));
-    } else {
-      filePath = path.join(__dirname, decodeURIComponent(url.pathname));
+    try {
+      const url = new URL(request.url);
+      let relativePath = decodeURIComponent(url.pathname);
+      if (relativePath.startsWith("/")) relativePath = relativePath.slice(1);
+
+      let filePath;
+      if (url.host === "dist") {
+        filePath = path.join(__dirname, "dist", relativePath);
+      } else {
+        filePath = path.join(__dirname, relativePath);
+      }
+
+      // 若请求目录或不存在，默认返回 index.html
+      if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+        filePath = path.join(__dirname, "dist", "index.html");
+      }
+
+      const buffer = fs.readFileSync(filePath);
+      const headers = new Headers();
+      headers.set("Access-Control-Allow-Origin", "*");
+      if (filePath.endsWith(".html")) {
+        headers.set("Content-Type", "text/html; charset=utf-8");
+      } else if (filePath.endsWith(".js") || filePath.endsWith(".mjs")) {
+        headers.set("Content-Type", "text/javascript; charset=utf-8");
+      } else if (filePath.endsWith(".css")) {
+        headers.set("Content-Type", "text/css; charset=utf-8");
+      } else if (filePath.endsWith(".svg")) {
+        headers.set("Content-Type", "image/svg+xml");
+      } else if (filePath.endsWith(".png")) {
+        headers.set("Content-Type", "image/png");
+      }
+
+      return new Response(buffer, { status: 200, headers });
+    } catch (err) {
+      console.error("[protocol:app error]", err);
+      try {
+        const fallback = fs.readFileSync(path.join(__dirname, "dist", "index.html"));
+        return new Response(fallback, {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      } catch {
+        return new Response("Failed to load app", { status: 500 });
+      }
     }
-    const fileUrl = pathToFileURL(filePath).toString();
-    const response = await net.fetch(fileUrl, { bypassCustomProtocolHandlers: true });
-    const headers = new Headers(response.headers);
-    if (filePath.endsWith(".js") || filePath.endsWith(".mjs")) {
-      headers.set("Content-Type", "text/javascript; charset=utf-8");
-    } else if (filePath.endsWith(".css")) {
-      headers.set("Content-Type", "text/css; charset=utf-8");
-    }
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
-    });
   });
 
   // --- 配置操作 IPC ---
@@ -203,6 +518,17 @@ app.whenReady().then(() => {
   ipcMain.handle(
     "set-config",
     safeHandler((event, key, value) => storageService.setConfig(key, value))
+  );
+
+  ipcMain.handle(
+    "get-user-info",
+    safeHandler(() => {
+      try {
+        return { username: os.userInfo().username || "本地用户" };
+      } catch {
+        return { username: "本地用户" };
+      }
+    })
   );
 
   // --- 模型操作 IPC ---
@@ -238,6 +564,7 @@ app.whenReady().then(() => {
       const session = storageService.getSessions().find((s) => s.id === id);
       if (session) {
         session.title = title;
+        session.title_source = "custom";
         storageService.saveSession(session);
         return true;
       }
@@ -264,6 +591,21 @@ app.whenReady().then(() => {
       const session = storageService.getSessions().find((s) => s.id === id);
       return session?.work_dir || null;
     })
+  );
+
+  ipcMain.handle(
+    "get-workspaces",
+    safeHandler(() => storageService.getWorkspaces())
+  );
+
+  ipcMain.handle(
+    "save-workspace",
+    safeHandler((event, ws) => storageService.saveWorkspace(ws))
+  );
+
+  ipcMain.handle(
+    "delete-workspace",
+    safeHandler((event, id) => storageService.deleteWorkspace(id))
   );
 
   ipcMain.handle(
@@ -302,6 +644,31 @@ app.whenReady().then(() => {
     )
   );
 
+  ipcMain.handle(
+    "save-chat-attachment",
+    safeHandler((event, { sessionId, name, mime, base64 }) => {
+      if (!sessionId || !base64) throw new Error("附件参数不完整");
+      const processed = processAttachmentImage(base64, mime);
+      const id = crypto.randomUUID();
+      const ext = extFromMime(processed.mime, name);
+      const saved = storageService.saveAttachmentBuffer(sessionId, id, ext, processed.buffer);
+      return {
+        id,
+        path: saved.path,
+        width: processed.width,
+        height: processed.height,
+        size: saved.size,
+        mime: processed.mime,
+        name: name || `${id}.${ext}`,
+      };
+    })
+  );
+
+  ipcMain.handle(
+    "delete-chat-attachment",
+    safeHandler((event, filePath) => storageService.deleteAttachmentFile(filePath))
+  );
+
   // --- Agent Inspector 监控与扩展 IPC ---
   ipcMain.handle(
     "get-mcp-servers",
@@ -336,6 +703,17 @@ app.whenReady().then(() => {
   ipcMain.handle(
     "get-workspace-git-status",
     safeHandler((event, workDir) => getWorkspaceGitStatus(workDir))
+  );
+
+  ipcMain.handle(
+    "get-workspace-file-index",
+    safeHandler((event, workDir) => {
+      if (!workDir || typeof workDir !== "string") {
+        return { files: [], source: "none", truncated: false };
+      }
+      const { allowedFolders } = getWorkspaceFolders(workDir);
+      return listWorkspaceFiles(workDir, allowedFolders);
+    })
   );
 
   ipcMain.handle(
@@ -382,29 +760,64 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "api-get-models",
-    safeHandler(async () => {
-      const { apiKey, baseUrl } = getApiConfig();
-      if (!apiKey) return [];
-      try {
-        const response = await fetch(`${baseUrl}/models`, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
-        const data = await response.json();
-        if (response.ok && data.data) {
-          return data.data;
-        }
-      } catch (err) {
-        console.error("拉取远程模型列表失败:", err.message);
+    safeHandler(async (event, params = {}) => {
+      const globalCfg = getApiConfig();
+      const activeBaseUrl = (params.baseUrl || globalCfg.baseUrl || "").trim().replace(/\/+$/, "");
+      const activeApiKey = params.apiKey !== undefined ? params.apiKey.trim() : (globalCfg.apiKey || "").trim();
+
+      if (!activeBaseUrl) {
+        throw new Error("Base URL 不能为空");
       }
-      return [];
+
+      const headers = {};
+      if (activeApiKey) {
+        headers["Authorization"] = `Bearer ${activeApiKey}`;
+      }
+
+      try {
+        const fetchUrl = `${activeBaseUrl}/models`;
+        const response = await fetch(fetchUrl, {
+          headers,
+          signal: AbortSignal.timeout(10000), // 10秒超时
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errText.slice(0, 300)}`);
+        }
+
+        const data = await response.json();
+        // 兼容标准 OpenAI 格式 { data: [...] } 或纯数组
+        if (Array.isArray(data.data)) {
+          return data.data;
+        } else if (Array.isArray(data)) {
+          return data;
+        } else if (Array.isArray(data.models)) { // Ollama 原生 /api/tags 兼容
+          return data.models.map((m) => ({ id: m.name || m.model }));
+        }
+        return [];
+      } catch (err) {
+        console.error("[api-get-models] 拉取远程模型失败:", err.message);
+        throw new Error(err.message || "连接失败");
+      }
     })
   );
+
+  // --- 人机协同授权响应通道 ---
+  const pendingPermissions = new Map();
+  ipcMain.on("chat-permission-response", (event, { id, allow }) => {
+    const resolver = pendingPermissions.get(id);
+    if (resolver) {
+      pendingPermissions.delete(id);
+      resolver(!!allow);
+    }
+  });
 
   // --- 流式聊天与 Agent 执行循环 ---
   ipcMain.on(
     "chat-request",
-    async (event, { sessionId, messages, model, enableTools }) => {
-      const { modelBaseUrl, modelApiKey, provider, apiModelId } =
+    async (event, { sessionId, messages, model, enableTools, workDir }) => {
+      const { modelBaseUrl, modelApiKey, provider, apiModelId, contextLimit, supportsVision } =
         getModelConfig(model, "gpt-4o");
 
       if (!modelApiKey && provider !== "ollama") {
@@ -415,13 +828,43 @@ app.whenReady().then(() => {
         return;
       }
 
-      // 获取当前会话的工作目录
-      let sessionWorkDir = null;
+      // 获取当前会话的工作目录 (优先使用前端当前请求显式透传的选定目录)
+      let sessionWorkDir = (workDir && typeof workDir === "string" && workDir.trim()) ? workDir.trim() : null;
       const session = storageService.getSessions().find((s) => s.id === sessionId);
-      sessionWorkDir = session?.work_dir || null;
+      if (!sessionWorkDir) {
+        sessionWorkDir = session?.work_dir || null;
+      } else if (session && session.work_dir !== sessionWorkDir) {
+        session.work_dir = sessionWorkDir;
+        storageService.saveSession(session);
+      }
 
-      // 设置工具上下文
+      // 匹配当前会话的多目录工作空间 (含全部挂载源文件夹，用于多目录全量放行)
+      const { matchedWorkspace, allowedFolders } = getWorkspaceFolders(sessionWorkDir);
+
+      // 异步人机协同权限审批函数 (当识别到访问外部未选定路径时挂起循环并请求用户授权)
+      const checkPermissionFn = async (targetPath, actionDesc) => {
+        const reqId = `perm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        return new Promise((resolve) => {
+          pendingPermissions.set(reqId, (allow) => {
+            if (allow) {
+              // 用户允许后，将该路径加入临时白名单
+              allowedFolders.push(path.resolve(targetPath));
+            }
+            resolve(allow);
+          });
+          event.reply(`chat-permission-request-${sessionId}`, {
+            id: reqId,
+            path: targetPath,
+            action: actionDesc,
+            reason: "该路径位于当前已选定的工作空间源文件夹之外，请确认是否允许 Agent 访问该外部路径",
+          });
+        });
+      };
+
+      // 设置工具上下文 (严格锁定目标工作目录、全量多源文件夹白名单与人机授权检查器)
       toolRegistry.setContext("workDir", sessionWorkDir);
+      toolRegistry.setContext("allowedFolders", allowedFolders);
+      toolRegistry.setContext("checkPermission", checkPermissionFn);
 
       try {
         const headers = {
@@ -433,55 +876,218 @@ app.whenReady().then(() => {
         }
 
         let apiMessages = [...messages];
-
-        // 拼接系统提示词、工作目录、激活技能与记忆
+        let compactionSummary = "";
+        const compactionStats = { count: 0, beforeTokens: 0, afterTokens: 0 };
+        let lastProviderUsage = null;
+        let consecutiveCompactFailures = 0;
+        let turnCompactionCount = 0;
+        const compactCfg = {
+          enabled: storageService.getConfig("context_auto_compact") !== "false",
+          thresholdPercent: Number(storageService.getConfig("context_compact_threshold_percent")) || 85,
+          keepTokens: Number(storageService.getConfig("context_compact_keep_tokens")) || 20000,
+          toolResultMaxChars: Number(storageService.getConfig("context_tool_result_max_chars")) || 8000,
+          keepRecentToolResults: Number(storageService.getConfig("context_microcompact_keep_results")) || 5,
+          outputReserve: 4096,
+          maxConsecutiveFailures: 3,
+        };
         const availableSkills = storageService.getSkills(sessionWorkDir);
         const memories = storageService.getMemories(sessionWorkDir);
 
-        let systemInstruction = `你是专业的桌面端 AI Agent，专注于软件工程、代码理解与修改、架构分析与任务自动化。`;
-        if (sessionWorkDir) {
-          systemInstruction += `\n\n【工作区目录】当前会话根目录为: ${sessionWorkDir}\n所有文件查找、读写、执行命令默认相对于此目录进行。`;
+        const hasImageAttachments = apiMessages.some(
+          (m) => Array.isArray(m.attachments) && m.attachments.length > 0
+        );
+
+        if (hasImageAttachments && !supportsVision) {
+          event.reply(
+            `chat-stream-error-${sessionId}`,
+            "当前模型不支持图片输入，请切换到支持视觉的模型"
+          );
+          return;
         }
 
-        if (memories.length > 0) {
-          systemInstruction += `\n\n【用户记忆与约定】\n` +
-            memories.map((m) => `[${m.name}]: ${m.content.trim()}`).join("\n\n");
+        if (hasImageAttachments) {
+          const multimodal = buildMultimodalMessages(apiMessages);
+          apiMessages = multimodal.messages;
+          if (multimodal.imageCount > 0) {
+            console.log(
+              `[chat-image] resolved ${multimodal.imageCount} images, bytes=${multimodal.imageBytes}`
+            );
+          }
         }
 
-        if (enableTools && toolRegistry.size > 0) {
-          const toolList = toolRegistry
-            .getToolSummaries()
-            .map((t) => `- **${t.name}**: ${t.description}`)
-            .join("\n");
-          systemInstruction += `\n\n【可用工具列表】\n${toolList}\n\n【执行原则】
-1. 当需要了解目录结构时，主动调用 list_directory。
-2. 当需要查看代码或配置时，主动调用 read_file。
-3. 当需要查找函数或变量定义时，使用 search_code。
-4. 修改或创建代码文件时使用 write_file，系统会自动将产物归档到右侧 Outputs 面板。
-5. 执行终端命令时使用 run_command。`;
+        const memoryIndex = storageService.getMemoryIndex(sessionWorkDir);
+        const projectRules = storageService.getProjectInstructions(sessionWorkDir);
+
+        const initialTodos = [];
+
+        // 自动装配用户通过 @ 显式引用的技能、MCP 与文件/目录上下文
+        const mentionUserMsg = apiMessages.slice().reverse().find((m) => m.role === "user");
+        const mentionText = extractTextContent(mentionUserMsg?.content);
+        let mentionBlock = "";
+        if (mentionText) {
+          const mentionContext = buildMentionContext(mentionText, sessionWorkDir, allowedFolders, {
+            skills: availableSkills,
+            mcpServers: storageService.getMcpServers(sessionWorkDir),
+          });
+          if (mentionContext.block) {
+            mentionBlock = mentionContext.block;
+            console.log(
+              `[mention] resolved ${mentionContext.skills.length} skills / ${mentionContext.mcps.length} mcps / ${mentionContext.files.length} files / ${mentionContext.dirs.length} dirs` +
+                (mentionContext.skipped.length > 0 ? ` / skipped ${mentionContext.skipped.length}` : "")
+            );
+          }
         }
 
-        // 插入 system 提示词
-        const hasSystem = apiMessages.length > 0 && apiMessages[0].role === "system";
-        if (hasSystem) {
-          apiMessages[0].content += "\n\n" + systemInstruction;
+        const toolDocs = enableTools && toolRegistry.size > 0 ? toolRegistry.getToolPromptDocs() : [];
+
+        const buildInstruction = () =>
+          buildSystemContext({
+            workDir: sessionWorkDir,
+            matchedWorkspace,
+            skills: availableSkills,
+            memories,
+            memoryIndex,
+            projectRules,
+            todos: initialTodos,
+            toolDocs,
+            model: `${provider}/${apiModelId}`,
+            enableTools,
+          });
+
+        const buildInstructionText = (built) =>
+          mentionBlock ? `${built.text}\n\n${mentionBlock}` : built.text;
+
+        const composeSystemInstruction = (built) => {
+          const base = buildInstructionText(built);
+          return compactionSummary ? `${base}\n\n${compactionSummary}` : base;
+        };
+
+        const initialContext = buildInstruction();
+        let systemInstruction = composeSystemInstruction(initialContext);
+        console.log(
+          `[context] ${initialContext.sections.map((section) => `${section.name}=${section.chars}`).join(" ")}`
+        );
+
+        const systemIndex = apiMessages.findIndex((m) => m.role === "system");
+        const baseSystemContent = systemIndex >= 0 ? apiMessages[systemIndex].content || "" : "";
+        if (systemIndex >= 0) {
+          apiMessages[systemIndex].content = `${baseSystemContent}\n\n${systemInstruction}`;
         } else {
           apiMessages.unshift({ role: "system", content: systemInstruction });
         }
 
-        // 初始推送一次 Context 计量
+        const refreshSystemInstruction = () => {
+          const rebuilt = buildInstruction();
+          systemInstruction = composeSystemInstruction(rebuilt);
+          const idx = apiMessages.findIndex((m) => m.role === "system");
+          if (idx >= 0) {
+            apiMessages[idx].content = baseSystemContent
+              ? `${baseSystemContent}\n\n${systemInstruction}`
+              : systemInstruction;
+          }
+        };
+
+        const maybeCompact = async (reason = "preflight", options = {}) => {
+          if (!compactCfg.enabled) return false;
+
+          const thresholds = getThresholds(contextLimit, compactCfg);
+          const nonSystemMessages = apiMessages.filter((message) => message.role !== "system");
+          let tokens = estimateMessagesTokens(nonSystemMessages) + estimateTokens(systemInstruction);
+          if (lastProviderUsage?.prompt_tokens) {
+            tokens = Math.max(tokens, Number(lastProviderUsage.prompt_tokens) || 0);
+          }
+
+          const force = reason === "overflow" || options.force === true;
+          if (!force && !shouldMicroCompact(tokens, thresholds)) return false;
+
+          const micro = microCompact(apiMessages, compactCfg);
+          if (micro.cleared > 0) {
+            apiMessages = micro.messages;
+            lastProviderUsage = null;
+            console.log(`[microcompact] saved=${micro.saved} cleared=${micro.cleared}`);
+            tokens =
+              estimateMessagesTokens(apiMessages.filter((message) => message.role !== "system")) +
+              estimateTokens(systemInstruction);
+          }
+
+          if (!force && tokens <= thresholds.threshold) return micro.cleared > 0;
+          if (!force && turnCompactionCount >= 1) return false;
+
+          try {
+            const systemMessage = apiMessages.find((message) => message.role === "system");
+            const result = await compactMessages({
+              messages: apiMessages,
+              systemMessage,
+              thresholds,
+              modelCfg: {
+                baseUrl: modelBaseUrl,
+                apiKey: modelApiKey,
+                modelId: apiModelId,
+                headers: { ...headers, Accept: "application/json" },
+              },
+              cfg: compactCfg,
+            });
+
+            if (!result.summaryBlock) {
+              return false;
+            }
+
+            apiMessages = result.messages;
+            compactionSummary = result.summaryBlock;
+            refreshSystemInstruction();
+            lastProviderUsage = null;
+            compactionStats.count += 1;
+            compactionStats.beforeTokens += result.before;
+            compactionStats.afterTokens += result.after;
+            consecutiveCompactFailures = 0;
+            turnCompactionCount += 1;
+
+            event.reply(`chat-stream-compaction-${sessionId}`, {
+              beforeTokens: result.before,
+              afterTokens: result.after,
+              keptMessages: result.kept,
+              summarizedMessages: result.summarized,
+              at: Date.now(),
+            });
+            console.log(
+              `[compact] before=${result.before} after=${result.after} kept=${result.kept} summarized=${result.summarized}`
+            );
+            return true;
+          } catch (err) {
+            consecutiveCompactFailures += 1;
+            console.error(`[compact] failed (${consecutiveCompactFailures}):`, err.message);
+            if (consecutiveCompactFailures >= compactCfg.maxConsecutiveFailures) {
+              apiMessages = hardTruncate(apiMessages, thresholds.threshold);
+              lastProviderUsage = null;
+              console.log("[compact] fallback hardTruncate");
+              return true;
+            }
+            return false;
+          }
+        };
+
+        toolRegistry.setContext("onTodosUpdate", (nextTodos) => {
+          if (!Array.isArray(nextTodos)) return;
+          initialTodos.splice(0, initialTodos.length, ...nextTodos);
+          event.reply(`chat-stream-todos-${sessionId}`, initialTodos);
+          refreshSystemInstruction();
+          console.log(`[context] todos updated: ${initialTodos.length}`);
+        });
+
         const initialTools = enableTools ? toolRegistry.getToolDefinitions() : [];
         const initMetrics = calculateContextMetrics({
           messages: apiMessages,
           tools: initialTools,
           systemPrompt: systemInstruction,
-          activeSkills: availableSkills,
+          activeSkills: [],
+          maxTokensLimit: contextLimit,
         });
         event.reply(`chat-stream-context-metrics-${sessionId}`, initMetrics);
 
-        const MAX_TOOL_ROUNDS = 20;
+        const MAX_TOOL_ROUNDS = Number(storageService.getConfig("max_tool_rounds")) || 5000;
         let toolRound = 0;
         let fullGeneratedText = "";
+        const executedToolSteps = [];
 
         function sendData(delta) {
           fullGeneratedText += delta;
@@ -514,6 +1120,7 @@ app.whenReady().then(() => {
           let buffer = "";
           let fullContent = "";
           let toolCalls = [];
+          let usage = null;
 
           while (true) {
             const { done, value } = await reader.read();
@@ -528,6 +1135,10 @@ app.whenReady().then(() => {
               if (payload === "[DONE]") continue;
               try {
                 const json = JSON.parse(payload);
+                if (json.usage) {
+                  usage = json.usage;
+                  lastProviderUsage = json.usage;
+                }
                 const choice = json.choices?.[0];
                 if (!choice) continue;
                 const delta = choice.delta || {};
@@ -563,6 +1174,7 @@ app.whenReady().then(() => {
           return {
             content: fullContent,
             toolCalls: toolCalls.filter(Boolean),
+            usage,
           };
         }
 
@@ -574,7 +1186,17 @@ app.whenReady().then(() => {
             requestBody.tool_choice = "auto";
           }
 
-          const result = await doStreamRequest(apiMessages, requestBody);
+          const result = await (async () => {
+            await maybeCompact("preflight");
+            try {
+              return await doStreamRequest(apiMessages, requestBody);
+            } catch (err) {
+              if (!isContextOverflowError(err.message)) throw err;
+              const compacted = await maybeCompact("overflow", { force: true });
+              if (!compacted) throw err;
+              return await doStreamRequest(apiMessages, requestBody);
+            }
+          })();
 
           if (!enableTools || result.toolCalls.length === 0) {
             break;
@@ -604,8 +1226,8 @@ app.whenReady().then(() => {
               toolRegistry.getContext()
             );
 
-            // 若调用了 write_file，将产出物自动挂载到 Outputs
-            if (tc.function.name === "write_file" && execResult?.success) {
+            // 若调用了 write_file 或 edit_file，将产出物挂载并通知前端刷新 Changes
+            if ((tc.function.name === "write_file" || tc.function.name === "edit_file") && execResult?.success) {
               const fullOutPath = path.isAbsolute(args.path)
                 ? args.path
                 : path.join(sessionWorkDir || "", args.path);
@@ -614,9 +1236,17 @@ app.whenReady().then(() => {
                 filePath: fullOutPath,
                 fileType: path.extname(args.path).replace(".", "") || "file",
               });
-              // 通知前端刷新产物
+              // 通知前端刷新产物与 Git 变更
               event.reply(`session-outputs-updated-${sessionId}`);
             }
+
+            executedToolSteps.push({
+              tool: tc.function.name,
+              status: "done",
+              args,
+              result: execResult,
+              callId: tc.id,
+            });
 
             event.reply(`chat-stream-tool-status-${sessionId}`, {
               tool: tc.function.name,
@@ -644,7 +1274,7 @@ app.whenReady().then(() => {
             apiMessages.push({
               role: "tool",
               tool_call_id: tc.id,
-              content: JSON.stringify(execResult),
+              content: truncateToolResult(JSON.stringify(execResult), compactCfg.toolResultMaxChars),
             });
           }
 
@@ -653,30 +1283,76 @@ app.whenReady().then(() => {
             messages: apiMessages,
             tools: initialTools,
             systemPrompt: systemInstruction,
-            activeSkills: availableSkills,
+            activeSkills: [],
+            maxTokensLimit: contextLimit,
           });
           event.reply(`chat-stream-context-metrics-${sessionId}`, updatedMetrics);
         }
 
-        // 完成时保存助理消息到 JSON
-        storageService.addMessage(sessionId, {
-          role: "assistant",
-          content: fullGeneratedText,
-          metadata: { toolRounds: toolRound },
-        });
+        // 若大模型在工具调用结束后未给出最终文本回答，强制进行最终一轮总结输出
+        if (!fullGeneratedText.trim() && toolRound > 0) {
+          apiMessages.push({
+            role: "user",
+            content: "请基于以上工具执行获取到的全部信息、代码与事实，给出条理清晰、完整详尽的总结分析与答复。",
+          });
+          await maybeCompact("preflight");
+          let finalResult;
+          try {
+            finalResult = await doStreamRequest(apiMessages, {});
+          } catch (err) {
+            if (!isContextOverflowError(err.message)) throw err;
+            const compacted = await maybeCompact("overflow", { force: true });
+            if (!compacted) throw err;
+            finalResult = await doStreamRequest(apiMessages, {});
+          }
+          if (finalResult.content) {
+            fullGeneratedText += finalResult.content;
+          }
+        }
 
         // 最终推送一次 Context
         const finalMetrics = calculateContextMetrics({
           messages: apiMessages,
           tools: initialTools,
           systemPrompt: systemInstruction,
-          activeSkills: availableSkills,
+          activeSkills: [],
+          maxTokensLimit: contextLimit,
         });
         event.reply(`chat-stream-context-metrics-${sessionId}`, finalMetrics);
 
+        // 结束时通知前端，由前端单源原子落盘 (消除主进程重复双写导致的消息被覆盖Bug)
         event.reply(`chat-stream-end-${sessionId}`, {
-          metadata: { toolRounds: toolRound },
+          content: fullGeneratedText,
+          metadata: {
+            toolRounds: toolRound,
+            toolSteps: executedToolSteps,
+            todos: initialTodos,
+            compaction: {
+              count: compactionStats.count,
+              beforeTokens: compactionStats.beforeTokens,
+              afterTokens: compactionStats.afterTokens,
+            },
+          },
         });
+
+        // 旁路异步任务：首轮交互结束后提炼会话标题 (零阻塞，Fire-and-forget)
+        try {
+          const currentSession = storageService.getSessions().find((s) => s.id === sessionId);
+          const shouldGenTitle =
+            currentSession &&
+            currentSession.title_source !== "custom" &&
+            (!currentSession.title || currentSession.title.includes("新的") || currentSession.title_source === "default");
+
+          if (shouldGenTitle) {
+            const firstUserMsg = apiMessages.find((m) => m.role === "user");
+            const firstUserText = extractTextContent(firstUserMsg?.content);
+            if (firstUserText) {
+              generateSessionTitleSidecar(sessionId, firstUserText, model, event.sender).catch(() => {});
+            }
+          }
+        } catch (e) {
+          // 忽略旁路任务触发异常
+        }
       } catch (err) {
         console.error(`[chat-stream error ${sessionId}]`, err);
         event.reply(`chat-stream-error-${sessionId}`, err.message);

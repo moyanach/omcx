@@ -44,56 +44,11 @@ html[data-theme="dark"] {
   --sidebar-hover: rgba(255, 255, 255, 0.08);
 }
 
-/* ─── 亮色主题 ───
- * 配色方案：
- * - 主背景：#f1f5f9 (slate-100)
- * - 卡片背景：#ffffff
- * - 次背景：#f8fafc (slate-50)
- * - 主文字：#0f172a (slate-900)
- * - 次文字：#334155 (slate-700)
- * - 边框：#e2e8f0 (slate-200)
- */
-html[data-theme="light"] {
-  color-scheme: light;
-  color: #0f172a;
-  background-color: #f1f5f9;
-
-  --app-bg: #f1f5f9;
-  --surface: #ffffff;
-  --surface-muted: #f8fafc;
-  --assistant-bubble: #ffffff;
-  --border: #e2e8f0;
-  --border-strong: #cbd5e1;
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #64748b;
-  --accent-indigo: #4f46e5;
-  --accent-indigo-soft: rgba(99, 102, 241, 0.10);
-
-  /* Sidebar */
-  --sidebar-bg: #e2e8f0;
-  --sidebar-hover: rgba(0, 0, 0, 0.06);
-}
-
 body {
   margin: 0;
   overflow: hidden;
-}
-
-/* ─── 亮色主题滚动条 ─── */
-html[data-theme="light"] ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-html[data-theme="light"] ::-webkit-scrollbar-thumb {
-  background: #cbd5e1 !important;
-  border-radius: 4px;
-}
-html[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8 !important;
-}
-html[data-theme="light"] ::-webkit-scrollbar-track {
-  background: transparent !important;
+  background-color: #111111;
+  color: #f3f4f6;
 }
 
 /* ─── 主题变量工具类 ─── */
@@ -280,3 +235,42 @@ html[data-theme="light"] ::-webkit-scrollbar-track {
   margin-top: 1.25rem;
   margin-bottom: 1.25rem;
 }
+
+/* ─── 全局精致高对比滚动条 (确保可见且支持拖拽) ─── */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #4e4e4e transparent;
+  -webkit-overflow-scrolling: touch;
+}
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 9999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #4e4e4e;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #737373;
+}
+
+/* 亮色模式下的滚动条滑块 */
+html[data-theme="light"] .custom-scrollbar {
+  scrollbar-color: #94a3b8 transparent;
+}
+html[data-theme="light"] .custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.05);
+}
+html[data-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #94a3b8 !important;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+html[data-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #64748b !important;
+}
+

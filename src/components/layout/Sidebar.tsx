@@ -1,54 +1,56 @@
-import { MessageSquare, Settings, Sparkles } from 'lucide-react';
-import { useAppStore, View } from '@/stores/appStore';
+import React from 'react';
+import { MessageSquare, Wrench, FolderGit2, Settings } from 'lucide-react';
+import { useAppStore, NavTab } from '@/stores/appStore';
 
-const NavItem = ({
-  view,
-  label,
-  icon: Icon,
-}: {
-  view: View;
+interface NavItemProps {
+  tab: NavTab;
   label: string;
   icon: React.ElementType;
-}) => {
-  const { activeView, setActiveView } = useAppStore();
-  const isActive = activeView === view;
+}
+
+const NavItem: React.FC<NavItemProps> = ({ tab, label, icon: Icon }) => {
+  const { activeNavTab, setActiveNavTab } = useAppStore();
+  const isActive = activeNavTab === tab;
 
   return (
     <button
-      onClick={() => setActiveView(view)}
-      className='w-[60px] flex flex-col items-center py-2.5 px-1 rounded-xl transition-all duration-200 titlebar-no-drag sidebar-nav-item'
-      data-active={isActive ? 'true' : 'false'}
+      onClick={() => setActiveNavTab(tab)}
+      className={`w-[52px] h-[52px] flex flex-col items-center justify-center rounded-xl transition-all duration-200 titlebar-no-drag group select-none ${
+        isActive
+          ? 'bg-blue-500/15 text-blue-400 border border-blue-500/30 shadow-sm'
+          : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04] border border-transparent'
+      }`}
+      title={label}
     >
-      <Icon size={22} />
-      <span className='text-[11px] mt-1 font-medium'>{label}</span>
+      <Icon size={20} className='group-hover:scale-105 transition-transform' />
+      <span className='text-[10px] mt-1 font-medium tracking-tight'>{label}</span>
     </button>
   );
 };
 
-const Sidebar = () => {
-  const { activeView, setActiveView } = useAppStore();
-
+export const Sidebar: React.FC = () => {
   return (
-    <div className='w-[76px] h-full flex flex-col items-center pt-12 pb-4 flex-shrink-0 titlebar-drag sidebar-container border-r border-[#262626] bg-[#141414]'>
-      {/* 顶部 Logo */}
-      <button
-        onClick={() => setActiveView('chat')}
-        className='mb-4 w-11 h-11 rounded-xl flex items-center justify-center transition-all duration-200 titlebar-no-drag text-blue-400 bg-blue-500/10 hover:bg-blue-500/20'
-        title='Agnes AI Agent'
-      >
-        <Sparkles size={22} />
-      </button>
+    <div className='w-[66px] h-full flex flex-col items-center pt-8 pb-4 flex-shrink-0 titlebar-drag sidebar-container border-r border-[#202020] bg-[#111111] z-30 select-none'>
+      {/* 顶部留出 macOS 原生红绿灯安全间距 (已按用户要求移除星星图标) */}
+      <div className='h-8 w-full' />
 
-      {/* 导航按钮组 */}
-      <div className='flex flex-col gap-2'>
-        <NavItem view='chat' label='Agent' icon={MessageSquare} />
+      {/* 核心三大主导航 Panel 图标 (会话 / 工具 / 工作空间) */}
+      <div className='flex flex-col gap-3 mt-1'>
+        {/* 1. 会话列表 */}
+        <NavItem tab='sessions' label='会话' icon={MessageSquare} />
+
+        {/* 2. 工具 (SKILLS & MCP 增删改查) */}
+        <NavItem tab='tools' label='工具' icon={Wrench} />
+
+        {/* 3. 工作空间 (多空间管理与下属会话树) */}
+        <NavItem tab='workspaces' label='空间' icon={FolderGit2} />
       </div>
 
       <div className='flex-grow' />
 
-      {/* 底部设置 */}
+      {/* 底部设置按钮 */}
       <div className='flex flex-col gap-2'>
-        <NavItem view='settings' label='设置' icon={Settings} />
+        <NavItem tab='settings' label='设置' icon={Settings} />
       </div>
     </div>
   );

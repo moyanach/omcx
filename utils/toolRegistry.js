@@ -11,8 +11,10 @@
  */
 
 const { ReadFileTool, WriteFileTool, ListDirectoryTool, SearchCodeTool } = require("./tools/fileTools");
+const { EditFileTool } = require("./tools/editFileTool");
 const { WebSearchTool, WebFetchTool } = require("./tools/webTools");
 const { RunCommandTool } = require("./tools/shellTools");
+const { TodoWriteTool } = require("./tools/todoTool");
 
 class ToolRegistry {
   constructor() {
@@ -85,6 +87,32 @@ class ToolRegistry {
   }
 
   /**
+   * 生成紧凑的工具手册（参数签名 + 描述），用于 system prompt
+   */
+  getToolPromptDocs() {
+    const docs = [];
+    for (const tool of this._tools.values()) {
+      const properties = tool.parameters?.properties || {};
+      const required = new Set(tool.parameters?.required || []);
+
+      const params = Object.entries(properties)
+        .map(([paramName, prop]) => {
+          const isRequired = required.has(paramName);
+          let signature = `${paramName}${isRequired ? "" : "?"}: ${prop?.type || "any"}`;
+          if (prop?.default !== undefined) {
+            signature += ` = ${JSON.stringify(prop.default)}`;
+          }
+          return signature;
+        })
+        .join(", ");
+
+      const description = String(tool.description || "").slice(0, 160);
+      docs.push(`- ${tool.name}(${params}): ${description}`);
+    }
+    return docs;
+  }
+
+  /**
    * 执行指定工具
    * @param {string} name
    * @param {object} args
@@ -119,6 +147,73 @@ const toolRegistry = new ToolRegistry();
 
 // ─── 转换 LangChain StructuredTool 为 OpenAI 函数定义 ──────
 
+function unwrapZodField(field) {
+  let current = field;
+  let optional = false;
+  let defaultValue;
+  let guard = 0;
+
+  while (current && guard < 10) {
+    const typeName = current._def?.typeName;
+    if (typeName === "ZodOptional" || typeName === "ZodNullable") {
+      optional = true;
+      current = current._def.innerType;
+    } else if (typeName === "ZodDefault") {
+      optional = true;
+      defaultValue = current._def.defaultValue();
+      current = current._def.innerType;
+    } else {
+      break;
+    }
+    guard += 1;
+  }
+
+  return { inner: current, optional, defaultValue };
+}
+
+function zodFieldToJson(field) {
+  const { inner, optional, defaultValue } = unwrapZodField(field);
+  const typeName = inner?._def?.typeName;
+  let schema;
+
+  switch (typeName) {
+    case "ZodNumber":
+      schema = { type: "number" };
+      break;
+    case "ZodBoolean":
+      schema = { type: "boolean" };
+      break;
+    case "ZodEnum":
+      schema = { type: "string", enum: inner._def.values };
+      break;
+    case "ZodArray":
+      schema = { type: "array", items: zodFieldToJson(inner._def.type).schema };
+      break;
+    case "ZodObject": {
+      const shape = typeof inner._def.shape === "function" ? inner._def.shape() : {};
+      const properties = {};
+      const required = [];
+      for (const [key, value] of Object.entries(shape)) {
+        const converted = zodFieldToJson(value);
+        properties[key] = converted.schema;
+        if (!converted.optional) required.push(key);
+      }
+      schema = { type: "object", properties, required };
+      break;
+    }
+    case "ZodString":
+    default:
+      schema = { type: "string" };
+      break;
+  }
+
+  const description = field?.description || inner?.description;
+  if (description) schema.description = description;
+  if (defaultValue !== undefined) schema.default = defaultValue;
+
+  return { schema, optional: optional || defaultValue !== undefined };
+}
+
 function zodShapeToJsonSchema(zodObj) {
   // StructuredTool.schema 是 @standard-schema/spec 兼容对象，有 toJSONSchema() 方法
   if (typeof zodObj?.toJSONSchema === "function") {
@@ -132,6 +227,9 @@ function zodShapeToJsonSchema(zodObj) {
           type: prop.type || "string",
           description: prop.description || "",
         };
+        if (prop.default !== undefined) {
+          properties[key].default = prop.default;
+        }
         // 只有没有 default 值的参数才标记为 required
         if (prop.default === undefined) {
           required.push(key);
@@ -144,6 +242,20 @@ function zodShapeToJsonSchema(zodObj) {
       required,
     };
   }
+
+  // zod v3 fallback: 直接读取 _def.shape
+  if (zodObj?._def?.typeName === "ZodObject" && typeof zodObj._def.shape === "function") {
+    const shape = zodObj._def.shape();
+    const properties = {};
+    const required = [];
+    for (const [key, field] of Object.entries(shape)) {
+      const converted = zodFieldToJson(field);
+      properties[key] = converted.schema;
+      if (!converted.optional) required.push(key);
+    }
+    return { type: "object", properties, required };
+  }
+
   // Fallback: 返回空 schema
   return { type: "object", properties: {}, required: [] };
 }
@@ -159,9 +271,17 @@ function fromLangChainTool(lcTool) {
     parameters,
     execute: async (args, context = {}) => {
       // StructuredTool 的 _call 方法直接处理参数并返回 JSON string
-      // 传入 workDir 到 _call 方法
       const workDir = context?.workDir || null;
-      const resultStr = await lcTool._call({ ...args, __workDir: workDir });
+      const allowedFolders = context?.allowedFolders || [];
+      const checkPermission = context?.checkPermission || null;
+      const onTodosUpdate = context?.onTodosUpdate || null;
+      const resultStr = await lcTool._call({
+        ...args,
+        __workDir: workDir,
+        __allowedFolders: allowedFolders,
+        __checkPermission: checkPermission,
+        __onTodosUpdate: onTodosUpdate,
+      });
       try {
         return JSON.parse(resultStr);
       } catch {
@@ -175,11 +295,13 @@ function fromLangChainTool(lcTool) {
 
 const ALL_TOOLS = [
   fromLangChainTool(new ReadFileTool()),
+  fromLangChainTool(new EditFileTool()),
   fromLangChainTool(new WriteFileTool()),
   fromLangChainTool(new ListDirectoryTool()),
   fromLangChainTool(new SearchCodeTool()),
   fromLangChainTool(new RunCommandTool()),
   fromLangChainTool(new WebFetchTool()),
+  fromLangChainTool(new TodoWriteTool()),
 ];
 
 // web_search 需要一个可选的 searchConfig，注册时不传参使用默认配置

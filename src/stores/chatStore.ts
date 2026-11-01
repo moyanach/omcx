@@ -1,19 +1,33 @@
 import { create } from "zustand";
 
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  width?: number;
+  height?: number;
+  path: string;
+  placeholder: string;
+}
+
 export interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
   createdAt: number;
   metadata?: any;
+  attachments?: ChatAttachment[];
 }
 
 export interface Session {
   id: string;
   title: string;
+  title_source?: string;
   updatedAt: number;
   model?: string;
   workDir?: string;
+  archived?: boolean;
 }
 
 export interface ContextBreakdownItem {
@@ -24,8 +38,15 @@ export interface ContextBreakdownItem {
   label: string;
 }
 
-export interface ContextMetrics {
-  totalLimit: number;
+export interface CompactionInfo {
+  at: number;
+  beforeTokens: number;
+  afterTokens: number;
+  keptMessages: number;
+  summarizedMessages: number;
+}
+
+export interface ContextMetrics {  totalLimit: number;
   totalLimitFormatted: string;
   usedTokens: number;
   usedTokensFormatted: string;
@@ -72,6 +93,30 @@ export interface SkillItem {
   scope: string;
 }
 
+export interface WorkspaceFolder {
+  path: string;
+  name: string;
+  isPrimary?: boolean;
+}
+
+export interface WorkspaceItem {
+  id: string;
+  name: string;
+  folders: WorkspaceFolder[];
+  updatedAt?: number;
+}
+
+export interface LlmModelItem {
+  id: string;
+  model_id: string;
+  name: string;
+  type: string;
+  provider: string;
+  base_url: string;
+  api_key?: string;
+  context_limit?: number;
+}
+
 interface ChatState {
   sessions: Session[];
   activeSessionId: string | null;
@@ -81,11 +126,26 @@ interface ChatState {
   gitStatus: WorkspaceGitStatus | null;
   mcpServers: McpServerItem[];
   skills: SkillItem[];
+  workspaces: WorkspaceItem[];
+  models: LlmModelItem[];
+  isWorkspaceModalOpen: boolean;
+  activeEditingWorkspace: WorkspaceItem | null;
+  stepDisplayStyle: 'detailed' | 'compact';
 
   initStore: () => Promise<void>;
-  addSession: () => Promise<void>;
+  setStepDisplayStyle: (style: 'detailed' | 'compact') => Promise<void>;
+  fetchModels: () => Promise<void>;
+  fetchWorkspaces: () => Promise<void>;
+  saveWorkspace: (ws: WorkspaceItem) => Promise<void>;
+  deleteWorkspace: (id: string) => Promise<void>;
+  openWorkspaceModal: (ws?: WorkspaceItem | null) => void;
+  closeWorkspaceModal: () => void;
+  addSessionWithWorkspacePrompt: () => Promise<void>;
+  addSession: (options?: { workDir?: string | null; model?: string }) => Promise<void>;
+  addSessionInWorkspace: (workspaceId: string) => Promise<string | null>;
   setActiveSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
+  archiveSession: (id: string, isArchived: boolean) => Promise<void>;
   updateSessionTitle: (id: string, title: string) => Promise<void>;
   setSessionWorkDir: (id: string, workDir: string | null) => Promise<void>;
   addMessage: (sessionId: string, message: Message, skipDb?: boolean) => Promise<void>;
@@ -100,6 +160,8 @@ interface ChatState {
   truncateMessages: (sessionId: string, messageId: string) => Promise<void>;
 
   setContextMetrics: (metrics: ContextMetrics | null) => void;
+  lastCompaction: CompactionInfo | null;
+  setLastCompaction: (data: CompactionInfo | null) => void;
   refreshOutputs: (sessionId: string) => Promise<void>;
   refreshGitStatus: (workDir?: string | null) => Promise<void>;
   refreshMcpAndSkills: (workDir?: string | null) => Promise<void>;
@@ -110,14 +172,124 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeSessionId: null,
   messages: {},
   contextMetrics: null,
+  lastCompaction: null,
   outputs: [],
   gitStatus: null,
   mcpServers: [],
   skills: [],
+  workspaces: [],
+  models: [],
+  stepDisplayStyle: 'detailed',
+
+  setStepDisplayStyle: async (style) => {
+    set({ stepDisplayStyle: style });
+    if (window.electronAPI?.setConfig) {
+      try {
+        await window.electronAPI.setConfig("step_display_style", style);
+      } catch (err) {
+        console.error("保存步骤展示风格失败:", err);
+      }
+    }
+  },
+
+  fetchModels: async () => {
+    if (window.electronAPI?.dbGetModels) {
+      try {
+        const list = await window.electronAPI.dbGetModels();
+        if (Array.isArray(list)) {
+          set({ models: list });
+        }
+      } catch (err) {
+        console.error("加载全局模型失败:", err);
+      }
+    }
+  },
+
+  fetchWorkspaces: async () => {
+    if (window.electronAPI?.getWorkspaces) {
+      try {
+        const list = await window.electronAPI.getWorkspaces();
+        if (Array.isArray(list)) {
+          set({ workspaces: list });
+        }
+      } catch (err) {
+        console.error("加载工作空间失败:", err);
+      }
+    }
+  },
+
+  saveWorkspace: async (ws) => {
+    if (window.electronAPI?.saveWorkspace) {
+      try {
+        await window.electronAPI.saveWorkspace(ws);
+        await get().fetchWorkspaces();
+      } catch (err) {
+        console.error("保存工作空间失败:", err);
+      }
+    }
+  },
+
+  deleteWorkspace: async (id) => {
+    if (window.electronAPI?.deleteWorkspace) {
+      try {
+        await window.electronAPI.deleteWorkspace(id);
+        await get().fetchWorkspaces();
+      } catch (err) {
+        console.error("删除工作空间失败:", err);
+      }
+    }
+  },
+
+  isWorkspaceModalOpen: false,
+  activeEditingWorkspace: null,
+
+  openWorkspaceModal: (ws) => {
+    if (ws) {
+      set({ isWorkspaceModalOpen: true, activeEditingWorkspace: ws });
+    } else {
+      const activeSession = get().sessions.find((s) => s.id === get().activeSessionId);
+      const currentDir = activeSession?.workDir;
+      const matched = get().workspaces.find((w) =>
+        w.folders.some((f) => f.path === currentDir)
+      );
+      if (matched) {
+        set({ isWorkspaceModalOpen: true, activeEditingWorkspace: matched });
+      } else {
+        set({
+          isWorkspaceModalOpen: true,
+          activeEditingWorkspace: {
+            id: `ws_${Date.now()}`,
+            name: activeSession?.title ? `${activeSession.title} 工作区` : '新工作空间',
+            folders: currentDir
+              ? [{ path: currentDir, name: currentDir.split(/[\\/]/).filter(Boolean).pop() || 'main', isPrimary: true }]
+              : [],
+          },
+        });
+      }
+    }
+  },
+
+  closeWorkspaceModal: () => set({ isWorkspaceModalOpen: false, activeEditingWorkspace: null }),
+
+  addSessionWithWorkspacePrompt: async () => {
+    await get().addSession();
+    // 新建会话时，给一个空的工作空间，里面的目录为空，弹窗让用户选择
+    set({
+      isWorkspaceModalOpen: true,
+      activeEditingWorkspace: {
+        id: `ws_${Date.now()}`,
+        name: '新工作空间',
+        folders: [], // 目录为空，让用户选择！
+      },
+    });
+  },
 
   initStore: async () => {
     if (!window.electronAPI) return;
     try {
+      await get().fetchModels();
+      await get().fetchWorkspaces();
+
       const dbSessions = await window.electronAPI.dbGetSessions();
 
       let activeId = null;
@@ -144,8 +316,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
           };
         });
       } else {
+        const chatModels = get().models.filter((m) => !m.type || m.type === "chat");
+        const usableFallback = chatModels.find((m) => m.api_key || m.provider === "ollama");
+        const initialModel = usableFallback?.id || chatModels[0]?.id || "";
+
         const newId = crypto.randomUUID();
-        const defaultSession = { id: newId, title: "新的 Agent 会话", updatedAt: Date.now(), model: "" };
+        const defaultSession = {
+          id: newId,
+          title: "新的 Agent 会话",
+          updatedAt: Date.now(),
+          model: initialModel,
+        };
         await window.electronAPI.dbAddSession(defaultSession);
 
         const welcomeMsg = {
@@ -172,9 +353,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessions: dbSessions.map((s: any) => ({
           id: s.id,
           title: s.title,
+          title_source: s.title_source || "default",
           updatedAt: s.updated_at || s.updatedAt,
           model: s.model || "",
           workDir: s.work_dir || s.workDir || undefined,
+          archived: !!s.archived,
         })),
         activeSessionId: activeId,
         messages: initialMessages,
@@ -186,15 +369,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().refreshGitStatus(activeSession?.work_dir || activeSession?.workDir);
         get().refreshMcpAndSkills(activeSession?.work_dir || activeSession?.workDir);
       }
+
+      // 注册全局会话标题异步更新监听 (Sidecar 旁路通知)
+      if (window.electronAPI?.onSessionTitleUpdated && !(get() as any)._titleListenerAttached) {
+        (get() as any)._titleListenerAttached = true;
+        window.electronAPI.onSessionTitleUpdated(({ sessionId, title }: { sessionId: string; title: string }) => {
+          set((state) => ({
+            sessions: state.sessions.map((s) =>
+              s.id === sessionId ? { ...s, title, title_source: "generated" } : s
+            ),
+          }));
+        });
+      }
+
+      if (window.electronAPI?.getConfig) {
+        try {
+          const savedStyle = await window.electronAPI.getConfig("step_display_style");
+          if (savedStyle === "detailed" || savedStyle === "compact") {
+            set({ stepDisplayStyle: savedStyle });
+          }
+        } catch (e) {
+          console.error("加载步骤风格失败:", e);
+        }
+      }
     } catch (err) {
       console.error("初始化 ChatStore 失败:", err);
     }
   },
 
-  addSession: async () => {
+  addSession: async (options) => {
     if (!window.electronAPI) return;
     const newId = crypto.randomUUID();
-    const newSession = { id: newId, title: "新的 Agent 会话", updatedAt: Date.now(), model: "" };
+
+    const chatModels = get().models.filter((model) => !model.type || model.type === "chat");
+    const usableModels = chatModels.filter(
+      (model) => model.api_key || model.provider === "ollama"
+    );
+    const fallbackModel = usableModels[0]?.id || chatModels[0]?.id || "";
+
+    const newSession = {
+      id: newId,
+      title: "新的 Agent 会话",
+      updatedAt: Date.now(),
+      model: options?.model || fallbackModel,
+      workDir: options?.workDir || undefined,
+    };
 
     try {
       await window.electronAPI.dbAddSession(newSession);
@@ -207,9 +426,66 @@ export const useChatStore = create<ChatState>((set, get) => ({
         contextMetrics: null,
       }));
 
-      get().refreshMcpAndSkills(null);
+      get().refreshMcpAndSkills(options?.workDir || null);
     } catch (err) {
       console.error("创建会话失败:", err);
+    }
+  },
+
+  addSessionInWorkspace: async (workspaceId) => {
+    if (!window.electronAPI) return null;
+
+    const workspace = get().workspaces.find((item) => item.id === workspaceId);
+    if (!workspace || workspace.folders.length === 0) return null;
+
+    const primaryFolder =
+      workspace.folders.find((folder) => folder.isPrimary) || workspace.folders[0];
+    const workDir = primaryFolder?.path || null;
+
+    const workspaceSessions = get()
+      .sessions.filter(
+        (session) =>
+          session.workDir &&
+          workspace.folders.some((folder) => folder.path === session.workDir)
+      )
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+    const chatModels = get().models.filter((model) => !model.type || model.type === "chat");
+    const usableModels = chatModels.filter(
+      (model) => model.api_key || model.provider === "ollama"
+    );
+    const model =
+      workspaceSessions[0]?.model ||
+      usableModels[0]?.id ||
+      chatModels[0]?.id ||
+      "";
+
+    const newId = crypto.randomUUID();
+    const newSession = {
+      id: newId,
+      title: "新的 Agent 会话",
+      updatedAt: Date.now(),
+      model,
+      workDir: workDir || undefined,
+    };
+
+    try {
+      await window.electronAPI.dbAddSession(newSession);
+
+      set((state) => ({
+        sessions: [newSession, ...state.sessions],
+        activeSessionId: newId,
+        messages: { ...state.messages, [newId]: [] },
+        outputs: [],
+        contextMetrics: null,
+      }));
+
+      get().refreshMcpAndSkills(workDir);
+      get().refreshGitStatus(workDir);
+      return newId;
+    } catch (err) {
+      console.error("创建会话失败:", err);
+      return null;
     }
   },
 
@@ -286,13 +562,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  archiveSession: async (id, isArchived) => {
+    if (!window.electronAPI) return;
+    try {
+      set((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === id ? { ...s, archived: isArchived } : s
+        ),
+      }));
+
+      const session = get().sessions.find((s) => s.id === id);
+      if (session) {
+        await window.electronAPI.dbAddSession({
+          id: session.id,
+          title: session.title,
+          model: session.model,
+          work_dir: session.workDir,
+          archived: isArchived,
+        });
+      }
+    } catch (err) {
+      console.error("归档会话失败:", err);
+    }
+  },
+
   updateSessionTitle: async (id, title) => {
     if (!window.electronAPI) return;
     try {
       await window.electronAPI.dbUpdateSessionTitle(id, title);
       set((state) => ({
         sessions: state.sessions.map((s) =>
-          s.id === id ? { ...s, title, updatedAt: Date.now() } : s
+          s.id === id ? { ...s, title, title_source: "custom", updatedAt: Date.now() } : s
         ),
       }));
     } catch (err) {
@@ -309,8 +609,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.id === id ? { ...s, workDir: workDir || undefined, updatedAt: Date.now() } : s
         ),
       }));
-      get().refreshGitStatus(workDir);
-      get().refreshMcpAndSkills(workDir);
+
+      // 如果有选择工作目录，保存至最近项目
+      if (workDir && window.electronAPI.addRecentProject) {
+        const folderName = workDir.split(/[\\/]/).filter(Boolean).pop() || workDir;
+        window.electronAPI.addRecentProject({
+          id: `p_${Date.now()}`,
+          name: folderName,
+          path: workDir,
+        });
+      }
+
+      // 实时全量联动刷新右侧伴随监控面板的各项数据
+      await Promise.all([
+        get().refreshGitStatus(workDir),
+        get().refreshMcpAndSkills(workDir),
+        get().refreshOutputs(id),
+      ]);
     } catch (err) {
       console.error("更新会话工作目录失败:", err);
     }
@@ -387,10 +702,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
     if (window.electronAPI) {
       try {
+        const session = get().sessions.find((s) => s.id === sessionId);
         await window.electronAPI.dbAddSession({
           id: sessionId,
-          title: get().sessions.find((s) => s.id === sessionId)?.title || "对话",
+          title: session?.title || "对话",
           model,
+          work_dir: session?.workDir || null,
+          workDir: session?.workDir || null,
+          archived: !!session?.archived,
         });
       } catch (err) {
         console.error("更新模型持久化失败:", err);
@@ -425,6 +744,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!targetMsg) return;
 
     const filtered = currentMsgs.filter((m) => m.createdAt <= targetMsg.createdAt);
+    const removed = currentMsgs.filter((m) => m.createdAt > targetMsg.createdAt);
 
     set((state) => ({
       messages: {
@@ -439,10 +759,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } catch (err) {
         console.error("截断消息失败:", err);
       }
+
+      for (const message of removed) {
+        const attachmentList = message.metadata?.attachments;
+        if (!Array.isArray(attachmentList)) continue;
+        for (const attachment of attachmentList) {
+          if (!attachment?.path) continue;
+          try {
+            await window.electronAPI.deleteChatAttachment(attachment.path);
+          } catch (err) {
+            console.error("清理附件失败:", err);
+          }
+        }
+      }
     }
   },
 
   setContextMetrics: (metrics) => set({ contextMetrics: metrics }),
+  setLastCompaction: (data) => set({ lastCompaction: data }),
 
   refreshOutputs: async (sessionId) => {
     if (!window.electronAPI?.getSessionOutputs || !sessionId) return;
@@ -467,11 +801,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
   refreshMcpAndSkills: async (workDir) => {
     if (!window.electronAPI) return;
     try {
-      const [mcps, skills] = await Promise.all([
+      const [mcps, skills, tools] = await Promise.all([
         window.electronAPI.getMcpServers ? window.electronAPI.getMcpServers(workDir) : [],
         window.electronAPI.getSkills ? window.electronAPI.getSkills(workDir) : [],
+        window.electronAPI.getTools ? window.electronAPI.getTools() : [],
       ]);
       set({ mcpServers: mcps || [], skills: skills || [] });
+
+      // 联动重算 ContextMetrics
+      const activeSessionId = get().activeSessionId;
+      const currentMsgs = activeSessionId ? get().messages[activeSessionId] || [] : [];
+      if (window.electronAPI.getContextMetrics) {
+        const metrics = await window.electronAPI.getContextMetrics({
+          messages: currentMsgs,
+          tools: tools || [],
+          systemPrompt: "You are a professional AI developer agent.",
+          activeSkills: skills || [],
+        });
+        if (metrics) {
+          set({ contextMetrics: metrics });
+        }
+      }
     } catch (err) {
       console.error("刷新 MCP 和 Skills 失败:", err);
     }
