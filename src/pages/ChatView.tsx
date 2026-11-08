@@ -23,10 +23,15 @@ const ChatView: React.FC = () => {
     sessions,
     activeSessionId,
     messages,
+    toolCallsBySession,
+    todosBySession,
+    permissionBySession,
+    setSessionPermission,
     initStore,
     updateSessionModel,
     updateSessionTitle,
     setSessionWorkDir,
+    setSessionPermissionMode,
     refreshOutputs,
     refreshGitStatus,
     refreshMcpAndSkills,
@@ -39,6 +44,10 @@ const ChatView: React.FC = () => {
     models,
     fetchModels,
     setLastCompaction,
+    workbenchOpen,
+    setWorkbenchOpen,
+    pendingMentionInsert,
+    setPendingMentionInsert,
   } = useChatStore();
 
   const { activeView } = useAppStore();
@@ -65,15 +74,26 @@ const ChatView: React.FC = () => {
 
   // 顶部两个控制开关状态：
   // 1. inspectorOpen: 控制当前会话右侧（图 4 绿色框区域）的工作空间与 Inspector 监控
-  // 2. browserDrawerOpen: 控制最右侧额外扩展抽屉（图 3 的内置浏览器/终端/工具）
+  // 2. workbenchOpen: 控制最右侧额外扩展抽屉（内置浏览器/终端/文件树/Git Diff，由 chatStore 全局托管）
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [browserDrawerOpen, setBrowserDrawerOpen] = useState(false);
+
+  // 当从文件树点击“@引用”时，自动插入到当前输入框
+  useEffect(() => {
+    if (pendingMentionInsert) {
+      setInput((prev) => {
+        const prefix = prev && !prev.endsWith(' ') ? `${prev} ` : prev;
+        return `${prefix}${pendingMentionInsert}`;
+      });
+      setPendingMentionInsert(null);
+    }
+  }, [pendingMentionInsert, setPendingMentionInsert]);
 
   const [enableTools, setEnableTools] = useState(true);
-  const [activeToolCalls, setActiveToolCalls] = useState<any[]>([]);
-  const [activeTodos, setActiveTodos] = useState<any[]>([]);
 
   const activeMessages = activeSessionId ? messages[activeSessionId] || [] : [];
+  const activeToolCalls = activeSessionId ? toolCallsBySession[activeSessionId] || [] : [];
+  const activeTodos = activeSessionId ? todosBySession[activeSessionId] || [] : [];
+  const pendingPermission = activeSessionId ? permissionBySession[activeSessionId] || null : null;
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
   // 全局响应式模型列表 (过滤 chat 类型)
@@ -116,24 +136,19 @@ const ChatView: React.FC = () => {
   useEffect(() => {
     if (activeView !== 'chat') {
       setInspectorOpen(false);
-      setBrowserDrawerOpen(false);
+      setWorkbenchOpen(false);
     }
   }, [activeView]);
 
-  // 外部路径越界访问人机协同审批请求
-  const [pendingPermission, setPendingPermission] = useState<{
-    id: string;
-    path: string;
-    action: string;
-    reason: string;
-  } | null>(null);
-
-  const handlePermissionResponse = (allow: boolean) => {
-    if (!pendingPermission) return;
+  const handlePermissionResponse = (
+    allow: boolean,
+    decision?: 'allow_once' | 'allow_session' | 'switch_auto_sandbox' | 'deny'
+  ) => {
+    if (!pendingPermission || !activeSessionId) return;
     if (window.electronAPI?.respondPermission) {
-      window.electronAPI.respondPermission(pendingPermission.id, allow);
+      window.electronAPI.respondPermission(pendingPermission.id, allow, decision);
     }
-    setPendingPermission(null);
+    setSessionPermission(activeSessionId, null);
   };
 
   const handleSend = async () => {
@@ -173,30 +188,11 @@ const ChatView: React.FC = () => {
     attachments.forEach((item) => URL.revokeObjectURL(item.previewUrl));
     setAttachments([]);
     setInput('');
-    setActiveToolCalls([]);
-    setActiveTodos([]);
-    setPendingPermission(null);
     sendMessage(
       text,
       selectedModel || availableChatModels[0]?.id || 'model_chat_default',
       enableTools,
       {
-        onToolStatus: (status) => {
-          setActiveToolCalls((prev) => {
-            if (status.status === 'running') {
-              return [...prev, status];
-            }
-            return prev.map((t) =>
-              t.tool === status.tool && t.callId === status.callId ? status : t
-            );
-          });
-        },
-        onPermissionRequest: (perm) => {
-          setPendingPermission(perm);
-        },
-        onTodosUpdate: (todos) => {
-          setActiveTodos(todos);
-        },
         onCompaction: (data) => {
           setLastCompaction(data);
           showToast(
@@ -211,30 +207,11 @@ const ChatView: React.FC = () => {
 
   const handleRetry = (msg: any) => {
     if (isGenerating || !activeSessionId) return;
-    setActiveToolCalls([]);
-    setActiveTodos([]);
-    setPendingPermission(null);
     retryMessage(
       msg.id,
       selectedModel || availableChatModels[0]?.id || 'model_chat_default',
       enableTools,
       {
-        onToolStatus: (status) => {
-          setActiveToolCalls((prev) => {
-            if (status.status === 'running') {
-              return [...prev, status];
-            }
-            return prev.map((t) =>
-              t.tool === status.tool && t.callId === status.callId ? status : t
-            );
-          });
-        },
-        onPermissionRequest: (perm) => {
-          setPendingPermission(perm);
-        },
-        onTodosUpdate: (todos) => {
-          setActiveTodos(todos);
-        },
         onCompaction: (data) => {
           setLastCompaction(data);
           showToast(
@@ -271,7 +248,7 @@ const ChatView: React.FC = () => {
   };
 
   return (
-    <div className='flex h-full w-full overflow-hidden bg-[#141414]'>
+    <div className='flex h-full w-full overflow-hidden relative'>
       <div
         className={`fixed top-6 left-1/2 -translate-x-1/2 z-[120] flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl shadow-2xl transition-all duration-300 ${
           toastMsg ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'
@@ -281,25 +258,25 @@ const ChatView: React.FC = () => {
         <span className='text-xs font-medium'>{toastMsg}</span>
       </div>
       {/* 当前会话的主交互区 (包含顶部Header、左消息+贴底输入、右绿色框Inspector) */}
-      <div className='flex-1 h-full flex flex-col overflow-hidden bg-[#161616] border-r border-[#242424]'>
+      <div className='flex-1 min-w-0 h-full flex flex-col overflow-hidden bg-[var(--ui-panel-bg)] border-r border-[color:var(--ui-divider-hairline)]'>
         <ChatHeader
           session={activeSession}
           leftPanelOpen={inspectorOpen}
           onToggleLeftPanel={() => setInspectorOpen(!inspectorOpen)}
-          rightDrawerOpen={browserDrawerOpen}
-          onToggleRightDrawer={() => setBrowserDrawerOpen(!browserDrawerOpen)}
+          rightDrawerOpen={workbenchOpen}
+          onToggleRightDrawer={() => setWorkbenchOpen(!workbenchOpen)}
         />
 
         {/* 会话内容交互容器 */}
         {!activeSessionId ? (
-          <div className='flex-1 flex items-center justify-center text-neutral-500 text-sm'>
+          <div className='flex-1 flex items-center justify-center text-[var(--ui-text-faint)] text-sm'>
             请在左侧选择或创建一个会话
           </div>
         ) : (
-          <div className='flex-1 min-h-0 flex overflow-hidden bg-[#131313]'>
-            {/* 左侧：外层舞台增加 p-3 内边距，中央包裹为一个带圆角与细腻阴影的大 Card */}
+          <div className='flex-1 min-h-0 flex overflow-hidden bg-[var(--ui-stage-wrap-bg)]'>
+            {/* 左侧：外层舞台增加 p-3 内边距，中央包裹为一个带圆角与微弱边界的舞台 Card */}
             <div className='flex-1 min-h-0 p-3 flex flex-col overflow-hidden'>
-              <div className='flex-1 min-h-0 flex flex-col overflow-hidden bg-[#181818] border border-[#262626] rounded-2xl shadow-2xl shadow-black/50 relative'>
+              <div className='flex-1 min-h-0 flex flex-col overflow-hidden bg-[var(--ui-stage-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl shadow-[var(--ui-stage-shadow)] relative'>
                 <MessageList
                   messages={activeMessages}
                   isGenerating={isGenerating}
@@ -310,40 +287,95 @@ const ChatView: React.FC = () => {
                   onRetry={handleRetry}
                 />
 
-                {/* 外部路径越界访问人机协同审批卡片 (全宽 px-5 对齐，不再写死 90%) */}
+                {/* 多场景沙箱与人机协同权限审批卡片 */}
                 {pendingPermission && (
                   <div className='px-5 mb-2 w-full flex-shrink-0'>
-                    <div className='w-full p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs flex items-center justify-between gap-3 shadow-lg select-none'>
+                    <div className='w-full p-3 rounded-xl bg-[var(--ui-accent-amber-soft)] border border-[color:var(--ui-accent-amber-border)] text-xs flex items-center justify-between gap-3 shadow-sm select-none'>
                       <div className='flex items-center gap-2.5 min-w-0 pr-2'>
-                        <div className='w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center flex-shrink-0'>
+                        <div className='w-7 h-7 rounded-lg bg-[var(--ui-accent-amber-soft)] text-[var(--ui-accent-amber)] flex items-center justify-center flex-shrink-0'>
                           <ShieldAlert size={15} />
                         </div>
-                        <div className='flex flex-col min-w-0'>
-                          <span className='font-semibold text-neutral-100 flex items-center gap-1.5 truncate'>
-                            <span>Agent 正在请求访问未绑定的外部路径</span>
-                            <span className='px-1.5 py-0.2 rounded text-[10px] bg-amber-500/20 text-amber-300 font-mono'>
+                        <div className='flex flex-col min-w-0 gap-0.5'>
+                          <span className='font-semibold text-[var(--ui-text-primary)] flex items-center gap-1.5 truncate'>
+                            <span>
+                              {pendingPermission.kind === 'sandbox_escape'
+                                ? '沙箱安全拦截 · 申请在沙箱外重试命令'
+                                : pendingPermission.kind === 'dangerous_command'
+                                ? '高危命令拦截 · 请确认操作风险'
+                                : pendingPermission.kind === 'protected_write'
+                                ? '受保护配置拦截 · 请求修改敏感工程配置'
+                                : pendingPermission.kind === 'ask_write' || pendingPermission.kind === 'ask_command'
+                                ? '询问确认模式 · 请确认是否执行此操作'
+                                : '越界访问拦截 · 请求访问工作空间外部路径'}
+                            </span>
+                            <span className='px-1.5 py-0.2 rounded text-[10px] bg-[var(--ui-accent-amber-soft)] text-[var(--ui-accent-amber)] font-mono flex-shrink-0'>
                               {pendingPermission.action}
                             </span>
                           </span>
-                          <span className='text-[11px] text-neutral-400 font-mono truncate' title={pendingPermission.path}>
-                            {pendingPermission.path}
+                          <span className='text-[11px] text-[var(--ui-text-secondary)] font-mono truncate' title={pendingPermission.command || pendingPermission.path}>
+                            {pendingPermission.command ? `$ ${pendingPermission.command}` : pendingPermission.path}
                           </span>
+                          {pendingPermission.reason && (
+                            <span className='text-[11px] text-[var(--ui-text-muted)] truncate' title={pendingPermission.reason}>
+                              {pendingPermission.reason}
+                            </span>
+                          )}
                         </div>
                       </div>
 
                       <div className='flex items-center gap-2 flex-shrink-0'>
                         <button
-                          onClick={() => handlePermissionResponse(false)}
-                          className='px-3 py-1.5 rounded-xl bg-[#222222] hover:bg-[#2c2c2c] text-neutral-300 hover:text-white border border-[#333333] text-xs font-medium transition-colors cursor-pointer'
+                          onClick={() => handlePermissionResponse(false, 'deny')}
+                          className='px-3 py-1.5 rounded-xl bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-secondary)] border border-[color:var(--ui-border-subtle)] text-xs font-medium transition-colors cursor-pointer'
                         >
                           拒绝
                         </button>
-                        <button
-                          onClick={() => handlePermissionResponse(true)}
-                          className='px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-colors cursor-pointer'
-                        >
-                          允许并继续
-                        </button>
+
+                        {pendingPermission.kind === 'sandbox_escape' ? (
+                          <button
+                            onClick={() => handlePermissionResponse(true, 'allow_once')}
+                            className='px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-sm transition-colors cursor-pointer'
+                          >
+                            仅本次沙箱外重跑
+                          </button>
+                        ) : pendingPermission.allowSwitchAutoSandbox ? (
+                          <>
+                            <button
+                              onClick={() => handlePermissionResponse(true, 'allow_once')}
+                              className='px-3 py-1.5 rounded-xl bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-subtle)] text-xs font-medium transition-colors cursor-pointer'
+                            >
+                              仅本次允许
+                            </button>
+                            <button
+                              onClick={() => handlePermissionResponse(true, 'switch_auto_sandbox')}
+                              className='px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-sm transition-colors cursor-pointer'
+                            >
+                              切换为工作区沙箱并允许
+                            </button>
+                          </>
+                        ) : pendingPermission.kind === 'external_path' ? (
+                          <>
+                            <button
+                              onClick={() => handlePermissionResponse(true, 'allow_once')}
+                              className='px-3 py-1.5 rounded-xl bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-subtle)] text-xs font-medium transition-colors cursor-pointer'
+                            >
+                              仅本次允许
+                            </button>
+                            <button
+                              onClick={() => handlePermissionResponse(true, 'allow_session')}
+                              className='px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-sm transition-colors cursor-pointer'
+                            >
+                              允许并加入会话白名单
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => handlePermissionResponse(true, 'allow_once')}
+                            className='px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-sm transition-colors cursor-pointer'
+                          >
+                            确认并允许本次执行
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -358,6 +390,12 @@ const ChatView: React.FC = () => {
                   containerWidth={0}
                   workDir={activeSession?.workDir || null}
                   onSelectWorkDir={handleSelectWorkDir}
+                  permissionMode={activeSession?.permissionMode || 'auto-sandbox'}
+                  onChangePermissionMode={(mode) => {
+                    if (activeSessionId) {
+                      setSessionPermissionMode(activeSessionId, mode);
+                    }
+                  }}
                   attachments={attachments}
                   onChangeAttachments={setAttachments}
                   onNotify={showToast}
@@ -380,10 +418,10 @@ const ChatView: React.FC = () => {
         )}
       </div>
 
-      {/* 栏 3: 最右侧扩展抽屉 (内置浏览器 / 网页测试 / 终端 / 文件树) */}
+      {/* 栏 3: 最右侧扩展抽屉 (内置浏览器 / 网页测试 / 终端 / 文件树 / Git Diff) */}
       <WebWorkspaceDrawer
-        isOpen={browserDrawerOpen}
-        onClose={() => setBrowserDrawerOpen(false)}
+        isOpen={workbenchOpen}
+        onClose={() => setWorkbenchOpen(false)}
       />
 
       {/* 100% 还原参考图 8 的编辑工作空间 Modal 弹窗 */}

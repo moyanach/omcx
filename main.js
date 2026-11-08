@@ -17,13 +17,27 @@ const crypto = require("crypto");
 
 // 引入核心业务服务
 const storageService = require("./services/storageService");
-const { getWorkspaceGitStatus } = require("./services/workspaceGitService");
+const {
+  getWorkspaceGitStatus,
+  getWorkspaceFileDiff,
+  commitWorkspaceChanges,
+} = require("./services/workspaceGitService");
 const { calculateContextMetrics, estimateTokens } = require("./services/contextCalculator");
 const { toolRegistry } = require("./utils/toolRegistry");
 const { performWebSearch, scrapePageContent } = require("./utils/tools/webTools");
 const { listWorkspaceFiles } = require("./utils/tools/fileIndexer");
 const { buildMentionContext } = require("./utils/tools/mentionResolver");
-const { buildSystemContext } = require("./utils/contextBuilder");
+const { isUnderFolder, isBuiltinTrustedPath, DEFAULT_ROOT } = require("./utils/tools/pathResolver");
+const { buildSystemContext, getGitSnapshotAsync } = require("./utils/contextBuilder");
+const { mcpClientService } = require("./services/mcpClientService");
+const subagentService = require("./services/subagentService");
+const {
+  PERMISSION_MODES,
+  normalizePermissionMode,
+  checkSensitivePath,
+  buildSanitizedShellEnv,
+} = require("./services/sandboxPolicyService");
+const { spawn } = require("child_process");
 const {
   estimateMessagesTokens,
   getThresholds,
@@ -65,15 +79,6 @@ function getApiConfig() {
   const baseUrl = storageService.getConfig("base_url") || "https://api.openai.com/v1";
   const savePath = storageService.getConfig("save_path") || "";
   return { apiKey, baseUrl, savePath };
-}
-
-// 读取搜索配置辅助函数
-function getSearchConfig() {
-  const provider = storageService.getConfig("search_provider") || "duckduckgo";
-  const apiKey = storageService.getConfig("search_api_key") || "";
-  const maxResultsVal = storageService.getConfig("search_max_results") || 5;
-  const maxResults = parseInt(maxResultsVal, 10) || 5;
-  return { provider, apiKey, maxResults };
 }
 
 /**
@@ -529,18 +534,77 @@ app.whenReady().then(() => {
   // 3.1 初始化 ~/.omcx 配置文件与环境
   storageService.initStorage();
 
-  // 3.2 注册特权协议
+  // 3.2 注册特权协议（带严格目录边界与路径穿越防御）
+  const DIST_ROOT = path.resolve(__dirname, "dist");
+
+  function isAllowedLocalMediaPath(targetPath) {
+    const resolved = path.resolve(targetPath);
+    if (checkSensitivePath(resolved).blocked) {
+      return false;
+    }
+    // 1. 允许访问会话附件目录 (~/.omcx/sessions/<id>/attachments/*)
+    if (storageService.isSessionAttachmentPath(resolved)) {
+      return true;
+    }
+    // 2. 排除 .env 等敏感配置文件
+    const baseName = path.basename(resolved).toLowerCase();
+    if (
+      baseName === ".env" ||
+      baseName.startsWith(".env.") ||
+      resolved.includes(`${path.sep}.omcx${path.sep}config.json`)
+    ) {
+      return false;
+    }
+    const wallpaperDir = path.join(os.homedir(), ".omcx", "wallpaper");
+    const allowedRoots = new Set([DEFAULT_ROOT, wallpaperDir]);
+    for (const ws of storageService.getWorkspaces()) {
+      if (Array.isArray(ws.folders)) {
+        for (const f of ws.folders) {
+          if (f?.path) allowedRoots.add(path.resolve(f.path));
+        }
+      }
+    }
+    for (const sess of storageService.getSessions()) {
+      if (sess?.work_dir) allowedRoots.add(path.resolve(sess.work_dir));
+      const outputs = storageService.getSessionOutputs(sess.id) || [];
+      for (const out of outputs) {
+        if (out?.filePath) {
+          allowedRoots.add(path.resolve(path.dirname(out.filePath)));
+        }
+      }
+    }
+    for (const root of allowedRoots) {
+      if (isUnderFolder(resolved, root)) return true;
+    }
+    return false;
+  }
+
   protocol.handle("local-media", async (request) => {
     try {
-      let filePath = request.url;
-      if (filePath.startsWith("local-media://")) {
-        filePath = filePath.slice("local-media://".length);
+      let filePath = "";
+      try {
+        const parsedUrl = new URL(request.url);
+        if (parsedUrl.hostname === "local") {
+          filePath = decodeURIComponent(parsedUrl.pathname);
+        } else if (parsedUrl.hostname) {
+          filePath = `/${parsedUrl.hostname}${decodeURIComponent(parsedUrl.pathname)}`;
+        } else {
+          filePath = decodeURIComponent(parsedUrl.pathname);
+        }
+      } catch {
+        filePath = request.url;
+        if (filePath.startsWith("local-media://")) {
+          filePath = filePath.slice("local-media://".length);
+        }
+        const queryIndex = filePath.indexOf("?");
+        if (queryIndex !== -1) filePath = filePath.substring(0, queryIndex);
+        const hashIndex = filePath.indexOf("#");
+        if (hashIndex !== -1) filePath = filePath.substring(0, hashIndex);
+        filePath = decodeURIComponent(filePath);
+        if (filePath.startsWith("local/")) {
+          filePath = filePath.slice("local".length);
+        }
       }
-      const queryIndex = filePath.indexOf("?");
-      if (queryIndex !== -1) filePath = filePath.substring(0, queryIndex);
-      const hashIndex = filePath.indexOf("#");
-      if (hashIndex !== -1) filePath = filePath.substring(0, hashIndex);
-      filePath = decodeURIComponent(filePath);
 
       if (process.platform === "win32") {
         if (filePath.startsWith("/")) filePath = filePath.slice(1);
@@ -549,10 +613,35 @@ app.whenReady().then(() => {
         if (!filePath.startsWith("/")) filePath = "/" + filePath;
       }
 
-      const fileUrl = pathToFileURL(filePath).toString();
+      let resolvedPath = path.resolve(filePath);
+      if (!fs.existsSync(resolvedPath) && resolvedPath.startsWith("/users/")) {
+        const capitalUsers = "/Users/" + resolvedPath.slice("/users/".length);
+        if (fs.existsSync(capitalUsers)) {
+          resolvedPath = capitalUsers;
+        }
+      }
+
+      if (!isAllowedLocalMediaPath(resolvedPath)) {
+        console.warn(`[protocol:local-media] 拦截越界访问请求: ${resolvedPath}`);
+        return new Response("Forbidden", { status: 403 });
+      }
+
+      const fileUrl = pathToFileURL(resolvedPath).toString();
       const response = await net.fetch(fileUrl, { bypassCustomProtocolHandlers: true });
       const headers = new Headers(response.headers);
       headers.set("Access-Control-Allow-Origin", "*");
+      const lower = resolvedPath.toLowerCase();
+      if (lower.endsWith(".html") || lower.endsWith(".htm")) {
+        headers.set("Content-Type", "text/html; charset=utf-8");
+      } else if (lower.endsWith(".svg")) {
+        headers.set("Content-Type", "image/svg+xml");
+      } else if (lower.endsWith(".css")) {
+        headers.set("Content-Type", "text/css; charset=utf-8");
+      } else if (lower.endsWith(".js") || lower.endsWith(".mjs")) {
+        headers.set("Content-Type", "text/javascript; charset=utf-8");
+      } else if (lower.endsWith(".json")) {
+        headers.set("Content-Type", "application/json; charset=utf-8");
+      }
 
       return new Response(response.body, {
         status: response.status,
@@ -571,19 +660,24 @@ app.whenReady().then(() => {
       let relativePath = decodeURIComponent(url.pathname);
       if (relativePath.startsWith("/")) relativePath = relativePath.slice(1);
 
-      let filePath;
-      if (url.host === "dist") {
-        filePath = path.join(__dirname, "dist", relativePath);
-      } else {
-        filePath = path.join(__dirname, relativePath);
+      // 统一将 app:// 静态资源锁定在 DIST_ROOT 内，防止 ../ 路径穿越读取主进程或系统文件
+      let filePath = path.resolve(DIST_ROOT, relativePath);
+      if (!isUnderFolder(filePath, DIST_ROOT)) {
+        console.warn(`[protocol:app] 拦截路径穿越请求: ${request.url}`);
+        return new Response("Forbidden", { status: 403 });
       }
 
-      // 若请求目录或不存在，默认返回 index.html
-      if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-        filePath = path.join(__dirname, "dist", "index.html");
+      // 若请求目录或不存在，默认返回 dist/index.html
+      try {
+        const stat = await fs.promises.stat(filePath);
+        if (stat.isDirectory()) {
+          filePath = path.join(DIST_ROOT, "index.html");
+        }
+      } catch {
+        filePath = path.join(DIST_ROOT, "index.html");
       }
 
-      const buffer = fs.readFileSync(filePath);
+      const buffer = await fs.promises.readFile(filePath);
       const headers = new Headers();
       headers.set("Access-Control-Allow-Origin", "*");
       if (filePath.endsWith(".html")) {
@@ -596,13 +690,21 @@ app.whenReady().then(() => {
         headers.set("Content-Type", "image/svg+xml");
       } else if (filePath.endsWith(".png")) {
         headers.set("Content-Type", "image/png");
+      } else if (filePath.endsWith(".woff2")) {
+        headers.set("Content-Type", "font/woff2");
+      } else if (filePath.endsWith(".woff")) {
+        headers.set("Content-Type", "font/woff");
+      } else if (filePath.endsWith(".ttf")) {
+        headers.set("Content-Type", "font/ttf");
+      } else if (filePath.endsWith(".json")) {
+        headers.set("Content-Type", "application/json; charset=utf-8");
       }
 
       return new Response(buffer, { status: 200, headers });
     } catch (err) {
       console.error("[protocol:app error]", err);
       try {
-        const fallback = fs.readFileSync(path.join(__dirname, "dist", "index.html"));
+        const fallback = await fs.promises.readFile(path.join(__dirname, "dist", "index.html"));
         return new Response(fallback, {
           status: 200,
           headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -694,6 +796,23 @@ app.whenReady().then(() => {
     safeHandler((event, id) => {
       const session = storageService.getSessions().find((s) => s.id === id);
       return session?.work_dir || null;
+    })
+  );
+
+  ipcMain.handle(
+    "db-update-session-permission-mode",
+    safeHandler((event, { id, permissionMode }) => {
+      const normalized = normalizePermissionMode(permissionMode);
+      const session = storageService.getSessions().find((s) => s.id === id);
+      if (session) {
+        session.permission_mode = normalized;
+        storageService.saveSession(session);
+      }
+      const active = activeStreamSessions.get(id);
+      if (active && active.toolContext) {
+        active.toolContext.permissionMode = normalized;
+      }
+      return { success: true, permissionMode: normalized };
     })
   );
 
@@ -799,12 +918,21 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "save-mcp-servers",
-    safeHandler((event, servers) => storageService.saveGlobalMcpServers(servers))
+    safeHandler((event, servers) => {
+      const saved = storageService.saveGlobalMcpServers(servers);
+      mcpClientService.reloadClients();
+      return saved;
+    })
   );
 
   ipcMain.handle(
     "get-skills",
     safeHandler((event, workDir) => storageService.getSkills(workDir))
+  );
+
+  ipcMain.handle(
+    "get-subagents",
+    safeHandler((event, workDir) => subagentService.discoverSubagents(workDir || null))
   );
 
   ipcMain.handle(
@@ -825,6 +953,338 @@ app.whenReady().then(() => {
   ipcMain.handle(
     "get-workspace-git-status",
     safeHandler((event, workDir) => getWorkspaceGitStatus(workDir))
+  );
+
+  ipcMain.handle(
+    "workspace-git-diff",
+    safeHandler((event, { workDir, filePath }) => getWorkspaceFileDiff(workDir, filePath))
+  );
+
+  ipcMain.handle(
+    "workspace-git-commit",
+    safeHandler((event, { workDir, message }) => commitWorkspaceChanges(workDir, message))
+  );
+
+  ipcMain.handle(
+    "workspace-list-dir",
+    safeHandler((event, { workDir, dirPath = "." } = {}) => {
+      const baseRoot = workDir && String(workDir).trim() ? path.resolve(workDir.trim()) : DEFAULT_ROOT;
+      const { matchedWorkspace, allowedFolders } = getWorkspaceFolders(baseRoot);
+      const validFolders = allowedFolders.length > 0 ? allowedFolders : [baseRoot];
+
+      const targetAbs = path.isAbsolute(dirPath)
+        ? path.resolve(dirPath)
+        : path.resolve(baseRoot, dirPath || ".");
+
+      const isAllowed = validFolders.some((root) => isUnderFolder(targetAbs, root));
+      if (!isAllowed || checkSensitivePath(targetAbs).blocked) {
+        return { success: false, error: "无权访问该目录", entries: [] };
+      }
+      if (!fs.existsSync(targetAbs) || !fs.statSync(targetAbs).isDirectory()) {
+        return { success: false, error: "目录不存在", entries: [] };
+      }
+
+      const skipNames = new Set([".DS_Store", ".git", "node_modules"]);
+      const rawItems = fs.readdirSync(targetAbs, { withFileTypes: true });
+      const entries = [];
+
+      for (const item of rawItems) {
+        if (skipNames.has(item.name)) continue;
+        if (item.name === ".env" || item.name.startsWith(".env.")) continue;
+        const fullPath = path.join(targetAbs, item.name);
+        if (checkSensitivePath(fullPath).blocked) continue;
+        let stat = null;
+        try {
+          stat = fs.statSync(fullPath);
+        } catch {
+          continue;
+        }
+        const isDir = stat.isDirectory();
+        const relPath = path.relative(baseRoot, fullPath).replace(/\\/g, "/");
+        entries.push({
+          name: item.name,
+          path: relPath && !relPath.startsWith("..") ? relPath : fullPath,
+          absPath: fullPath,
+          isDir,
+          size: isDir ? 0 : stat.size,
+          ext: isDir ? "" : path.extname(item.name).replace(".", "").toLowerCase(),
+          mtimeMs: stat.mtimeMs,
+        });
+      }
+
+      entries.sort((a, b) => {
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      const workspaceRoots = (
+        matchedWorkspace?.folders?.length
+          ? matchedWorkspace.folders.map((f) => ({
+              name: f.name || path.basename(f.path),
+              path: path.resolve(f.path),
+              isPrimary: !!f.isPrimary,
+            }))
+          : [{ name: path.basename(baseRoot), path: baseRoot, isPrimary: true }]
+      ).filter((f) => fs.existsSync(f.path));
+
+      return {
+        success: true,
+        workDir: baseRoot,
+        currentDir: targetAbs,
+        roots: workspaceRoots,
+        entries,
+      };
+    })
+  );
+
+  ipcMain.handle(
+    "workspace-read-file",
+    safeHandler((event, { workDir, filePath, maxChars = 250000 } = {}) => {
+      if (!filePath) return { success: false, error: "文件路径为空" };
+      const baseRoot = workDir && String(workDir).trim() ? path.resolve(workDir.trim()) : DEFAULT_ROOT;
+      const { allowedFolders } = getWorkspaceFolders(baseRoot);
+      const validFolders = allowedFolders.length > 0 ? allowedFolders : [baseRoot];
+
+      let targetAbs = path.isAbsolute(filePath)
+        ? path.resolve(filePath)
+        : path.resolve(baseRoot, filePath);
+
+      if (!fs.existsSync(targetAbs)) {
+        // 尝试在其他挂载源目录中匹配
+        for (const folder of validFolders) {
+          const candidate = path.resolve(folder, filePath);
+          if (fs.existsSync(candidate)) {
+            targetAbs = candidate;
+            break;
+          }
+        }
+      }
+
+      if (checkSensitivePath(targetAbs).blocked) {
+        return { success: false, error: "安全策略已禁止读取该敏感文件" };
+      }
+      const baseName = path.basename(targetAbs).toLowerCase();
+      if (baseName === ".env" || baseName.startsWith(".env.")) {
+        return { success: false, error: "出于安全保护，不直接展示 .env 密钥文件" };
+      }
+      if (!fs.existsSync(targetAbs)) {
+        return { success: false, error: `文件不存在: ${filePath}` };
+      }
+
+      const stat = fs.statSync(targetAbs);
+      if (!stat.isFile()) {
+        return { success: false, error: `目标路径不是文件: ${filePath}` };
+      }
+
+      const readBytes = Math.min(stat.size, maxChars * 4);
+      const fd = fs.openSync(targetAbs, "r");
+      let buf;
+      try {
+        buf = Buffer.alloc(readBytes);
+        const bytesRead = fs.readSync(fd, buf, 0, readBytes, 0);
+        buf = buf.subarray(0, bytesRead);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      const ext = path.extname(targetAbs).replace(".", "").toLowerCase();
+      const isBinary = buf.subarray(0, 4096).includes(0);
+      if (isBinary) {
+        return {
+          success: true,
+          path: filePath,
+          absPath: targetAbs,
+          name: path.basename(targetAbs),
+          ext,
+          size: stat.size,
+          isBinary: true,
+          content: "",
+          totalLines: 0,
+          truncated: false,
+        };
+      }
+
+      let content = buf.toString("utf-8");
+      let truncated = stat.size > readBytes;
+      if (content.length > maxChars) {
+        content = content.slice(0, maxChars);
+        truncated = true;
+      }
+      const totalLines = content.split("\n").length;
+
+      return {
+        success: true,
+        path: filePath,
+        absPath: targetAbs,
+        name: path.basename(targetAbs),
+        ext,
+        size: stat.size,
+        isBinary: false,
+        content,
+        totalLines,
+        truncated,
+      };
+    })
+  );
+
+  // --- 工作台交互式集成终端进程管理 ---
+  const activeTerminalProcs = new Map();
+
+  ipcMain.handle(
+    "terminal-kill-command",
+    safeHandler((event, cmdId) => {
+      const proc = activeTerminalProcs.get(cmdId);
+      if (proc && proc.pid) {
+        try {
+          if (process.platform !== "win32") {
+            process.kill(-proc.pid, "SIGKILL");
+          } else {
+            proc.kill("SIGKILL");
+          }
+        } catch {
+          try {
+            proc.kill("SIGKILL");
+          } catch {}
+        }
+        activeTerminalProcs.delete(cmdId);
+        return { success: true };
+      }
+      return { success: false };
+    })
+  );
+
+  ipcMain.handle(
+    "terminal-run-command",
+    safeHandler(async (event, { cmdId, command, cwd, workDir }) => {
+      const rawCmd = String(command || "").trim();
+      const baseCwd =
+        cwd && fs.existsSync(cwd)
+          ? path.resolve(cwd)
+          : workDir && fs.existsSync(workDir)
+          ? path.resolve(workDir)
+          : DEFAULT_ROOT;
+
+      if (!rawCmd) {
+        return { success: true, exitCode: 0, stdout: "", stderr: "", cwd: baseCwd };
+      }
+
+      // 原生支持 cd <dir> 切换终端当前工作目录
+      const cdMatch = rawCmd.match(/^cd(?:\s+(.+))?$/);
+      if (cdMatch) {
+        const targetRaw = (cdMatch[1] || "").trim().replace(/^["']|["']$/g, "");
+        const nextDir = !targetRaw || targetRaw === "~"
+          ? os.homedir()
+          : targetRaw.startsWith("~/")
+          ? path.join(os.homedir(), targetRaw.slice(2))
+          : path.resolve(baseCwd, targetRaw);
+        if (fs.existsSync(nextDir) && fs.statSync(nextDir).isDirectory()) {
+          return {
+            success: true,
+            exitCode: 0,
+            stdout: `已切换工作目录至: ${nextDir}\n`,
+            stderr: "",
+            cwd: nextDir,
+          };
+        }
+        return {
+          success: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `cd: 目录不存在: ${targetRaw}\n`,
+          cwd: baseCwd,
+        };
+      }
+
+      const id = cmdId || `term_${Date.now()}`;
+      const userShell = process.env.SHELL || "/bin/zsh";
+      const env = buildSanitizedShellEnv(process.env, { stripSecrets: false });
+
+      return await new Promise((resolve) => {
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+
+        let child;
+        try {
+          child = spawn(userShell, ["-c", rawCmd], {
+            cwd: baseCwd,
+            env,
+            detached: process.platform !== "win32",
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+        } catch (err) {
+          return resolve({
+            success: false,
+            exitCode: -1,
+            stdout: "",
+            stderr: err.message || String(err),
+            cwd: baseCwd,
+          });
+        }
+
+        activeTerminalProcs.set(id, child);
+
+        const finish = (payload) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          activeTerminalProcs.delete(id);
+          resolve(payload);
+        };
+
+        const timer = setTimeout(() => {
+          if (child.pid) {
+            try {
+              process.kill(-child.pid, "SIGKILL");
+            } catch {}
+          }
+          finish({
+            success: false,
+            exitCode: -1,
+            stdout,
+            stderr: `${stderr}\n[终端命令执行超过 120s 已自动终止]`,
+            cwd: baseCwd,
+          });
+        }, 120000);
+
+        child.stdout?.on("data", (chunk) => {
+          const text = chunk.toString("utf-8");
+          if (stdout.length < 200000) stdout += text;
+          try {
+            event.sender.send(`terminal-stream-${id}`, { type: "stdout", data: text });
+          } catch {}
+        });
+
+        child.stderr?.on("data", (chunk) => {
+          const text = chunk.toString("utf-8");
+          if (stderr.length < 100000) stderr += text;
+          try {
+            event.sender.send(`terminal-stream-${id}`, { type: "stderr", data: text });
+          } catch {}
+        });
+
+        child.on("error", (err) => {
+          finish({
+            success: false,
+            exitCode: -1,
+            stdout,
+            stderr: `${stderr}\n${err.message}`,
+            cwd: baseCwd,
+          });
+        });
+
+        child.on("close", (code, signal) => {
+          const exitCode = typeof code === "number" ? code : signal ? -1 : 0;
+          finish({
+            success: exitCode === 0,
+            exitCode,
+            stdout,
+            stderr,
+            cwd: baseCwd,
+          });
+        });
+      });
+    })
   );
 
   ipcMain.handle(
@@ -868,6 +1328,12 @@ app.whenReady().then(() => {
     }
   });
 
+  ipcMain.on("open-external-url", (event, targetUrl) => {
+    if (typeof targetUrl === "string" && /^https?:\/\//i.test(targetUrl.trim())) {
+      shell.openExternal(targetUrl.trim());
+    }
+  });
+
   ipcMain.handle(
     "select-save-directory",
     safeHandler(async () => {
@@ -877,6 +1343,42 @@ app.whenReady().then(() => {
       });
       if (result.canceled) return null;
       return result.filePaths[0] || null;
+    })
+  );
+
+  ipcMain.handle(
+    "select-background-image",
+    safeHandler(async () => {
+      const result = await dialog.showOpenDialog(mainWindow, {
+        properties: ["openFile"],
+        title: "选择主题背景图片",
+        filters: [
+          {
+            name: "图片文件",
+            extensions: ["png", "jpg", "jpeg", "webp", "gif", "svg", "bmp"],
+          },
+        ],
+      });
+      if (result.canceled || !result.filePaths?.[0]) return null;
+
+      const srcPath = result.filePaths[0];
+      const wallpaperDir = path.join(os.homedir(), ".omcx", "wallpaper");
+      if (!fs.existsSync(wallpaperDir)) {
+        fs.mkdirSync(wallpaperDir, { recursive: true });
+      }
+      // 清理旧壁纸缓存文件
+      try {
+        for (const f of fs.readdirSync(wallpaperDir)) {
+          try {
+            fs.unlinkSync(path.join(wallpaperDir, f));
+          } catch {}
+        }
+      } catch {}
+
+      const ext = path.extname(srcPath).toLowerCase() || ".png";
+      const destPath = path.join(wallpaperDir, `wallpaper_${Date.now()}${ext}`);
+      fs.copyFileSync(srcPath, destPath);
+      return `local-media://local${encodeURI(destPath)}`;
     })
   );
 
@@ -927,11 +1429,14 @@ app.whenReady().then(() => {
 
   // --- 人机协同授权响应通道 ---
   const pendingPermissions = new Map();
-  ipcMain.on("chat-permission-response", (event, { id, allow }) => {
+  ipcMain.on("chat-permission-response", (event, { id, allow, decision }) => {
     const resolver = pendingPermissions.get(id);
     if (resolver) {
       pendingPermissions.delete(id);
-      resolver(!!allow);
+      resolver({
+        allow: !!allow,
+        decision: decision || (allow ? "allow_once" : "deny"),
+      });
     }
   });
 
@@ -953,7 +1458,7 @@ app.whenReady().then(() => {
   // --- 流式聊天与 Agent 执行循环 ---
   ipcMain.on(
     "chat-request",
-    async (event, { sessionId, messages, model, enableTools, workDir }) => {
+    async (event, { sessionId, messages, model, enableTools, workDir, permissionMode }) => {
       const { modelBaseUrl, modelApiKey, provider, apiModelId, contextLimit, supportsVision } =
         getModelConfig(model, "gpt-4o");
 
@@ -965,27 +1470,93 @@ app.whenReady().then(() => {
         return;
       }
 
-      // 获取当前会话的工作目录 (优先使用前端当前请求显式透传的选定目录)
+      // 获取当前会话的工作目录与权限模式 (优先使用前端当前请求显式透传的值)
       let sessionWorkDir = (workDir && typeof workDir === "string" && workDir.trim()) ? workDir.trim() : null;
       const session = storageService.getSessions().find((s) => s.id === sessionId);
       if (!sessionWorkDir) {
         sessionWorkDir = session?.work_dir || null;
-      } else if (session && session.work_dir !== sessionWorkDir) {
+      }
+
+      const resolvedPermissionMode = normalizePermissionMode(
+        permissionMode ||
+          session?.permission_mode ||
+          session?.permissionMode ||
+          storageService.getConfig("default_permission_mode") ||
+          PERMISSION_MODES.AUTO_SANDBOX
+      );
+
+      if (
+        session &&
+        (session.work_dir !== sessionWorkDir || session.permission_mode !== resolvedPermissionMode)
+      ) {
         session.work_dir = sessionWorkDir;
+        session.permission_mode = resolvedPermissionMode;
         storageService.saveSession(session);
       }
 
-      // 匹配当前会话的多目录工作空间 (含全部挂载源文件夹，用于多目录全量放行)
-      const { matchedWorkspace, allowedFolders } = getWorkspaceFolders(sessionWorkDir);
+      // 匹配当前会话的多目录工作空间 (严格区分可写工作区目录 writableFolders 与可读目录 allowedFolders)
+      const { matchedWorkspace, allowedFolders: workspaceFolders } = getWorkspaceFolders(sessionWorkDir);
+      const writableFolders = [...workspaceFolders];
+      const allowedFolders = [...workspaceFolders];
 
-      // 异步人机协同权限审批函数 (当识别到访问外部未选定路径时挂起循环并请求用户授权)
-      const checkPermissionFn = async (targetPath, actionDesc) => {
+      // 注册当前会话的中断控制器与流式状态（声明在 try 外部，便于 catch/finally 安全访问）
+      const sessionAbort = {
+        abortController: new AbortController(),
+        cancelled: false,
+        toolContext: null,
+      };
+      activeStreamSessions.set(sessionId, sessionAbort);
+
+      // 异步人机协同权限审批函数（支持外部路径、受保护文件、询问模式确认、高危命令、沙箱逃生重跑 5 类场景）
+      const checkPermissionFn = async (targetPath, actionDesc, meta = {}) => {
+        const kind = meta?.kind || "external_path";
+        if (
+          kind === "external_path" &&
+          actionDesc === "读取" &&
+          isBuiltinTrustedPath(targetPath, sessionId)
+        ) {
+          return true;
+        }
         const reqId = `perm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         return new Promise((resolve) => {
-          pendingPermissions.set(reqId, (allow) => {
+          pendingPermissions.set(reqId, (resp) => {
+            const allow = typeof resp === "object" ? !!resp.allow : !!resp;
+            const decision =
+              typeof resp === "object" && resp.decision
+                ? resp.decision
+                : allow
+                ? "allow_once"
+                : "deny";
+
             if (allow) {
-              // 用户允许后，将该路径加入临时白名单
-              allowedFolders.push(path.resolve(targetPath));
+              if (decision === "allow_session" && kind === "external_path" && targetPath) {
+                const resolvedTarget = path.resolve(targetPath);
+                const folderToTrust =
+                  fs.existsSync(resolvedTarget) && fs.statSync(resolvedTarget).isDirectory()
+                    ? resolvedTarget
+                    : path.dirname(resolvedTarget);
+                if (!allowedFolders.includes(folderToTrust)) {
+                  allowedFolders.push(folderToTrust);
+                }
+                if (actionDesc !== "读取" && actionDesc !== "浏览目录") {
+                  if (!writableFolders.includes(folderToTrust)) {
+                    writableFolders.push(folderToTrust);
+                  }
+                }
+              } else if (decision === "switch_auto_sandbox") {
+                if (sessionAbort.toolContext) {
+                  sessionAbort.toolContext.permissionMode = PERMISSION_MODES.AUTO_SANDBOX;
+                }
+                const targetSess = storageService.getSessions().find((s) => s.id === sessionId);
+                if (targetSess) {
+                  targetSess.permission_mode = PERMISSION_MODES.AUTO_SANDBOX;
+                  storageService.saveSession(targetSess);
+                }
+                event.reply("session-permission-mode-updated", {
+                  sessionId,
+                  permissionMode: PERMISSION_MODES.AUTO_SANDBOX,
+                });
+              }
             }
             resolve(allow);
           });
@@ -993,27 +1564,54 @@ app.whenReady().then(() => {
             id: reqId,
             path: targetPath,
             action: actionDesc,
-            reason: "该路径位于当前已选定的工作空间源文件夹之外，请确认是否允许 Agent 访问该外部路径",
+            kind,
+            command: meta?.command || undefined,
+            allowSwitchAutoSandbox: Boolean(meta?.allowSwitchAutoSandbox),
+            reason:
+              meta?.reason ||
+              "该路径位于当前已选定的工作空间源文件夹之外，请确认是否允许 Agent 访问该外部路径",
           });
         });
       };
-
-      // 设置工具上下文 (严格锁定目标工作目录、全量多源文件夹白名单与人机授权检查器)
-      toolRegistry.setContext("workDir", sessionWorkDir);
-      toolRegistry.setContext("allowedFolders", allowedFolders);
-      toolRegistry.setContext("checkPermission", checkPermissionFn);
-
-      // 注册当前会话的中断控制器与流式状态（声明在 try 外部，便于 catch/finally 安全访问）
-      const sessionAbort = {
-        abortController: new AbortController(),
-        cancelled: false,
-      };
-      activeStreamSessions.set(sessionId, sessionAbort);
 
       const initialTodos = [];
       let fullGeneratedText = "";
       let toolRound = 0;
       const executedToolSteps = [];
+
+      // 会话级隔离工具上下文（杜绝并发会话串台覆盖全局单例，并挂载中断信号与沙箱权限模式）
+      const sessionToolContext = {
+        sessionId,
+        workDir: sessionWorkDir,
+        allowedFolders,
+        writableFolders,
+        permissionMode: resolvedPermissionMode,
+        checkPermission: checkPermissionFn,
+        onTodosUpdate: null,
+        abortSignal: sessionAbort.abortController.signal,
+        sessionAbort,
+        modelConfig: {
+          baseUrl: modelBaseUrl,
+          apiKey: modelApiKey,
+          provider,
+          modelName: apiModelId,
+        },
+        mcpTools: [],
+        onFileOutput: (filePath) => {
+          if (!filePath) return;
+          const fullOutPath = path.isAbsolute(filePath)
+            ? filePath
+            : path.join(sessionWorkDir || "", filePath);
+          const outItem = {
+            name: path.basename(filePath),
+            filePath: fullOutPath,
+            fileType: path.extname(filePath).replace(".", "").toLowerCase() || "file",
+          };
+          storageService.addSessionOutput(sessionId, outItem);
+          event.reply(`session-outputs-updated-${sessionId}`, outItem);
+        },
+      };
+      sessionAbort.toolContext = sessionToolContext;
 
       try {
         const headers = {
@@ -1041,6 +1639,24 @@ app.whenReady().then(() => {
         };
         const availableSkills = storageService.getSkills(sessionWorkDir);
         const memories = storageService.getMemories(sessionWorkDir);
+
+        // 将所有已声明 Skills 与 Memories 的物理目录自动纳入免授权白名单
+        for (const skill of availableSkills) {
+          if (skill?.filePath) {
+            const skillDir = path.resolve(path.dirname(skill.filePath));
+            if (!allowedFolders.includes(skillDir)) {
+              allowedFolders.push(skillDir);
+            }
+          }
+        }
+        for (const mem of memories) {
+          if (mem?.path) {
+            const memDir = path.resolve(path.dirname(mem.path));
+            if (!allowedFolders.includes(memDir)) {
+              allowedFolders.push(memDir);
+            }
+          }
+        }
 
         const hasAnyAttachments = apiMessages.some(
           (m) => Array.isArray(m.attachments) && m.attachments.length > 0
@@ -1088,7 +1704,18 @@ app.whenReady().then(() => {
           }
         }
 
-        const toolDocs = enableTools && toolRegistry.size > 0 ? toolRegistry.getToolPromptDocs() : [];
+        const [gitInfo, mcpTools] = await Promise.all([
+          getGitSnapshotAsync(sessionWorkDir),
+          enableTools ? mcpClientService.getActiveMcpTools(sessionWorkDir) : Promise.resolve([]),
+        ]);
+        sessionToolContext.mcpTools = mcpTools;
+
+        const getActiveToolPromptDocs = () =>
+          enableTools && (toolRegistry.size > 0 || mcpTools.length > 0)
+            ? toolRegistry.getToolPromptDocs(mcpTools, {
+                permissionMode: sessionToolContext.permissionMode,
+              })
+            : [];
 
         const buildInstruction = () =>
           buildSystemContext({
@@ -1099,9 +1726,11 @@ app.whenReady().then(() => {
             memoryIndex,
             projectRules,
             todos: initialTodos,
-            toolDocs,
+            toolDocs: getActiveToolPromptDocs(),
             model: `${provider}/${apiModelId}`,
             enableTools,
+            permissionMode: sessionToolContext.permissionMode,
+            gitInfo,
           });
 
         const buildInstructionText = (built) =>
@@ -1228,20 +1857,27 @@ app.whenReady().then(() => {
           }
         };
 
-        toolRegistry.setContext("onTodosUpdate", (nextTodos) => {
+        sessionToolContext.onTodosUpdate = (nextTodos) => {
           if (!Array.isArray(nextTodos)) return;
           initialTodos.splice(0, initialTodos.length, ...nextTodos);
           event.reply(`chat-stream-todos-${sessionId}`, initialTodos);
           refreshSystemInstruction();
           console.log(`[context] todos updated: ${initialTodos.length}`);
-        });
+        };
 
-        const initialTools = enableTools ? toolRegistry.getToolDefinitions() : [];
+        const getActiveToolDefs = () =>
+          enableTools
+            ? toolRegistry.getToolDefinitions(mcpTools, null, {
+                permissionMode: sessionToolContext.permissionMode,
+              })
+            : [];
+
+        const initialTools = getActiveToolDefs();
 
         const computeContextMetrics = () =>
           calculateContextMetrics({
             messages: apiMessages,
-            tools: initialTools,
+            tools: getActiveToolDefs(),
             systemPrompt: systemInstruction,
             skillsTokens: currentSkillsTokens,
             maxTokensLimit: contextLimit,
@@ -1257,12 +1893,42 @@ app.whenReady().then(() => {
           event.reply(`chat-stream-data-${sessionId}`, delta);
         }
 
-        async function doStreamRequest(requestMessages, requestBody) {
+        function isTransientSocketError(err) {
+          if (!err) return false;
+          const msg = String(err.message || "").toLowerCase();
+          const causeCode = String(err.cause?.code || "").toUpperCase();
+          const causeMsg = String(err.cause?.message || "").toLowerCase();
+          return (
+            msg.includes("terminated") ||
+            msg.includes("fetch failed") ||
+            msg.includes("socket") ||
+            msg.includes("econnreset") ||
+            causeCode === "UND_ERR_SOCKET" ||
+            causeCode === "ECONNRESET" ||
+            causeCode === "EPIPE" ||
+            causeMsg.includes("other side closed")
+          );
+        }
+
+        function hasValidToolCalls(list) {
+          const valid = (list || []).filter(Boolean);
+          if (valid.length === 0) return false;
+          return valid.every((tc) => {
+            if (!tc.function?.name) return false;
+            try {
+              JSON.parse(tc.function.arguments || "{}");
+              return true;
+            } catch {
+              return false;
+            }
+          });
+        }
+
+        async function doStreamRequestOnce(requestMessages, requestBody) {
           const requestBodyFinal = {
             model: apiModelId,
             messages: requestMessages,
             stream: true,
-            max_tokens: 4096,
             temperature: 0.2,
             ...requestBody,
           };
@@ -1283,78 +1949,174 @@ app.whenReady().then(() => {
           const decoder = new TextDecoder();
           let buffer = "";
           let fullContent = "";
+          let fullReasoning = "";
+          let inReasoningBlock = false;
           let toolCalls = [];
           let usage = null;
+          let streamFinished = false;
+          let finishReason = null;
+          let hitLengthLimit = false;
 
-          while (true) {
-            if (sessionAbort.cancelled) {
-              try {
-                await reader.cancel();
-              } catch (e) {
-                // 忽略取消读取异常
+          try {
+            while (!streamFinished) {
+              if (sessionAbort.cancelled) {
+                try {
+                  await reader.cancel();
+                } catch (e) {
+                  // 忽略取消读取异常
+                }
+                break;
               }
-              break;
-            }
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split(/\r?\n/);
-            buffer = lines.pop() || "";
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split(/\r?\n/);
+              buffer = lines.pop() || "";
 
-            for (const line of lines) {
-              if (!line.startsWith("data:")) continue;
-              const payload = line.slice(5).trim();
-              if (payload === "[DONE]") continue;
-              try {
-                const json = JSON.parse(payload);
-                if (json.usage) {
-                  usage = json.usage;
-                  lastProviderUsage = json.usage;
+              for (const line of lines) {
+                if (!line.startsWith("data:")) continue;
+                const payload = line.slice(5).trim();
+                if (payload === "[DONE]") {
+                  streamFinished = true;
+                  break;
                 }
-                const choice = json.choices?.[0];
-                if (!choice) continue;
-                const delta = choice.delta || {};
-
-                if (delta.content) {
-                  fullContent += delta.content;
-                  sendData(delta.content);
-                }
-
-                if (delta.tool_calls) {
-                  for (const tc of delta.tool_calls) {
-                    const idx = tc.index;
-                    if (!toolCalls[idx]) {
-                      toolCalls[idx] = {
-                        index: idx,
-                        id: tc.id || "",
-                        type: tc.type || "function",
-                        function: { name: "", arguments: "" },
-                      };
-                    }
-                    if (tc.id) toolCalls[idx].id = tc.id;
-                    if (tc.type) toolCalls[idx].type = tc.type;
-                    if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
-                    if (tc.function?.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
+                try {
+                  const json = JSON.parse(payload);
+                  if (json.usage) {
+                    usage = json.usage;
+                    lastProviderUsage = json.usage;
                   }
+                  const choice = json.choices?.[0];
+                  if (!choice) continue;
+                  if (choice.finish_reason) {
+                    if (choice.finish_reason === "length" || choice.finish_reason === "max_tokens") {
+                      hitLengthLimit = true;
+                    }
+                    if (!hitLengthLimit) {
+                      finishReason = choice.finish_reason;
+                    } else {
+                      finishReason = "length";
+                    }
+                  }
+                  const delta = choice.delta || {};
+
+                  const reasoningDelta = delta.reasoning_content || delta.reasoning;
+                  if (reasoningDelta) {
+                    if (!inReasoningBlock) {
+                      inReasoningBlock = true;
+                      sendData("<think>");
+                    }
+                    fullReasoning += reasoningDelta;
+                    sendData(reasoningDelta);
+                  }
+
+                  if (delta.content) {
+                    // 拦截并丢弃网关在思考截断 (finish_reason=length) 后注入的伪造占位符 "task ready"
+                    if (
+                      delta.content.trim().toLowerCase() === "task ready" &&
+                      (hitLengthLimit || fullContent.trim().length === 0)
+                    ) {
+                      hitLengthLimit = true;
+                      continue;
+                    }
+                    if (inReasoningBlock) {
+                      inReasoningBlock = false;
+                      sendData("</think>\n\n");
+                    }
+                    fullContent += delta.content;
+                    sendData(delta.content);
+                  }
+
+                  if (delta.tool_calls) {
+                    for (const tc of delta.tool_calls) {
+                      const idx = tc.index;
+                      if (!toolCalls[idx]) {
+                        toolCalls[idx] = {
+                          index: idx,
+                          id: tc.id || "",
+                          type: tc.type || "function",
+                          function: { name: "", arguments: "" },
+                        };
+                      }
+                      if (tc.id) toolCalls[idx].id = tc.id;
+                      if (tc.type) toolCalls[idx].type = tc.type;
+                      if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
+                      if (tc.function?.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
+                    }
+                  }
+                } catch (e) {
+                  // 忽略流中的 JSON 解析错误
                 }
-              } catch (e) {
-                // 忽略流中的 JSON 解析错误
               }
             }
+          } catch (readErr) {
+            if (
+              !sessionAbort.cancelled &&
+              isTransientSocketError(readErr) &&
+              (streamFinished ||
+                finishReason ||
+                hasValidToolCalls(toolCalls) ||
+                fullContent.trim().length > 0)
+            ) {
+              console.warn(
+                `[chat-stream] 忽略流尾部的对端 Socket 提前关闭 (${readErr.cause?.code || readErr.message})，保留已接收的完整响应`
+              );
+            } else {
+              throw readErr;
+            }
+          } finally {
+            try {
+              await reader.cancel();
+            } catch {
+              // 忽略释放 reader 异常
+            }
+          }
+
+          if (inReasoningBlock) {
+            inReasoningBlock = false;
+            sendData("</think>\n\n");
           }
 
           return {
             content: fullContent,
+            reasoning: fullReasoning,
             toolCalls: toolCalls.filter(Boolean),
             usage,
+            hitLengthLimit,
+            finishReason,
           };
         }
 
-        // Agent 工具执行循环
+        async function doStreamRequest(requestMessages, requestBody) {
+          const maxAttempts = 3;
+          let lastErr = null;
+          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (sessionAbort.cancelled) break;
+            try {
+              return await doStreamRequestOnce(requestMessages, requestBody);
+            } catch (err) {
+              lastErr = err;
+              if (sessionAbort.cancelled || !isTransientSocketError(err) || attempt === maxAttempts) {
+                throw err;
+              }
+              const delayMs = attempt * 400;
+              console.warn(
+                `[chat-stream] 遇到瞬时 Socket 断开 (${err.cause?.code || err.message})，${delayMs}ms 后进行第 ${attempt + 1}/${maxAttempts} 次重试...`
+              );
+              await new Promise((r) => setTimeout(r, delayMs));
+            }
+          }
+          throw lastErr;
+        }
+
+        // Agent 工具执行与自适应断点续写循环
+        let continuationCount = 0;
+        const MAX_CONTINUATIONS = 4;
+
         while (toolRound < MAX_TOOL_ROUNDS) {
           let requestBody = {};
           if (enableTools) {
-            requestBody.tools = toolRegistry.getToolDefinitions();
+            requestBody.tools = getActiveToolDefs();
             requestBody.tool_choice = "auto";
           }
 
@@ -1375,47 +2137,153 @@ app.whenReady().then(() => {
           if (sessionAbort.cancelled) break;
 
           if (!enableTools || result.toolCalls.length === 0) {
+            const cleanRoundText = (result.content || "").trim();
+            const hasIncompleteTodos =
+              initialTodos.length > 0 && initialTodos.some((t) => t.status !== "completed");
+
+            // 模式 A：正在输出长篇正文或代码块时触发单次输出长度上限 -> 无缝断点续写
+            if (result.hitLengthLimit && cleanRoundText.length > 0 && continuationCount < MAX_CONTINUATIONS) {
+              continuationCount++;
+              const tailSnippet = result.content.slice(-80);
+              console.log(`[auto-continue] 模式A：正文触发长度上限，发起第 ${continuationCount} 次无缝断点续写`);
+              apiMessages.push({
+                role: "assistant",
+                content: result.content,
+              });
+              apiMessages.push({
+                role: "user",
+                content: `你的上一条回复因达到单次输出长度上限而在末尾中断（中断处末尾字符为：${JSON.stringify(
+                  tailSnippet
+                )}）。请紧接在该位置之后无缝继续输出剩余内容，禁止重复前文或添加任何开场白。`,
+              });
+              continue;
+            }
+
+            // 模式 B：深度思考或超大工具调用参数触发长度截断（无正文产出） -> 引导增量拆分执行
+            if (
+              (result.hitLengthLimit || (result.reasoning && cleanRoundText.length === 0)) &&
+              continuationCount < MAX_CONTINUATIONS
+            ) {
+              continuationCount++;
+              console.log(`[auto-continue] 模式B：思考或大工具参数被截断，发起第 ${continuationCount} 次增量恢复`);
+              apiMessages.push({
+                role: "assistant",
+                content: result.reasoning
+                  ? `已完成阶段思考分析：${result.reasoning.slice(-1200)}`
+                  : "已完成阶段思考分析。",
+              });
+              apiMessages.push({
+                role: "user",
+                content:
+                  "你刚才的思考或工具调用参数因超出单次输出上限被截断，尚未发出工具调用或正文。你已经完成了思考推导，接下来请：(1) 不要再重复长篇思考（保持极简思考）；(2) 若要写入较长文件（如完整 README 或复杂 SVG），请拆分为多步执行——先调用 write_file 写入前半部分或核心骨架，再调用 edit_file 分段追加剩余章节；或者直接输出最终完整代码与回复。",
+              });
+              continue;
+            }
+
+            // 模式 C：待办清单 (Todo List) 仍有未完成项，但模型只吐出简短过渡词就停下 -> 督促继续执行
+            if (
+              hasIncompleteTodos &&
+              sessionToolContext.permissionMode !== PERMISSION_MODES.PLAN &&
+              cleanRoundText.length < 80 &&
+              continuationCount < MAX_CONTINUATIONS
+            ) {
+              continuationCount++;
+              const activeTodo = initialTodos.find((t) => t.status === "in_progress") || initialTodos.find((t) => t.status === "pending");
+              console.log(`[auto-continue] 模式C：检测到未完成 Todo (${activeTodo?.text})，督促继续执行`);
+              if (cleanRoundText) {
+                apiMessages.push({ role: "assistant", content: cleanRoundText });
+              }
+              apiMessages.push({
+                role: "user",
+                content: `当前任务规划中仍有未完成的待办项（当前待完成：${
+                  activeTodo?.text || "剩余任务"
+                }），请不要停留在准备阶段，立即调用相应工具（如 write_file / edit_file / run_command）继续执行，并在全部完成后更新 todo_write 及输出最终总结。`,
+              });
+              continue;
+            }
+
             break;
           }
 
+          // 成功发起了工具调用，重置连续续写计数
+          continuationCount = 0;
           toolRound++;
 
-          for (const tc of result.toolCalls) {
-            if (sessionAbort.cancelled) break;
+          const READ_ONLY_TOOLS = new Set([
+            "read_file",
+            "list_directory",
+            "search_code",
+            "web_search",
+            "web_fetch",
+          ]);
 
+          const preparedCalls = result.toolCalls.map((tc, idx) => {
+            const callId = tc.id || `call_${Date.now()}_${idx}`;
             let args = {};
             try {
               args = JSON.parse(tc.function.arguments);
             } catch (e) {
               args = { _parseError: tc.function.arguments };
             }
+            return { tc, callId, args };
+          });
 
+          // 1. 先统一广播本轮所有工具的 running 状态
+          for (const item of preparedCalls) {
             event.reply(`chat-stream-tool-status-${sessionId}`, {
-              tool: tc.function.name,
+              tool: item.tc.function.name,
               status: "running",
-              args,
-              callId: tc.id,
+              args: item.args,
+              callId: item.callId,
             });
+          }
 
-            // 执行工具
+          const executeSingleCall = async ({ tc, callId, args }) => {
+            if (sessionAbort.cancelled) {
+              return { tc, callId, args, execResult: { success: false, error: "已取消" } };
+            }
+
+            let currentSubSteps = [];
+            const callScopedContext =
+              tc.function.name === "dispatch_subagent"
+                ? {
+                    ...sessionToolContext,
+                    onSubagentProgress: (subSteps) => {
+                      currentSubSteps = subSteps;
+                      event.reply(`chat-stream-tool-status-${sessionId}`, {
+                        tool: tc.function.name,
+                        status: "running",
+                        args,
+                        callId,
+                        subSteps,
+                      });
+                    },
+                  }
+                : sessionToolContext;
+
             const execResult = await toolRegistry.execute(
               tc.function.name,
               args,
-              toolRegistry.getContext()
+              callScopedContext,
+              mcpTools
             );
 
-            // 若调用了 write_file 或 edit_file，将产出物挂载并通知前端刷新 Changes
-            if ((tc.function.name === "write_file" || tc.function.name === "edit_file") && execResult?.success) {
+            if (
+              (tc.function.name === "write_file" || tc.function.name === "edit_file") &&
+              execResult?.success &&
+              execResult?.data?.success !== false
+            ) {
               const fullOutPath = path.isAbsolute(args.path)
                 ? args.path
                 : path.join(sessionWorkDir || "", args.path);
-              storageService.addSessionOutput(sessionId, {
+              const outItem = {
                 name: path.basename(args.path),
                 filePath: fullOutPath,
-                fileType: path.extname(args.path).replace(".", "") || "file",
-              });
-              // 通知前端刷新产物与 Git 变更
-              event.reply(`session-outputs-updated-${sessionId}`);
+                fileType: path.extname(args.path).replace(".", "").toLowerCase() || "file",
+                action: execResult?.data?.action || "modified",
+              };
+              storageService.addSessionOutput(sessionId, outItem);
+              event.reply(`session-outputs-updated-${sessionId}`, outItem);
             }
 
             executedToolSteps.push({
@@ -1423,7 +2291,8 @@ app.whenReady().then(() => {
               status: "done",
               args,
               result: execResult,
-              callId: tc.id,
+              callId,
+              ...(currentSubSteps.length > 0 ? { subSteps: currentSubSteps } : {}),
             });
 
             event.reply(`chat-stream-tool-status-${sessionId}`, {
@@ -1431,29 +2300,73 @@ app.whenReady().then(() => {
               status: "done",
               args,
               result: execResult,
-              callId: tc.id,
+              callId,
+              ...(currentSubSteps.length > 0 ? { subSteps: currentSubSteps } : {}),
             });
 
+            return { tc, callId, args, execResult };
+          };
+
+          // 判断工具调用是否并发安全（只读工具 或 只读型 Subagent 均可多路并发执行）
+          const isParallelSafeCall = (item) => {
+            const name = item.tc.function.name;
+            if (READ_ONLY_TOOLS.has(name)) return true;
+            if (name === "dispatch_subagent") {
+              const a = item.args || {};
+              if (Array.isArray(a.tasks)) {
+                return a.tasks.every((t) => t.readOnly !== false && t.agent !== "general");
+              }
+              return a.readOnly !== false && a.agent !== "general";
+            }
+            return false;
+          };
+
+          // 2. 若本轮全部为并发安全调用，使用 Promise.all 并发执行；否则按序执行以保证文件修改时序安全
+          const allReadOnly =
+            preparedCalls.length > 1 &&
+            preparedCalls.every((item) => isParallelSafeCall(item));
+
+          let completedCalls = [];
+          if (allReadOnly) {
+            completedCalls = await Promise.all(preparedCalls.map((item) => executeSingleCall(item)));
+          } else {
+            for (const item of preparedCalls) {
+              if (sessionAbort.cancelled) break;
+              const res = await executeSingleCall(item);
+              completedCalls.push(res);
+            }
+          }
+
+          if (completedCalls.length > 0) {
+            // 3. 标准消息序列：单条聚合 assistant 消息（保留本轮产出的 content 与全部 tool_calls）+ 紧随其后的多条 tool 消息
             apiMessages.push({
               role: "assistant",
-              content: "",
-              tool_calls: [
-                {
-                  id: tc.id,
-                  type: "function",
-                  function: {
-                    name: tc.function.name,
-                    arguments: tc.function.arguments,
-                  },
+              content: result.content || "",
+              tool_calls: completedCalls.map(({ tc, callId }) => ({
+                id: callId,
+                type: "function",
+                function: {
+                  name: tc.function.name,
+                  arguments: tc.function.arguments,
                 },
-              ],
+              })),
             });
 
-            apiMessages.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              content: truncateToolResult(JSON.stringify(execResult), compactCfg.toolResultMaxChars),
-            });
+            for (const { callId, execResult } of completedCalls) {
+              // 过滤前端对比专用的大体积旧文件快照字段，避免浪费大模型上下文 Token
+              const modelVisibleResult =
+                execResult?.data && typeof execResult.data === "object" && "originalContent" in execResult.data
+                  ? {
+                      ...execResult,
+                      data: { ...execResult.data, originalContent: undefined },
+                    }
+                  : execResult;
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: callId,
+                content: truncateToolResult(JSON.stringify(modelVisibleResult), compactCfg.toolResultMaxChars),
+              });
+            }
           }
 
           // 每轮后更新 Context 计量
@@ -1461,26 +2374,40 @@ app.whenReady().then(() => {
           event.reply(`chat-stream-context-metrics-${sessionId}`, updatedMetrics);
         }
 
-        // 若大模型在工具调用结束后未给出最终文本回答，强制进行最终一轮总结输出
+        // 提取剥离了 <think> 思考块与合成占位符后的可见正文
+        const visibleGeneratedText = fullGeneratedText
+          .replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, "")
+          .replace(/<(?:think|thinking)>[\s\S]*$/gi, "")
+          .replace(/\btask ready\b/gi, "")
+          .trim();
+
+        // 若大模型在工具调用结束后未给出最终可见文本回答，强制进行最终一轮总结输出
         // 注意：用户已主动取消时不再发起总结请求
-        if (!sessionAbort.cancelled && !fullGeneratedText.trim() && toolRound > 0) {
+        if (!sessionAbort.cancelled && !visibleGeneratedText && toolRound > 0) {
           apiMessages.push({
             role: "user",
-            content: "请基于以上工具执行获取到的全部信息、代码与事实，给出条理清晰、完整详尽的总结分析与答复。",
+            content: "请基于以上工具执行获取到的全部信息、代码与事实，直接给出条理清晰、完整详尽的最终总结分析与答复（不要再调用工具，精简思考过程直接输出正文）。",
           });
           await maybeCompact("preflight");
           let finalResult;
           try {
-            finalResult = await doStreamRequest(apiMessages, {});
+            finalResult = await doStreamRequest(apiMessages, { reasoning_effort: "low" });
           } catch (err) {
             if (!isContextOverflowError(err.message)) throw err;
             const compacted = await maybeCompact("overflow", { force: true });
             if (!compacted) throw err;
-            finalResult = await doStreamRequest(apiMessages, {});
+            finalResult = await doStreamRequest(apiMessages, { reasoning_effort: "low" });
           }
-          if (finalResult.content) {
-            fullGeneratedText += finalResult.content;
+        }
+
+        // 若任务正常结束（非用户取消），将仍遗留在 in_progress 的 Todo 自动收敛为 completed
+        if (!sessionAbort.cancelled && initialTodos.some((t) => t.status === "in_progress")) {
+          for (const todo of initialTodos) {
+            if (todo.status === "in_progress") {
+              todo.status = "completed";
+            }
           }
+          event.reply(`chat-stream-todos-${sessionId}`, initialTodos);
         }
 
         // 最终推送一次 Context
@@ -1548,6 +2475,10 @@ app.whenReady().then(() => {
   );
 
   createWindow();
+});
+
+app.on("before-quit", () => {
+  mcpClientService.closeAll();
 });
 
 app.on("window-all-closed", () => {

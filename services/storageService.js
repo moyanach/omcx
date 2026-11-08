@@ -47,27 +47,55 @@ function ensureDir(dirPath) {
   }
 }
 
-/**
- * 安全读取 JSON 文件
- */
-function readJsonSafe(filePath, fallback = {}) {
+const jsonCache = new Map();
+
+function cloneData(data) {
+  if (data === null || typeof data !== "object") return data;
   try {
-    if (!fs.existsSync(filePath)) return fallback;
-    const content = fs.readFileSync(filePath, "utf-8");
-    return JSON.parse(content);
-  } catch (err) {
-    console.error(`[storageService] 读取 JSON 失败 (${filePath}):`, err.message);
-    return fallback;
+    return structuredClone(data);
+  } catch {
+    return JSON.parse(JSON.stringify(data));
   }
 }
 
 /**
- * 安全写入 JSON 文件（格式化排版）
+ * 安全读取 JSON 文件（带基于 mtimeMs 的内存缓存）
+ */
+function readJsonSafe(filePath, fallback = {}) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      jsonCache.delete(filePath);
+      return cloneData(fallback);
+    }
+    const stat = fs.statSync(filePath);
+    const cached = jsonCache.get(filePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs) {
+      return cloneData(cached.data);
+    }
+    const content = fs.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(content);
+    jsonCache.set(filePath, { mtimeMs: stat.mtimeMs, data: parsed });
+    return cloneData(parsed);
+  } catch (err) {
+    console.error(`[storageService] 读取 JSON 失败 (${filePath}):`, err.message);
+    return cloneData(fallback);
+  }
+}
+
+/**
+ * 安全写入 JSON 文件（Write-through 更新缓存与格式化排版）
  */
 function writeJsonSafe(filePath, data) {
   try {
     ensureDir(path.dirname(filePath));
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    const serialized = JSON.stringify(data, null, 2);
+    fs.writeFileSync(filePath, serialized, "utf-8");
+    try {
+      const stat = fs.statSync(filePath);
+      jsonCache.set(filePath, { mtimeMs: stat.mtimeMs, data: cloneData(data) });
+    } catch {
+      jsonCache.delete(filePath);
+    }
     return true;
   } catch (err) {
     console.error(`[storageService] 写入 JSON 失败 (${filePath}):`, err.message);
@@ -377,12 +405,21 @@ function saveSession(session) {
       ? session.title_source
       : existing.title_source || "default";
 
+  // 智能继承 permission_mode (plan / auto-sandbox / ask / full-access)
+  const resolvedPermissionMode =
+    session.permission_mode !== undefined
+      ? session.permission_mode
+      : session.permissionMode !== undefined
+      ? session.permissionMode
+      : existing.permission_mode || existing.permissionMode || "auto-sandbox";
+
   const sessionSummary = {
     id: session.id,
     title: resolvedTitle,
     title_source: resolvedTitleSource,
     model: resolvedModel,
     work_dir: resolvedWorkDir,
+    permission_mode: resolvedPermissionMode,
     archived: resolvedArchived,
     updated_at: session.updated_at || now,
     created_at: existing.created_at || session.created_at || now,
@@ -406,6 +443,7 @@ function saveSession(session) {
   detail.title_source = sessionSummary.title_source;
   detail.model = sessionSummary.model;
   detail.work_dir = sessionSummary.work_dir;
+  detail.permission_mode = sessionSummary.permission_mode;
   detail.archived = sessionSummary.archived;
   detail.updated_at = sessionSummary.updated_at;
   writeJsonSafe(filePath, detail);
@@ -438,6 +476,7 @@ function deleteSession(sessionId) {
   writeJsonSafe(SESSIONS_INDEX_FILE, sessions);
 
   const filePath = getSessionFilePath(sessionId);
+  jsonCache.delete(filePath);
   if (fs.existsSync(filePath)) {
     try {
       fs.unlinkSync(filePath);

@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { resolveWorkspacePath, isUnderFolder } = require("./pathResolver");
 const { isIgnoredName } = require("./fileIndexer");
+const { discoverSubagents } = require("../../services/subagentService");
 
 const MAX_FILE_CHARS = 160000;
 const MAX_FILE_LINES = 2000;
@@ -191,9 +192,16 @@ function resolveMentionTarget(mention, workDir, allowedFolders) {
   }
 
   let sawOutside = false;
+  let sawSensitive = false;
 
   for (const candidate of buildCandidates(mention)) {
-    const { resolvedPath, isExternal } = resolveWorkspacePath(candidate, workDir, folders);
+    const { resolvedPath, isExternal, isSensitiveBlocked } = resolveWorkspacePath(candidate, workDir, folders, {
+      mode: "read",
+    });
+    if (isSensitiveBlocked) {
+      sawSensitive = true;
+      continue;
+    }
     if (isExternal) {
       sawOutside = true;
       continue;
@@ -219,16 +227,20 @@ function resolveMentionTarget(mention, workDir, allowedFolders) {
     };
   }
 
-  return { ok: false, reason: sawOutside ? "outside" : "missing" };
+  return {
+    ok: false,
+    reason: sawSensitive ? "sensitive" : sawOutside ? "outside" : "missing",
+  };
 }
 
 function buildMentionContext(text, workDir, allowedFolders = [], extraContext = {}) {
   const mentions = extractMentions(text);
-  const result = { block: "", files: [], dirs: [], skills: [], mcps: [], skipped: [] };
+  const result = { block: "", files: [], dirs: [], skills: [], mcps: [], subagents: [], skipped: [] };
   if (mentions.length === 0) return result;
 
   const skills = Array.isArray(extraContext.skills) ? extraContext.skills : [];
   const mcpServers = Array.isArray(extraContext.mcpServers) ? extraContext.mcpServers : [];
+  const subagents = discoverSubagents(workDir);
 
   const parts = [];
   let totalChars = 0;
@@ -238,6 +250,26 @@ function buildMentionContext(text, workDir, allowedFolders = [], extraContext = 
     if (budgetExhausted) {
       result.skipped.push({ mention, reason: "budget" });
       continue;
+    }
+
+    // 0. 匹配 @agent:id 显式指定子代理
+    if (mention.startsWith("agent:")) {
+      const agentId = mention.slice(6).trim().toLowerCase();
+      const matchedAgent = subagents.find(
+        (a) => a.id.toLowerCase() === agentId || a.name.toLowerCase().includes(agentId)
+      );
+      if (matchedAgent) {
+        const section = [
+          `### 用户显式指定调度的子代理: ${matchedAgent.name} (ID: ${matchedAgent.id})`,
+          `职责说明: ${matchedAgent.description || "无"}`,
+          `权限模式: ${matchedAgent.readOnly ? "只读安全模式" : "完整读写模式"}`,
+          `【执行指示】用户在本次提问中显式点名使用子代理 [${matchedAgent.id}]，请优先调用 \`dispatch_subagent\` 工具（设置 agent="${matchedAgent.id}"）委派相关任务。`,
+        ].join("\n");
+        totalChars += section.length;
+        parts.push(section);
+        result.subagents.push(matchedAgent.id);
+        continue;
+      }
     }
 
     // A. 匹配 @skill:name 专家技能

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Settings as SettingsIcon,
   FolderOpen,
@@ -6,7 +6,6 @@ import {
   Cpu,
   Trash2,
   Pencil,
-  Globe,
   Sun,
   Moon,
   Monitor,
@@ -15,12 +14,24 @@ import {
   EyeOff,
   Sliders,
   CheckCircle2,
-  Layers,
-  AlignJustify,
   ArrowLeft,
   Plus,
+  ChevronDown,
+  Check,
+  Image as ImageIcon,
+  Sparkles,
+  RotateCcw,
 } from "lucide-react";
-import { loadTheme, setTheme as applyThemePersist, type ThemeMode } from "../theme";
+import {
+  loadTheme,
+  setTheme as applyThemePersist,
+  getAppearance,
+  setAppearance,
+  loadAppearance,
+  WALLPAPER_PRESETS,
+  type ThemeMode,
+  type AppearanceConfig,
+} from "../theme";
 import { useAppStore } from "../stores/appStore";
 import { useChatStore } from "../stores/chatStore";
 
@@ -99,12 +110,124 @@ const inferVisionSupport = (modelId: string) => {
 
 export interface ModelDraftRow {
   rowId: string;
+  existingId?: string;
   modelId: string;
   name: string;
   contextLimit: number;
   supportsVision: boolean;
   isManual: boolean;
 }
+
+/**
+ * 可自由编辑 + 下拉联动选择组合框 (Editable Combobox)
+ * - 未拉取模型时：表现为纯输入框
+ * - 已拉取模型后：既可展开下拉菜单点选（点选时联动同时修改模型 ID 与显示名称），也可随时在输入框中直接打字编辑
+ */
+const EditableModelCombobox: React.FC<{
+  value: string;
+  options: string[];
+  placeholder?: string;
+  monoFont?: boolean;
+  onChange: (val: string) => void;
+  onSelectOption: (val: string) => void;
+}> = ({ value, options, placeholder, monoFont = false, onChange, onSelectOption }) => {
+  const [open, setOpen] = useState(false);
+  const [filterByTyping, setFilterByTyping] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setFilterByTyping(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [open]);
+
+  const hasOptions = options.length > 0;
+  const trimmedVal = value.trim().toLowerCase();
+  const displayOptions =
+    filterByTyping && trimmedVal
+      ? options.filter((opt) => opt.toLowerCase().includes(trimmedVal))
+      : options;
+
+  const finalList = displayOptions.length > 0 ? displayOptions : options;
+
+  return (
+    <div ref={containerRef} className="relative w-full">
+      <div className="relative flex items-center">
+        <input
+          type="text"
+          value={value}
+          onFocus={() => {
+            if (hasOptions) {
+              setFilterByTyping(false);
+              setOpen(true);
+            }
+          }}
+          onChange={(e) => {
+            onChange(e.target.value);
+            if (hasOptions) {
+              setFilterByTyping(true);
+              setOpen(true);
+            }
+          }}
+          placeholder={placeholder}
+          className={`w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 transition-all ${
+            hasOptions ? "pr-8" : ""
+          } ${monoFont ? "font-mono" : "font-sans"}`}
+        />
+        {hasOptions && (
+          <button
+            type="button"
+            tabIndex={-1}
+            onClick={() => {
+              setFilterByTyping(false);
+              setOpen((v) => !v);
+            }}
+            className="absolute right-2 p-1 rounded-md text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.06] transition-colors cursor-pointer"
+            title="展开已获取的模型列表"
+          >
+            <ChevronDown
+              size={13}
+              className={`transition-transform duration-150 ${open ? "rotate-180 text-blue-400" : ""}`}
+            />
+          </button>
+        )}
+      </div>
+
+      {open && hasOptions && (
+        <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-40 max-h-52 overflow-y-auto custom-scrollbar rounded-xl bg-[#1b1b1b] border border-[#343434] shadow-2xl py-1">
+          {finalList.map((opt, idx) => {
+            const isSelected = opt === value;
+            return (
+              <button
+                key={`${opt}-${idx}`}
+                type="button"
+                onClick={() => {
+                  onSelectOption(opt);
+                  setOpen(false);
+                  setFilterByTyping(false);
+                }}
+                className={`w-full px-3 py-1.5 text-left text-xs font-mono flex items-center justify-between gap-2 transition-colors cursor-pointer ${
+                  isSelected
+                    ? "bg-blue-600/20 text-blue-300 font-semibold"
+                    : "text-neutral-200 hover:bg-white/[0.06]"
+                }`}
+              >
+                <span className="truncate">{opt}</span>
+                {isSelected && <Check size={12} className="text-blue-400 flex-shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const createEmptyRow = (defaultContext = 128000): ModelDraftRow => ({
   rowId: `row_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -116,15 +239,10 @@ const createEmptyRow = (defaultContext = 128000): ModelDraftRow => ({
 });
 
 const SettingsView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<"general" | "models" | "search">("models");
+  const [activeTab, setActiveTab] = useState<"general" | "models">("models");
 
   // 配置状态
   const [savePath, setSavePath] = useState("");
-
-  // 搜索配置状态
-  const [searchProvider, setSearchProvider] = useState("duckduckgo");
-  const [searchApiKey, setSearchApiKey] = useState("");
-  const [searchMaxResults, setSearchMaxResults] = useState("5");
 
   // Agent 运行最大轮次 (默认 5000)
   const [maxToolRounds, setMaxToolRounds] = useState(5000);
@@ -135,8 +253,6 @@ const SettingsView: React.FC = () => {
   const [compactKeepTokens, setCompactKeepTokens] = useState(20000);
 
   // 全局 Store 状态提取至顶层 (杜绝在条件 JSX 中调用 Hook 导致白屏崩溃)
-  const stepDisplayStyle = useChatStore((s) => s.stepDisplayStyle);
-  const setStepDisplayStyle = useChatStore((s) => s.setStepDisplayStyle);
 
   // 模型管理配置状态
   const [models, setModels] = useState<any[]>([]);
@@ -225,9 +341,33 @@ const SettingsView: React.FC = () => {
     showToast(`已追加 ${newRows.length} 个模型到配置列表`);
   };
 
-  // 主题状态
+  // 主题与个性化背景状态
   const [currentTheme, setCurrentTheme] = useState<ThemeMode>("system");
+  const [appearance, setAppearanceState] = useState<AppearanceConfig>(getAppearance());
   const { setTheme: setStoreTheme, setActiveNavTab } = useAppStore();
+
+  const handleUpdateAppearance = async (patch: Partial<AppearanceConfig>) => {
+    const next = { ...appearance, ...patch };
+    setAppearanceState(next);
+    await setAppearance(patch);
+  };
+
+  const handlePickWallpaperFile = async () => {
+    if (!window.electronAPI?.selectBackgroundImage) return;
+    try {
+      const url = await window.electronAPI.selectBackgroundImage();
+      if (typeof url === "string" && url.startsWith("local-media://")) {
+        const nextOpacity = appearance.surfaceOpacity >= 98 ? 82 : appearance.surfaceOpacity;
+        await handleUpdateAppearance({
+          bgImage: url,
+          surfaceOpacity: nextOpacity,
+        });
+        showToast("已应用自定义背景壁纸");
+      }
+    } catch (err) {
+      showToast("选择背景图片失败");
+    }
+  };
 
   // 提示状态
   const [toastMsg, setToastMsg] = useState("");
@@ -237,18 +377,6 @@ const SettingsView: React.FC = () => {
     setTimeout(() => setToastMsg(""), 3000);
   };
 
-  const handleSaveSearchConfig = async () => {
-    if (!window.electronAPI) return;
-    try {
-      await window.electronAPI.setConfig("search_provider", searchProvider);
-      await window.electronAPI.setConfig("search_api_key", searchApiKey.trim());
-      await window.electronAPI.setConfig("search_max_results", searchMaxResults);
-      showToast("搜索配置保存成功");
-    } catch {
-      showToast("配置保存失败");
-    }
-  };
-
   const loadModels = async () => {
     if (window.electronAPI && window.electronAPI.dbGetModels) {
       const list = await window.electronAPI.dbGetModels();
@@ -256,7 +384,7 @@ const SettingsView: React.FC = () => {
     }
   };
 
-  // 编辑已有模型 (单行模式)
+  // 编辑已有模型 (支持在编辑当前模型的同时，继续基于该 Provider 追加新模型)
   const handleEditModel = (model: any) => {
     setEditingModelId(model.id);
     setNewModelProvider(model.provider || "custom");
@@ -266,6 +394,7 @@ const SettingsView: React.FC = () => {
     setModelRows([
       {
         rowId: `row_edit_${model.id}`,
+        existingId: model.id,
         modelId: model.model_id || model.modelId || "",
         name: model.name || "",
         contextLimit: model.context_limit || model.contextLimit || 128000,
@@ -351,7 +480,7 @@ const SettingsView: React.FC = () => {
     }
   };
 
-  // 添加/更新模型配置 (支持批量保存与单条编辑)
+  // 添加/更新模型配置 (支持编辑现有模型的同时，基于当前 Provider 批量追加新模型)
   const handleAddModel = async () => {
     if (!newModelBaseUrl.trim()) {
       showToast("Base URL 不能为空");
@@ -366,51 +495,46 @@ const SettingsView: React.FC = () => {
 
     if (!window.electronAPI?.dbAddModel) return;
 
-    if (editingModelId) {
-      // 1. 编辑单条模型
-      const target = validRows[0];
+    let updatedCount = 0;
+    let addedCount = 0;
+
+    for (let i = 0; i < validRows.length; i++) {
+      const row = validRows[i];
+      const targetId =
+        row.existingId ||
+        (editingModelId && i === 0 && validRows.length === 1 ? editingModelId : "") ||
+        `model_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
+
+      if (row.existingId || (editingModelId && targetId === editingModelId)) {
+        updatedCount++;
+      } else {
+        addedCount++;
+      }
+
       const modelPayload = {
-        id: editingModelId,
-        model_id: target.modelId.trim(),
-        modelId: target.modelId.trim(),
-        name: target.name.trim() || target.modelId.trim(),
+        id: targetId,
+        model_id: row.modelId.trim(),
+        modelId: row.modelId.trim(),
+        name: row.name.trim() || row.modelId.trim(),
         type: "chat",
         provider: newModelProvider,
         base_url: newModelBaseUrl.trim(),
         baseUrl: newModelBaseUrl.trim(),
         api_key: newModelApiKey.trim(),
         apiKey: newModelApiKey.trim(),
-        context_limit: target.contextLimit,
-        supports_vision: target.supportsVision,
+        context_limit: row.contextLimit,
+        supports_vision: row.supportsVision,
       };
-
       await window.electronAPI.dbAddModel(modelPayload as any);
-      handleCancelEdit();
+    }
+
+    handleCancelEdit();
+    if (updatedCount > 0 && addedCount > 0) {
+      showToast(`已更新 ${updatedCount} 个模型，并新增 ${addedCount} 个同服务商模型！`);
+    } else if (updatedCount > 0) {
       showToast("模型配置已成功更新！");
     } else {
-      // 2. 批量保存 N 条模型行
-      for (let i = 0; i < validRows.length; i++) {
-        const row = validRows[i];
-        const rowKey = `model_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
-        const modelPayload = {
-          id: rowKey,
-          model_id: row.modelId.trim(),
-          modelId: row.modelId.trim(),
-          name: row.name.trim() || row.modelId.trim(),
-          type: "chat",
-          provider: newModelProvider,
-          base_url: newModelBaseUrl.trim(),
-          baseUrl: newModelBaseUrl.trim(),
-          api_key: newModelApiKey.trim(),
-          apiKey: newModelApiKey.trim(),
-          context_limit: row.contextLimit,
-          supports_vision: row.supportsVision,
-        };
-        await window.electronAPI.dbAddModel(modelPayload as any);
-      }
-
-      handleCancelEdit();
-      showToast(`成功保存并生效 ${validRows.length} 个模型配置！`);
+      showToast(`成功保存并生效 ${addedCount} 个模型配置！`);
     }
 
     await loadModels();
@@ -435,15 +559,6 @@ const SettingsView: React.FC = () => {
       const savedPath = await window.electronAPI.getConfig("save_path");
       if (savedPath) setSavePath(savedPath);
 
-      const provider = await window.electronAPI.getConfig("search_provider");
-      if (provider) setSearchProvider(provider);
-
-      const apiKey = await window.electronAPI.getConfig("search_api_key");
-      if (apiKey) setSearchApiKey(apiKey);
-
-      const maxResults = await window.electronAPI.getConfig("search_max_results");
-      if (maxResults) setSearchMaxResults(maxResults);
-
       const savedRounds = await window.electronAPI.getConfig("max_tool_rounds");
       if (savedRounds) setMaxToolRounds(Number(savedRounds) || 5000);
 
@@ -459,6 +574,9 @@ const SettingsView: React.FC = () => {
       const savedTheme = await loadTheme();
       setCurrentTheme(savedTheme);
       setStoreTheme(savedTheme);
+
+      const savedAppearance = await loadAppearance();
+      setAppearanceState(savedAppearance);
     };
     loadConfigs();
     loadModels();
@@ -533,17 +651,15 @@ const SettingsView: React.FC = () => {
             <div>
               <h2 className="text-sm font-bold text-neutral-100">
                 {activeTab === "models" && "大模型服务商与模型配置"}
-                {activeTab === "search" && "联网搜索引擎与网页抓取"}
                 {activeTab === "general" && "通用设置、外观主题与上下文"}
               </h2>
               <p className="text-[11px] text-neutral-500 mt-0.5">
                 {activeTab === "models" && "配置 OpenAI 兼容模型、专属 API Key、上下文上限与视觉输入能力"}
-                {activeTab === "search" && "配置联网搜索提供商、密钥与单次最多检索条数"}
                 {activeTab === "general" && "外观主题、Agent 最大执行轮次与长对话上下文自动压缩"}
               </p>
             </div>
 
-            {/* 三 Tab 切换器 */}
+            {/* 双 Tab 切换器 */}
             <div className="flex items-center gap-1.5 bg-[#181818] p-1 rounded-xl border border-[#282828] flex-shrink-0">
               <button
                 onClick={() => setActiveTab("models")}
@@ -555,17 +671,6 @@ const SettingsView: React.FC = () => {
               >
                 <Cpu size={14} />
                 <span>模型配置</span>
-              </button>
-              <button
-                onClick={() => setActiveTab("search")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all ${
-                  activeTab === "search"
-                    ? "bg-blue-600 text-white font-medium shadow-sm"
-                    : "text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]"
-                }`}
-              >
-                <Globe size={14} />
-                <span>联网搜索</span>
               </button>
               <button
                 onClick={() => setActiveTab("general")}
@@ -678,7 +783,7 @@ const SettingsView: React.FC = () => {
                       </div>
 
                       <div className="flex items-center gap-2">
-                        {fetchedRemoteModels.length > 0 && !editingModelId && (
+                        {fetchedRemoteModels.length > 0 && (
                           <button
                             type="button"
                             onClick={addAllFetchedModels}
@@ -709,175 +814,189 @@ const SettingsView: React.FC = () => {
                           4, 5, 6, 7 模型参数清单 ({modelRows.length} 条待生效)
                         </span>
                         <span className="text-[11px] text-neutral-500">
-                          每行对应一个独立模型，可分别设置模型 ID、显示名称、上下文与视觉
+                          {fetchedRemoteModels.length > 0
+                            ? "已拉取模型列表：4、5 均可下拉选择（双向联动）或直接打字修改"
+                            : "每行对应一个独立模型，可分别设置模型 ID、显示名称、上下文与视觉"}
                         </span>
                       </div>
-                      {!editingModelId && (
-                        <button
-                          type="button"
-                          onClick={() => addRow("")}
-                          className="px-2.5 py-1 rounded-lg bg-[#222222] hover:bg-[#2b2b2b] text-blue-400 text-xs font-medium flex items-center gap-1 border border-[#303030] transition-colors"
-                        >
-                          <Plus size={13} />
-                          <span>添加一行模型</span>
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => addRow("")}
+                        className="px-2.5 py-1 rounded-lg bg-[#222222] hover:bg-[#2b2b2b] text-blue-400 text-xs font-medium flex items-center gap-1 border border-[#303030] transition-colors cursor-pointer"
+                      >
+                        <Plus size={13} />
+                        <span>添加一行模型</span>
+                      </button>
                     </div>
 
                     {/* 模型卡片数组 */}
                     <div className="space-y-3">
-                      {modelRows.map((row, index) => (
-                        <div
-                          key={row.rowId}
-                          className="p-4 rounded-xl bg-[#171717] border border-[#2b2b2b] space-y-3 relative group"
-                        >
-                          <div className="flex items-center justify-between border-b border-[#242424] pb-2">
-                            <span className="text-[11px] font-mono font-semibold text-neutral-300 flex items-center gap-1.5">
-                              <span className="w-4 h-4 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-[10px]">
-                                {index + 1}
-                              </span>
-                              <span>模型 #{index + 1} 配置</span>
-                            </span>
+                      {modelRows.map((row, index) => {
+                        const remoteOptionList = Array.from(
+                          new Set(
+                            fetchedRemoteModels
+                              .map((m: any) => String(m.id || m.name || m.model || m || "").trim())
+                              .filter(Boolean)
+                          )
+                        );
 
-                            {!editingModelId && modelRows.length > 1 && (
-                              <button
-                                type="button"
-                                onClick={() => removeRow(row.rowId)}
-                                className="p-1 rounded text-neutral-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                                title="删除此模型配置行"
-                              >
-                                <Trash2 size={13} />
-                              </button>
-                            )}
-                          </div>
-
-                          {/* 第 1 行：4. 模型 ID + 5. 显示名称 */}
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <label className="text-xs font-medium text-neutral-300">
-                                  4. 模型 ID (Model ID)
-                                </label>
-                                {fetchedRemoteModels.length > 0 && !editingModelId && (
-                                  <button
-                                    type="button"
-                                    onClick={() => updateRow(row.rowId, { isManual: !row.isManual })}
-                                    className="text-[10px] text-blue-400 hover:text-blue-300"
+                        return (
+                          <div
+                            key={row.rowId}
+                            className="p-4 rounded-xl bg-[#171717] border border-[#2b2b2b] space-y-3 relative group"
+                          >
+                            <div className="flex items-center justify-between border-b border-[#242424] pb-2">
+                              <span className="text-[11px] font-mono font-semibold text-neutral-300 flex items-center gap-1.5">
+                                <span className="w-4 h-4 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-[10px]">
+                                  {index + 1}
+                                </span>
+                                <span>模型 #{index + 1} 配置</span>
+                                {editingModelId && (
+                                  <span
+                                    className={`px-1.5 py-0.2 rounded text-[10px] font-sans ${
+                                      row.existingId
+                                        ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                                        : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                                    }`}
                                   >
-                                    {row.isManual ? "选择已拉取列表" : "手动输入"}
-                                  </button>
+                                    {row.existingId ? "原模型更新" : "基于当前服务商新增"}
+                                  </span>
                                 )}
-                              </div>
+                              </span>
 
-                              {fetchedRemoteModels.length > 0 && !row.isManual ? (
-                                <select
-                                  value={row.modelId}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    updateRow(row.rowId, {
-                                      modelId: val,
-                                      name: row.name === row.modelId || !row.name ? val : row.name,
-                                      supportsVision: inferVisionSupport(val),
-                                    });
-                                  }}
-                                  className="w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-100 outline-none focus:border-blue-500 font-mono cursor-pointer"
+                              {modelRows.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => removeRow(row.rowId)}
+                                  className="p-1 rounded text-neutral-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                                  title="删除此模型配置行"
                                 >
-                                  <option value="" disabled className="bg-[#1c1c1c] text-neutral-500">
-                                    -- 请选择探测到的模型 --
-                                  </option>
-                                  {fetchedRemoteModels.map((m: any, idx) => {
-                                    const idVal = m.id || m.name || m.model || String(m);
-                                    return (
-                                      <option key={`${idVal}-${idx}`} value={idVal} className="bg-[#1c1c1c]">
-                                        {idVal}
-                                      </option>
-                                    );
-                                  })}
-                                </select>
-                              ) : (
-                                <input
-                                  type="text"
-                                  value={row.modelId}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    updateRow(row.rowId, {
-                                      modelId: val,
-                                      name: row.name === row.modelId || !row.name ? val : row.name,
-                                      supportsVision: inferVisionSupport(val),
-                                    });
-                                  }}
-                                  placeholder="例如: deepseek-chat, gpt-4o, qwen2.5-coder:32b"
-                                  className="w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 font-mono"
-                                />
+                                  <Trash2 size={13} />
+                                </button>
                               )}
                             </div>
 
-                            <div className="space-y-1">
-                              <label className="text-xs font-medium text-neutral-300">
-                                5. 显示名称 (Display Name)
-                              </label>
-                              <input
-                                type="text"
-                                value={row.name}
-                                onChange={(e) => updateRow(row.rowId, { name: e.target.value })}
-                                placeholder="例如: DeepSeek V3 官方, 我的 GPT-4o"
-                                className="w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 font-sans"
-                              />
-                            </div>
-                          </div>
-
-                          {/* 第 2 行：6. 最大上下文大小 + 7. 视觉支持开关 */}
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
-                            <div className="space-y-1">
-                              <label className="text-xs font-medium text-neutral-300">
-                                6. 最大上下文大小 (Context Limit)
-                              </label>
-                              <select
-                                value={row.contextLimit}
-                                onChange={(e) => updateRow(row.rowId, { contextLimit: Number(e.target.value) })}
-                                className="w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 cursor-pointer font-sans"
-                              >
-                                {CONTEXT_LIMIT_OPTIONS.map((opt) => (
-                                  <option key={opt.value} value={opt.value} className="bg-[#1c1c1c]">
-                                    {opt.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-
-                            <div className="flex items-end">
-                              <label className="w-full flex items-center gap-2.5 p-2 rounded-xl bg-[#141414] border border-[#2e2e2e] cursor-pointer select-none">
-                                <input
-                                  type="checkbox"
-                                  checked={row.supportsVision}
-                                  onChange={(e) => updateRow(row.rowId, { supportsVision: e.target.checked })}
-                                  className="accent-blue-600 cursor-pointer"
-                                />
-                                <div className="flex flex-col">
-                                  <span className="text-xs font-medium text-neutral-200">
-                                    7. 支持图片输入 (Vision)
-                                  </span>
-                                  <span className="text-[10px] text-neutral-500">
-                                    向该模型输入图片时生效
-                                  </span>
+                            {/* 第 1 行：4. 模型 ID + 5. 显示名称 (均为可下拉联动 + 可自由编辑组合框) */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between">
+                                  <label className="text-xs font-medium text-neutral-300">
+                                    4. 模型 ID (Model ID)
+                                  </label>
+                                  {remoteOptionList.length > 0 && (
+                                    <span className="text-[10px] text-blue-400/80 font-mono">
+                                      可下拉选择或直接编辑
+                                    </span>
+                                  )}
                                 </div>
-                              </label>
+
+                                <EditableModelCombobox
+                                  value={row.modelId}
+                                  options={remoteOptionList}
+                                  monoFont
+                                  placeholder="例如: deepseek-chat, gpt-4o, qwen2.5-coder:32b"
+                                  onChange={(val) => {
+                                    updateRow(row.rowId, {
+                                      modelId: val,
+                                      name: row.name === row.modelId || !row.name ? val : row.name,
+                                      supportsVision: inferVisionSupport(val),
+                                    });
+                                  }}
+                                  onSelectOption={(val) => {
+                                    updateRow(row.rowId, {
+                                      modelId: val,
+                                      name: val,
+                                      supportsVision: inferVisionSupport(val),
+                                    });
+                                  }}
+                                />
+                              </div>
+
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between">
+                                  <label className="text-xs font-medium text-neutral-300">
+                                    5. 显示名称 (Display Name)
+                                  </label>
+                                  {remoteOptionList.length > 0 && (
+                                    <span className="text-[10px] text-blue-400/80 font-mono">
+                                      可下拉选择或自定义别名
+                                    </span>
+                                  )}
+                                </div>
+
+                                <EditableModelCombobox
+                                  value={row.name}
+                                  options={remoteOptionList}
+                                  placeholder="例如: DeepSeek V3 官方, 我的 GPT-4o"
+                                  onChange={(val) => {
+                                    updateRow(row.rowId, { name: val });
+                                  }}
+                                  onSelectOption={(val) => {
+                                    updateRow(row.rowId, {
+                                      modelId: val,
+                                      name: val,
+                                      supportsVision: inferVisionSupport(val),
+                                    });
+                                  }}
+                                />
+                              </div>
+                            </div>
+
+                            {/* 第 2 行：6. 最大上下文大小 + 7. 视觉支持开关 */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                              <div className="space-y-1">
+                                <label className="text-xs font-medium text-neutral-300">
+                                  6. 最大上下文大小 (Context Limit)
+                                </label>
+                                <select
+                                  value={row.contextLimit}
+                                  onChange={(e) => updateRow(row.rowId, { contextLimit: Number(e.target.value) })}
+                                  className="w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 cursor-pointer font-sans"
+                                >
+                                  {CONTEXT_LIMIT_OPTIONS.map((opt) => (
+                                    <option key={opt.value} value={opt.value} className="bg-[#1c1c1c]">
+                                      {opt.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <div className="flex items-end">
+                                <label className="w-full flex items-center gap-2.5 p-2 rounded-xl bg-[#141414] border border-[#2e2e2e] cursor-pointer select-none">
+                                  <input
+                                    type="checkbox"
+                                    checked={row.supportsVision}
+                                    onChange={(e) => updateRow(row.rowId, { supportsVision: e.target.checked })}
+                                    className="accent-blue-600 cursor-pointer"
+                                  />
+                                  <div className="flex flex-col">
+                                    <span className="text-xs font-medium text-neutral-200">
+                                      7. 支持图片输入 (Vision)
+                                    </span>
+                                    <span className="text-[10px] text-neutral-500">
+                                      向该模型输入图片时生效
+                                    </span>
+                                  </div>
+                                </label>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
 
-                    {!editingModelId && (
-                      <button
-                        type="button"
-                        onClick={() => addRow("")}
-                        className="w-full py-2.5 rounded-xl border border-dashed border-[#333333] hover:border-blue-500/50 hover:bg-white/[0.02] text-xs text-neutral-400 hover:text-blue-400 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                      >
-                        <Plus size={14} />
-                        <span>添加一行新模型配置</span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => addRow("")}
+                      className="w-full py-2.5 rounded-xl border border-dashed border-[#333333] hover:border-blue-500/50 hover:bg-white/[0.02] text-xs text-neutral-400 hover:text-blue-400 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Plus size={14} />
+                      <span>
+                        {editingModelId
+                          ? "基于当前服务商继续添加一行新模型"
+                          : "添加一行新模型配置"}
+                      </span>
+                    </button>
                   </div>
 
                   {/* 保存与取消按钮 */}
@@ -898,7 +1017,7 @@ const SettingsView: React.FC = () => {
                     >
                       <Save size={13} />
                       <span>
-                        {editingModelId
+                        {editingModelId && modelRows.length === 1
                           ? "更新模型并全局生效"
                           : `保存全部 (${modelRows.filter((r) => r.modelId.trim()).length || modelRows.length}) 个模型配置并生效`}
                       </span>
@@ -969,78 +1088,40 @@ const SettingsView: React.FC = () => {
               </div>
             )}
 
-            {/* ═════════ 2. 搜索配置 TAB ═════════ */}
-            {activeTab === "search" && (
-              <div className="bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl p-6 shadow-sm space-y-5">
-                <h3 className="text-xs font-bold text-neutral-100 tracking-wide border-b border-[#282828] pb-3">
-                  联网搜索引擎与正文抓取
-                </h3>
-
-                <div className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="block text-xs font-medium text-neutral-300">
-                      默认搜索引擎 (提供商)
-                    </label>
-                    <select
-                      value={searchProvider}
-                      onChange={(e) => setSearchProvider(e.target.value)}
-                      className="w-full bg-[#171717] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 font-sans"
-                    >
-                      <option value="duckduckgo">DuckDuckGo (免费 / 免 API Key)</option>
-                      <option value="tavily">Tavily (专业 AI 搜索)</option>
-                      <option value="mojeek">Mojeek (注重隐私)</option>
-                      <option value="google">Google HTML (网页解析)</option>
-                    </select>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="block text-xs font-medium text-neutral-300">
-                      Search API Key (仅 Tavily / Mojeek 需要)
-                    </label>
-                    <input
-                      type="password"
-                      value={searchApiKey}
-                      onChange={(e) => setSearchApiKey(e.target.value)}
-                      placeholder="使用 DuckDuckGo 时留空即可"
-                      className="w-full bg-[#171717] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 font-mono"
-                    />
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="block text-xs font-medium text-neutral-300">
-                      最大检索结果数
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={10}
-                      value={searchMaxResults}
-                      onChange={(e) => setSearchMaxResults(e.target.value)}
-                      className="w-full bg-[#171717] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 font-mono"
-                    />
-                  </div>
-
-                  <div className="pt-2 flex justify-end">
-                    <button
-                      onClick={handleSaveSearchConfig}
-                      className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all shadow-md flex items-center gap-1.5"
-                    >
-                      <Save size={13} />
-                      <span>保存搜索配置</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* ═════════ 3. 通用设置 TAB ═════════ */}
+            {/* ═════════ 2. 通用设置 TAB ═════════ */}
             {activeTab === "general" && (
               <div className="space-y-5">
-                {/* 主题设置 */}
-                <div className="bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl p-6 shadow-sm space-y-4">
-                  <h3 className="text-xs font-bold text-neutral-100 tracking-wide border-b border-[#282828] pb-3">
-                    外观主题
-                  </h3>
+                {/* 主题与个性化背景设置 */}
+                <div className="bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl p-6 shadow-sm space-y-5">
+                  <div className="flex items-center justify-between border-b border-[#282828] pb-3">
+                    <div>
+                      <h3 className="text-xs font-bold text-neutral-100 tracking-wide">
+                        外观主题与自定义背景
+                      </h3>
+                      <p className="text-[11px] text-neutral-500 mt-0.5">
+                        支持亮色与暗色双主题，可自定义背景壁纸、界面通透度与高斯虚化，前景文字与代码始终保持 100% 清晰可读
+                      </p>
+                    </div>
+                    {(appearance.bgImage || appearance.surfaceOpacity < 100) && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await handleUpdateAppearance({
+                            bgImage: "",
+                            surfaceOpacity: 100,
+                            bgBlur: 16,
+                          });
+                          showToast("已恢复默认纯色外观");
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#252525] hover:bg-[#303030] text-neutral-300 text-[11px] font-medium border border-[#353535] flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <RotateCcw size={12} />
+                        <span>恢复默认纯色</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* 1. 亮色 / 暗色 / 随系统 切换 */}
                   <div className="flex gap-3">
                     {[
                       { value: "light" as const, label: "亮色", icon: Sun },
@@ -1066,64 +1147,212 @@ const SettingsView: React.FC = () => {
                       </button>
                     ))}
                   </div>
-                </div>
 
-                {/* Agent 步骤与调用详情展示风格 (详细 / 简略) */}
-                <div className="bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl p-6 shadow-sm space-y-4">
-                  <div className="border-b border-[#282828] pb-3 flex items-center justify-between">
-                    <div>
-                      <h3 className="text-xs font-bold text-neutral-100 tracking-wide">
-                        Agent 步骤与调用详情展示风格
-                      </h3>
-                      <p className="text-[11px] text-neutral-500 mt-0.5">
-                        控制在会话中是否默认展开并呈现每一步调用的入参、命令与返回详情
-                      </p>
+                  {/* 2. 背景图片与艺术渐变壁纸选择 */}
+                  <div className="pt-2 border-t border-[#262626] space-y-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <ImageIcon size={14} className="text-blue-400" />
+                        <span className="text-xs font-semibold text-neutral-200">
+                          背景壁纸 (支持本地图片或内置氛围壁纸)
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handlePickWallpaperFile}
+                          className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
+                        >
+                          <FolderOpen size={13} />
+                          <span>选择本地背景图...</span>
+                        </button>
+                        {appearance.bgImage && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await handleUpdateAppearance({
+                                bgImage: "",
+                                surfaceOpacity: 100,
+                              });
+                              showToast("已清除背景图片");
+                            }}
+                            className="px-2.5 py-1.5 rounded-xl bg-[#252525] hover:bg-[#303030] text-neutral-300 text-xs font-medium border border-[#353535] transition-colors cursor-pointer"
+                          >
+                            清除背景图
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* 预设壁纸与当前自定义图片卡片网格 */}
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                      {/* 无背景纯色卡 */}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleUpdateAppearance({ bgImage: "", surfaceOpacity: 100 })
+                        }
+                        className={`h-16 rounded-xl border-2 flex flex-col items-center justify-center gap-1 transition-all cursor-pointer ${
+                          !appearance.bgImage
+                            ? "border-blue-500 bg-blue-500/10 text-blue-400"
+                            : "border-[#2e2e2e] bg-[#171717] text-neutral-400 hover:border-neutral-500"
+                        }`}
+                      >
+                        <span className="text-xs font-semibold">纯净无背景</span>
+                        <span className="text-[10px] text-neutral-500">100% 实色</span>
+                      </button>
+
+                      {/* 4 款内置氛围渐变壁纸 */}
+                      {WALLPAPER_PRESETS.map((preset) => {
+                        const isSelected = appearance.bgImage === preset.id;
+                        return (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() => {
+                              const nextOpacity =
+                                appearance.surfaceOpacity >= 98 ? 82 : appearance.surfaceOpacity;
+                              handleUpdateAppearance({
+                                bgImage: preset.id,
+                                surfaceOpacity: nextOpacity,
+                              });
+                            }}
+                            className={`h-16 rounded-xl border-2 relative overflow-hidden flex items-end p-2 transition-all cursor-pointer ${
+                              isSelected
+                                ? "border-blue-500 shadow-md"
+                                : "border-[#2e2e2e] hover:border-neutral-400"
+                            }`}
+                          >
+                            <div
+                              className="absolute inset-0"
+                              style={{ backgroundImage: preset.css }}
+                            />
+                            <span className="relative z-10 text-[11px] font-semibold text-white drop-shadow px-1.5 py-0.5 rounded bg-black/45 backdrop-blur-sm">
+                              {preset.name}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* 若选择了本地图片，展示当前本地图片预览条 */}
+                    {appearance.bgImage &&
+                      !appearance.bgImage.startsWith("preset:") && (
+                        <div className="flex items-center justify-between p-2.5 rounded-xl bg-[#171717] border border-[#2b2b2b]">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div
+                              className="w-12 h-8 rounded-lg bg-cover bg-center border border-[#353535] flex-shrink-0"
+                              style={{
+                                backgroundImage: `url("${appearance.bgImage}")`,
+                              }}
+                            />
+                            <div className="min-w-0">
+                              <div className="text-xs font-medium text-neutral-200 flex items-center gap-1.5">
+                                <Sparkles size={12} className="text-blue-400" />
+                                <span>已启用自定义本地壁纸</span>
+                              </div>
+                              <div className="text-[10px] text-neutral-500 font-mono truncate max-w-[380px]">
+                                {decodeURI(appearance.bgImage.replace("local-media://local", ""))}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                  </div>
+
+                  {/* 3. 主题面板不透明度与背景高斯虚化滑块 */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-[#262626]">
+                    {/* 界面不透明度 */}
+                    <div className="p-3.5 rounded-xl bg-[#171717] border border-[#2b2b2b] space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-semibold text-neutral-200">
+                          主题面板不透明度 (Surface Opacity)
+                        </label>
+                        <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                          {appearance.surfaceOpacity}% (透光 {100 - appearance.surfaceOpacity}%)
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={35}
+                        max={100}
+                        step={1}
+                        value={appearance.surfaceOpacity}
+                        onChange={(e) =>
+                          handleUpdateAppearance({
+                            surfaceOpacity: Number(e.target.value),
+                          })
+                        }
+                        className="w-full accent-blue-600 cursor-pointer"
+                      />
+                      <div className="flex justify-between text-[10px] text-neutral-500">
+                        <span>35% (高通透毛玻璃)</span>
+                        <span>82% (推荐平衡)</span>
+                        <span>100% (实色无透光)</span>
+                      </div>
+                    </div>
+
+                    {/* 背景虚化程度 */}
+                    <div className="p-3.5 rounded-xl bg-[#171717] border border-[#2b2b2b] space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-semibold text-neutral-200">
+                          背景壁纸虚化程度 (Background Blur)
+                        </label>
+                        <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                          {appearance.bgBlur}px
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={40}
+                        step={1}
+                        value={appearance.bgBlur}
+                        onChange={(e) =>
+                          handleUpdateAppearance({
+                            bgBlur: Number(e.target.value),
+                          })
+                        }
+                        className="w-full accent-emerald-500 cursor-pointer"
+                      />
+                      <div className="flex justify-between text-[10px] text-neutral-500">
+                        <span>0px (清晰原图)</span>
+                        <span>16px (柔和护眼)</span>
+                        <span>40px (深度磨砂)</span>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                    {/* 详细模式 (默认推荐) */}
-                    <div
-                      onClick={async () => {
-                        await setStepDisplayStyle("detailed");
-                        showToast("已切换为详细模式：默认展开每一步完整调用详情");
-                      }}
-                      className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col gap-2 ${
-                        stepDisplayStyle === "detailed"
-                          ? "border-blue-500 bg-blue-500/10 text-blue-400 shadow-sm"
-                          : "border-[#2e2e2e] bg-[#171717] text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <Layers size={18} />
-                        <span className="font-bold text-xs">详细模式 (Detailed - 默认推荐)</span>
-                      </div>
-                      <p className="text-[11px] text-neutral-400 leading-relaxed">
-                        会话中展开每一步，展示传入的详细参数代码块、执行说明与完整的输出日志。
-                      </p>
-                    </div>
+                  {/* 内容面通透开关：让卡片/代码/输入框/消息气泡也跟随背景渐变（毛玻璃） */}
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl bg-[#171717] border border-[#2b2b2b] cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={appearance.contentTranslucent}
+                      onChange={(e) =>
+                        handleUpdateAppearance({
+                          contentTranslucent: e.target.checked,
+                        })
+                      }
+                      className="mt-0.5 accent-blue-600 cursor-pointer"
+                    />
+                    <span className="flex flex-col gap-0.5">
+                      <span className="text-xs font-medium text-neutral-200">
+                        内容面也跟随背景通透（毛玻璃）
+                      </span>
+                      <span className="text-[11px] text-neutral-500">
+                        开启后卡片、代码块、输入框与消息气泡也会透出壁纸渐变，并施加毛玻璃虚化保证文字清晰；关闭则内容面保持高不透明度优先可读
+                      </span>
+                    </span>
+                  </label>
 
-                    {/* 简略模式 */}
-                    <div
-                      onClick={async () => {
-                        await setStepDisplayStyle("compact");
-                        showToast("已切换为简略模式：步骤精炼为单行轻量摘要");
-                      }}
-                      className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col gap-2 ${
-                        stepDisplayStyle === "compact"
-                          ? "border-blue-500 bg-blue-500/10 text-blue-400 shadow-sm"
-                          : "border-[#2e2e2e] bg-[#171717] text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <AlignJustify size={18} />
-                        <span className="font-bold text-xs">简略模式 (Compact)</span>
-                      </div>
-                      <p className="text-[11px] text-neutral-400 leading-relaxed">
-                        仅展示核心操作标题（如修改代码、读取文件）与一行轻量状态，保持对话流轻快极简。
-                      </p>
+                  {(appearance.surfaceOpacity < 60 || appearance.bgBlur < 6) && (
+                    <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[var(--ui-accent-amber-soft)] border border-[color:var(--ui-accent-amber-border)] text-[11px] text-[var(--ui-accent-amber)] leading-relaxed">
+                      <Sparkles size={13} className="flex-shrink-0 mt-0.5" />
+                      <span>
+                        当前通透度较高或虚化较低，壁纸可能干扰阅读。推荐组合：不透明度 82% + 虚化 16px（柔和护眼），外框通透且内容清晰。
+                      </span>
                     </div>
-                  </div>
+                  )}
                 </div>
 
                 {/* 最大工具调用轮次 (Max Tool Rounds) 设置卡片 */}

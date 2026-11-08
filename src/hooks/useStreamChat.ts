@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useCallback } from "react";
 import { useChatStore, type ChatAttachment } from "../stores/chatStore";
 
 interface StreamCallbacks {
@@ -92,10 +92,15 @@ function formatErrorContent(err: string) {
 }
 
 export function useStreamChat() {
-  const [isGenerating, setIsGenerating] = useState(false);
   const {
     activeSessionId,
     messages,
+    generatingBySession,
+    setSessionGenerating,
+    upsertSessionToolCall,
+    clearSessionToolCalls,
+    setSessionTodos,
+    setSessionPermission,
     addMessage,
     appendMessageDelta,
     saveMessageToDb,
@@ -104,6 +109,8 @@ export function useStreamChat() {
     setContextMetrics,
     refreshOutputs,
   } = useChatStore();
+
+  const isGenerating = Boolean(activeSessionId && generatingBySession[activeSessionId]);
 
   const sendMessage = useCallback(
     async (
@@ -114,8 +121,13 @@ export function useStreamChat() {
       attachments?: ChatAttachment[],
     ) => {
       if (!activeSessionId || !text.trim()) return;
+      const targetSessionId = activeSessionId;
 
-      setIsGenerating(true);
+      setSessionGenerating(targetSessionId, true);
+      clearSessionToolCalls(targetSessionId);
+      setSessionTodos(targetSessionId, []);
+      setSessionPermission(targetSessionId, null);
+
       const startTime = Date.now();
 
       const userMsg = {
@@ -127,7 +139,7 @@ export function useStreamChat() {
           ? { metadata: { attachments } }
           : {}),
       };
-      await addMessage(activeSessionId, userMsg);
+      await addMessage(targetSessionId, userMsg);
 
       const assistantMsgId = crypto.randomUUID();
       const assistantMsg = {
@@ -136,33 +148,37 @@ export function useStreamChat() {
         content: "",
         createdAt: Date.now(),
       };
-      await addMessage(activeSessionId, assistantMsg, true);
+      await addMessage(targetSessionId, assistantMsg, true);
 
-      const currentMsgs = messages[activeSessionId] || [];
-      const contextMsgs = [...currentMsgs, userMsg].map((m) => {
-        const attachmentList = m.metadata?.attachments;
-        return Array.isArray(attachmentList) && attachmentList.length > 0
-          ? { role: m.role, content: m.content, attachments: attachmentList }
-          : { role: m.role, content: m.content };
-      });
+      const currentMsgs = useChatStore.getState().messages[targetSessionId] || [];
+      const contextMsgs = currentMsgs
+        .filter((m) => m.id !== assistantMsgId)
+        .map((m) => {
+          const attachmentList = m.metadata?.attachments;
+          return Array.isArray(attachmentList) && attachmentList.length > 0
+            ? { role: m.role, content: m.content, attachments: attachmentList }
+            : { role: m.role, content: m.content };
+        });
 
       let accumulatedContent = "";
-      const currentSession = useChatStore.getState().sessions.find((s) => s.id === activeSessionId);
+      const currentSession = useChatStore.getState().sessions.find((s) => s.id === targetSessionId);
       const currentWorkDir = currentSession?.workDir || null;
+      const currentPermissionMode = currentSession?.permissionMode || "auto-sandbox";
 
       if (window.electronAPI?.streamChat) {
         window.electronAPI.streamChat(
-          activeSessionId,
+          targetSessionId,
           contextMsgs,
           selectedModel,
           enableTools,
           currentWorkDir,
           (delta: string) => {
             accumulatedContent += delta;
-            appendMessageDelta(activeSessionId, assistantMsgId, delta);
+            appendMessageDelta(targetSessionId, assistantMsgId, delta);
           },
           (endPayload: any) => {
-            setIsGenerating(false);
+            setSessionGenerating(targetSessionId, false);
+            setSessionPermission(targetSessionId, null);
             const durationMs = Date.now() - startTime;
             const durationFormatted = formatDuration(durationMs);
             const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
@@ -177,21 +193,22 @@ export function useStreamChat() {
               durationFormatted,
             };
 
-            saveMessageToDb(activeSessionId, {
+            saveMessageToDb(targetSessionId, {
               id: assistantMsgId,
               role: "assistant",
               content: finalContent,
               createdAt: Date.now(),
               metadata: finalMeta,
             });
-            updateMessageMetadata(activeSessionId, assistantMsgId, finalMeta);
+            updateMessageMetadata(targetSessionId, assistantMsgId, finalMeta);
           },
           (err: string) => {
             const errorContent = formatErrorContent(err);
             accumulatedContent += errorContent;
-            appendMessageDelta(activeSessionId, assistantMsgId, errorContent);
-            setIsGenerating(false);
-            saveMessageToDb(activeSessionId, {
+            appendMessageDelta(targetSessionId, assistantMsgId, errorContent);
+            setSessionGenerating(targetSessionId, false);
+            setSessionPermission(targetSessionId, null);
+            saveMessageToDb(targetSessionId, {
               id: assistantMsgId,
               role: "assistant",
               content: accumulatedContent,
@@ -199,33 +216,68 @@ export function useStreamChat() {
             });
           },
           (statusData: any) => {
+            upsertSessionToolCall(targetSessionId, statusData);
             callbacks?.onToolStatus?.(statusData);
           },
           (metrics: any) => {
-            setContextMetrics(metrics);
+            setContextMetrics(metrics, targetSessionId);
           },
-          () => {
-            refreshOutputs(activeSessionId);
-            const currentSession = useChatStore.getState().sessions.find((s) => s.id === activeSessionId);
-            useChatStore.getState().refreshGitStatus(currentSession?.workDir);
+          (outputItem?: any) => {
+            const store = useChatStore.getState();
+            if (store.activeSessionId === targetSessionId) {
+              refreshOutputs(targetSessionId);
+              const sess = store.sessions.find((s) => s.id === targetSessionId);
+              store.refreshGitStatus(sess?.workDir);
+
+              // 当 Agent 创建或修改了 HTML / SVG 等可视化产物且开启了自动预览时，自动在右侧工作台打开或热刷新
+              if (outputItem?.filePath) {
+                const ext = String(outputItem.fileType || "").toLowerCase();
+                if (
+                  store.autoOpenHtmlOutputs &&
+                  (ext === "html" || ext === "htm" || ext === "svg")
+                ) {
+                  const localUrl = `local-media://local${encodeURI(outputItem.filePath)}`;
+                  store.openUrlInWorkbench(localUrl, outputItem.name, outputItem.filePath);
+                } else {
+                  // 若该文件已在工作台打开，触发热刷新
+                  const openFileTab = store.workbenchTabs.find(
+                    (t) =>
+                      t.filePath &&
+                      (t.filePath === outputItem.filePath ||
+                        outputItem.filePath.endsWith(`/${t.filePath}`))
+                  );
+                  if (openFileTab) {
+                    store.updateWorkbenchTab(openFileTab.id, { refreshKey: Date.now() });
+                  }
+                }
+              }
+            }
           },
           (permData: any) => {
+            setSessionPermission(targetSessionId, permData);
             callbacks?.onPermissionRequest?.(permData);
           },
           (todos: any) => {
+            setSessionTodos(targetSessionId, todos);
             callbacks?.onTodosUpdate?.(todos);
           },
           (data: any) => {
             callbacks?.onCompaction?.(data);
-          }
+          },
+          currentPermissionMode
         );
       } else {
-        setIsGenerating(false);
+        setSessionGenerating(targetSessionId, false);
       }
     },
     [
       activeSessionId,
       messages,
+      setSessionGenerating,
+      clearSessionToolCalls,
+      setSessionTodos,
+      setSessionPermission,
+      upsertSessionToolCall,
       addMessage,
       appendMessageDelta,
       saveMessageToDb,
@@ -243,11 +295,17 @@ export function useStreamChat() {
       callbacks?: StreamCallbacks,
     ) => {
       if (!activeSessionId || !window.electronAPI?.streamChat) return;
-      setIsGenerating(true);
+      const targetSessionId = activeSessionId;
+
+      setSessionGenerating(targetSessionId, true);
+      clearSessionToolCalls(targetSessionId);
+      setSessionTodos(targetSessionId, []);
+      setSessionPermission(targetSessionId, null);
+
       const startTime = Date.now();
 
       try {
-        await truncateMessages(activeSessionId, msgId);
+        await truncateMessages(targetSessionId, msgId);
 
         const assistantMsgId = crypto.randomUUID();
         const assistantMsg = {
@@ -256,31 +314,35 @@ export function useStreamChat() {
           content: "",
           createdAt: Date.now(),
         };
-        await addMessage(activeSessionId, assistantMsg, true);
+        await addMessage(targetSessionId, assistantMsg, true);
 
-        const keptMsgs = (messages[activeSessionId] || []).map((m) => {
-          const attachmentList = m.metadata?.attachments;
-          return Array.isArray(attachmentList) && attachmentList.length > 0
-            ? { role: m.role, content: m.content, attachments: attachmentList }
-            : { role: m.role, content: m.content };
-        });
+        const keptMsgs = (useChatStore.getState().messages[targetSessionId] || [])
+          .filter((m) => m.id !== assistantMsgId)
+          .map((m) => {
+            const attachmentList = m.metadata?.attachments;
+            return Array.isArray(attachmentList) && attachmentList.length > 0
+              ? { role: m.role, content: m.content, attachments: attachmentList }
+              : { role: m.role, content: m.content };
+          });
 
         let accumulatedContent = "";
-        const currentSession = useChatStore.getState().sessions.find((s) => s.id === activeSessionId);
+        const currentSession = useChatStore.getState().sessions.find((s) => s.id === targetSessionId);
         const currentWorkDir = currentSession?.workDir || null;
+        const currentPermissionMode = currentSession?.permissionMode || "auto-sandbox";
 
         window.electronAPI.streamChat(
-          activeSessionId,
+          targetSessionId,
           keptMsgs,
           selectedModel,
           enableTools,
           currentWorkDir,
           (delta: string) => {
             accumulatedContent += delta;
-            appendMessageDelta(activeSessionId, assistantMsgId, delta);
+            appendMessageDelta(targetSessionId, assistantMsgId, delta);
           },
           (endPayload: any) => {
-            setIsGenerating(false);
+            setSessionGenerating(targetSessionId, false);
+            setSessionPermission(targetSessionId, null);
             const durationMs = Date.now() - startTime;
             const durationFormatted = formatDuration(durationMs);
             const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
@@ -295,21 +357,22 @@ export function useStreamChat() {
               durationFormatted,
             };
 
-            saveMessageToDb(activeSessionId, {
+            saveMessageToDb(targetSessionId, {
               id: assistantMsgId,
               role: "assistant",
               content: finalContent,
               createdAt: Date.now(),
               metadata: finalMeta,
             });
-            updateMessageMetadata(activeSessionId, assistantMsgId, finalMeta);
+            updateMessageMetadata(targetSessionId, assistantMsgId, finalMeta);
           },
           (err: string) => {
             const errorContent = formatErrorContent(err);
             accumulatedContent += errorContent;
-            appendMessageDelta(activeSessionId, assistantMsgId, errorContent);
-            setIsGenerating(false);
-            saveMessageToDb(activeSessionId, {
+            appendMessageDelta(targetSessionId, assistantMsgId, errorContent);
+            setSessionGenerating(targetSessionId, false);
+            setSessionPermission(targetSessionId, null);
+            saveMessageToDb(targetSessionId, {
               id: assistantMsgId,
               role: "assistant",
               content: accumulatedContent,
@@ -317,34 +380,69 @@ export function useStreamChat() {
             });
           },
           (statusData: any) => {
+            upsertSessionToolCall(targetSessionId, statusData);
             callbacks?.onToolStatus?.(statusData);
           },
           (metrics: any) => {
-            setContextMetrics(metrics);
+            setContextMetrics(metrics, targetSessionId);
           },
-          () => {
-            refreshOutputs(activeSessionId);
-            const currentSession = useChatStore.getState().sessions.find((s) => s.id === activeSessionId);
-            useChatStore.getState().refreshGitStatus(currentSession?.workDir);
+          (outputItem?: any) => {
+            const store = useChatStore.getState();
+            if (store.activeSessionId === targetSessionId) {
+              refreshOutputs(targetSessionId);
+              const sess = store.sessions.find((s) => s.id === targetSessionId);
+              store.refreshGitStatus(sess?.workDir);
+
+              // 当 Agent 创建或修改了 HTML / SVG 等可视化产物且开启了自动预览时，自动在右侧工作台打开或热刷新
+              if (outputItem?.filePath) {
+                const ext = String(outputItem.fileType || "").toLowerCase();
+                if (
+                  store.autoOpenHtmlOutputs &&
+                  (ext === "html" || ext === "htm" || ext === "svg")
+                ) {
+                  const localUrl = `local-media://local${encodeURI(outputItem.filePath)}`;
+                  store.openUrlInWorkbench(localUrl, outputItem.name, outputItem.filePath);
+                } else {
+                  // 若该文件已在工作台打开，触发热刷新
+                  const openFileTab = store.workbenchTabs.find(
+                    (t) =>
+                      t.filePath &&
+                      (t.filePath === outputItem.filePath ||
+                        outputItem.filePath.endsWith(`/${t.filePath}`))
+                  );
+                  if (openFileTab) {
+                    store.updateWorkbenchTab(openFileTab.id, { refreshKey: Date.now() });
+                  }
+                }
+              }
+            }
           },
           (permData: any) => {
+            setSessionPermission(targetSessionId, permData);
             callbacks?.onPermissionRequest?.(permData);
           },
           (todos: any) => {
+            setSessionTodos(targetSessionId, todos);
             callbacks?.onTodosUpdate?.(todos);
           },
           (data: any) => {
             callbacks?.onCompaction?.(data);
-          }
+          },
+          currentPermissionMode
         );
       } catch (err) {
         console.error("重试失败:", err);
-        setIsGenerating(false);
+        setSessionGenerating(targetSessionId, false);
       }
     },
     [
       activeSessionId,
       messages,
+      setSessionGenerating,
+      clearSessionToolCalls,
+      setSessionTodos,
+      setSessionPermission,
+      upsertSessionToolCall,
       addMessage,
       appendMessageDelta,
       saveMessageToDb,

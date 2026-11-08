@@ -16,7 +16,7 @@ export const SessionInspectorColumn: React.FC<SessionInspectorColumnProps> = ({ 
   if (!isOpen) return null;
 
   return (
-    <aside className='w-[325px] h-full min-h-0 flex flex-col flex-shrink-0 bg-[#141414] border-l border-[#242424] overflow-hidden select-none z-10 titlebar-no-drag'>
+    <aside className='w-[325px] h-full min-h-0 flex flex-col flex-shrink-0 bg-[var(--ui-panel-bg)] border-l border-[color:var(--ui-divider-hairline)] overflow-hidden select-none z-10 titlebar-no-drag'>
       {/* 全局平滑纵向滚动容器 (强制 titlebar-no-drag，确保鼠标滚轮顺畅) */}
       <div className='flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 pb-8 flex flex-col gap-3 [&>*]:shrink-0 custom-scrollbar titlebar-no-drag'>
         {/* 1. 当前工作空间卡片 (多源文件夹展示 + 图 8 弹窗编辑) */}

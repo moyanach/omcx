@@ -116,18 +116,18 @@ export const WorkspaceCard: React.FC = () => {
 
   return (
     <>
-      <div className='bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl overflow-hidden transition-all duration-200 select-none'>
+      <div className='bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl overflow-hidden transition-all duration-200 select-none'>
         {/* 头部标题与操作区 */}
-        <div className='flex items-center justify-between px-4 py-3 bg-[#1e1e1e] border-b border-[#292929]'>
+        <div className='flex items-center justify-between px-4 py-3 bg-[var(--ui-card-header-bg)] border-b border-[color:var(--ui-divider-hairline)]'>
           <button
             onClick={() => setIsOpen(!isOpen)}
-            className='flex items-center gap-2 text-left hover:text-white transition-colors flex-1'
+            className='flex items-center gap-2 text-left hover:text-[var(--ui-text-primary)] transition-colors flex-1'
           >
-            <FolderGit2 size={15} className='text-blue-400' />
-            <span className='font-semibold text-xs text-neutral-200 tracking-wide uppercase'>
+            <FolderGit2 size={15} className='text-[var(--ui-accent-blue)]' />
+            <span className='font-semibold text-xs text-[var(--ui-text-primary)] tracking-wide uppercase'>
               当前工作空间
             </span>
-            <div className='text-neutral-500 ml-auto mr-2'>
+            <div className='text-[var(--ui-text-faint)] ml-auto mr-2'>
               {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             </div>
           </button>
@@ -135,14 +135,14 @@ export const WorkspaceCard: React.FC = () => {
             {/* 图 8 编辑弹窗触发按钮 */}
             <button
               onClick={() => handleOpenEditModal()}
-              className='w-6 h-6 flex items-center justify-center rounded-lg bg-[#282828] text-neutral-300 hover:text-white hover:bg-[#333] transition-colors border border-[#383838]'
-              title='配置工作空间多源文件夹 (图 8 弹窗)'
+              className='w-6 h-6 flex items-center justify-center rounded-lg bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)] transition-colors border border-[color:var(--ui-border-hairline)]'
+              title='配置工作空间多源文件夹'
             >
               <Edit3 size={12} />
             </button>
             <button
               onClick={() => handleOpenEditModal({ id: '', name: '新多目录工作空间', folders: [] })}
-              className='w-6 h-6 flex items-center justify-center rounded-lg bg-[#282828] text-neutral-300 hover:text-white hover:bg-[#333] transition-colors border border-[#383838]'
+              className='w-6 h-6 flex items-center justify-center rounded-lg bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)] transition-colors border border-[color:var(--ui-border-hairline)]'
               title='新建多目录工作空间'
             >
               <Plus size={13} />
@@ -155,24 +155,24 @@ export const WorkspaceCard: React.FC = () => {
           <div className='p-3.5 flex flex-col gap-3'>
             {/* 1. 当前工作空间卡片 (展示工作空间名称 + 挂载的全部源文件夹) */}
             {currentWorkspace ? (
-              <div className='p-3 rounded-xl bg-[#232323] border border-[#303030] flex flex-col gap-2.5 shadow-sm'>
+              <div className='p-3 rounded-xl bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] flex flex-col gap-2.5'>
                 <div className='flex items-center justify-between'>
                   <div className='flex items-center gap-2 min-w-0'>
-                    <div className='w-6 h-6 rounded-md bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400 flex-shrink-0'>
+                    <div className='w-6 h-6 rounded-md bg-[var(--ui-accent-blue-soft)] border border-[color:var(--ui-accent-blue-border)] flex items-center justify-center text-[var(--ui-accent-blue)] flex-shrink-0'>
                       <Layers size={13} />
                     </div>
-                    <span className='font-bold text-xs text-neutral-100 truncate' title={currentWorkspace.name}>
+                    <span className='font-bold text-xs text-[var(--ui-text-primary)] truncate' title={currentWorkspace.name}>
                       {currentWorkspace.name}
                     </span>
                   </div>
 
                   <div className='flex items-center gap-1.5'>
-                    <span className='px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-400 text-[10px] font-mono border border-blue-500/20'>
+                    <span className='px-2 py-0.5 rounded-full bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] text-[10px] font-mono border border-[color:var(--ui-accent-blue-border)]'>
                       {currentWorkspace.folders.length} 个源目录
                     </span>
                     <button
                       onClick={() => handleOpenEditModal(currentWorkspace)}
-                      className='p-1 rounded text-neutral-400 hover:text-white'
+                      className='p-1 rounded text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)]'
                       title='编辑此工作空间'
                     >
                       <Edit3 size={11} />
@@ -180,20 +180,20 @@ export const WorkspaceCard: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 挂载的源文件夹列表 (对应全栈前后端目录，支持顺畅滚动) */}
-                <div className='flex flex-col gap-1 border-t border-[#2a2a2a] pt-2 max-h-[140px] overflow-y-auto custom-scrollbar pr-0.5'>
+                {/* 挂载的源文件夹列表 */}
+                <div className='flex flex-col gap-1 border-t border-[color:var(--ui-divider-hairline)] pt-2 max-h-[140px] overflow-y-auto custom-scrollbar pr-0.5'>
                   {currentWorkspace.folders.map((folder, idx) => (
                     <div
                       key={idx}
-                      className='flex items-center justify-between py-1 px-1.5 rounded-md hover:bg-white/[0.03] text-xs'
+                      className='flex items-center justify-between py-1 px-1.5 rounded-md hover:bg-[var(--ui-block-hover-bg)] text-xs'
                     >
                       <div className='flex items-center gap-2 min-w-0 pr-1'>
-                        <Folder size={12} className='text-neutral-400 flex-shrink-0' />
-                        <span className='text-[11px] font-medium text-neutral-300 truncate'>
+                        <Folder size={12} className='text-[var(--ui-text-muted)] flex-shrink-0' />
+                        <span className='text-[11px] font-medium text-[var(--ui-text-secondary)] truncate'>
                           {folder.name}
                         </span>
                         {folder.isPrimary && (
-                          <span className='px-1.5 py-0.2 rounded text-[9px] bg-[#2d2d2d] text-neutral-300 border border-[#3d3d3d] flex-shrink-0'>
+                          <span className='px-1.5 py-0.2 rounded text-[9px] bg-[var(--ui-chip-bg)] text-[var(--ui-text-secondary)] border border-[color:var(--ui-border-hairline)] flex-shrink-0'>
                             主要
                           </span>
                         )}
@@ -205,17 +205,17 @@ export const WorkspaceCard: React.FC = () => {
                         if (gitInfo?.isGit && gitInfo.branch) {
                           return (
                             <span
-                              className='flex items-center gap-1 text-[10px] text-blue-400 font-mono flex-shrink-0'
+                              className='flex items-center gap-1 text-[10px] text-[var(--ui-accent-blue)] font-mono flex-shrink-0'
                               title={`当前 Git 分支: ${gitInfo.branch}`}
                             >
-                              <GitBranch size={10} className='text-blue-400 flex-shrink-0' />
+                              <GitBranch size={10} className='text-[var(--ui-accent-blue)] flex-shrink-0' />
                               <span className='truncate max-w-[110px]'>{gitInfo.branch}</span>
                             </span>
                           );
                         }
                         return (
                           <span
-                            className='text-[10px] text-neutral-500 font-mono truncate max-w-[120px]'
+                            className='text-[10px] text-[var(--ui-text-faint)] font-mono truncate max-w-[120px]'
                             title={folder.path}
                           >
                             {folder.path.split(/[\\/]/).filter(Boolean).slice(-2).join('/')}
@@ -229,11 +229,11 @@ export const WorkspaceCard: React.FC = () => {
             ) : (
               <div
                 onClick={() => handleOpenEditModal()}
-                className='p-4 rounded-xl border border-dashed border-[#3d3d3d] hover:border-blue-500/60 bg-[#202020] hover:bg-[#242424] flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center transition-all'
+                className='p-4 rounded-xl border border-dashed border-[color:var(--ui-border-subtle)] hover:border-[color:var(--ui-accent-blue-border)] bg-[var(--ui-card-inner-bg)] hover:bg-[var(--ui-block-hover-bg)] flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center transition-all'
               >
-                <FolderOpen size={20} className='text-neutral-400' />
-                <span className='text-xs font-medium text-neutral-300'>暂无多目录工作空间</span>
-                <span className='text-[10px] text-neutral-500'>点击配置多源文件夹，支持前后端跨目录工作</span>
+                <FolderOpen size={20} className='text-[var(--ui-text-muted)]' />
+                <span className='text-xs font-medium text-[var(--ui-text-secondary)]'>暂无多目录工作空间</span>
+                <span className='text-[10px] text-[var(--ui-text-faint)]'>点击配置多源文件夹，支持前后端跨目录工作</span>
               </div>
             )}
           </div>

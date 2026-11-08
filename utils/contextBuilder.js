@@ -1,7 +1,9 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFileSync, execFile } = require("child_process");
+const { discoverSubagents } = require("../services/subagentService");
+const { getPermissionModePolicy } = require("../services/sandboxPolicyService");
 
 const RULES_BUDGET = 8000;
 const SKILLS_BUDGET = 20000;
@@ -29,7 +31,7 @@ const BEHAVIOR_SECTION = `你是 OMCX，一名运行在桌面客户端中的专�
 - **失败如实反馈**: 运行测试或构建失败时，直接展示原始失败堆栈并分析原因，严禁使用"应该没问题"掩盖错误。
 
 # 三、 工业级微创精准修改 (Surgical Precision)
-- **局部修改优于全量覆盖**: 必须优先使用 \`edit_file\` 进行基于上下文的精准替换，严禁全量重写大文件。\`write_file\` 仅允许用于创建全新文件。
+- **局部修改优于全量覆盖**: 必须优先使用 \`edit_file\` 进行基于上下文的精准替换，严禁全量重写大文件。\`write_file\` 仅允许用于创建全新文件或全量替换目标文档；若待生成的全新文件或文档超过 350 行，可先用 \`write_file\` 写入前半部分与骨架，再用 \`edit_file\` 分段追加后半部分，避免单次工具参数过大被截断。
 - **杜绝偷懒占位符**: 严禁在修改产出的代码中使用 \`// ... 保持原有逻辑不变\`、\`// TODO: rest of code\` 等截断占位符，这会导致严重的生产破坏！
 - **尊重现有代码生态**: 新写的代码必须与目标文件风格高度一致：严格匹配其命名风格、注释密度、单双引号规范、分号习惯及缩进机制（空格数或 Tab）。
 - **最小变动范围**: 仅修改达成目标所必需的代码行。严禁顺手格式化整篇文件、严禁修改公共接口签名或破坏无关模块的导入导出。
@@ -58,7 +60,18 @@ const BEHAVIOR_SECTION = `你是 OMCX，一名运行在桌面客户端中的专�
 
 # 七、 上下文管理与自律
 - **复用既有事实**: 在长对话中，直接复用已验证的结论与历史事实，严禁在每一轮无意义地重复推导或重复声明已有背景。
-- **上限感知**: 当感知到上下文接近上限或收到压缩通知时，先对当前代码状态与待办项做简要收敛，再继续执行。`;
+- **上限感知**: 当感知到上下文接近上限或收到压缩通知时，先对当前代码状态与待办项做简要收敛，再继续执行。
+
+# 八、 子代理自主调度与并行分治规范 (Subagent & Parallel Fan-out)
+你拥有 \`dispatch_subagent\` 工具，无需等待用户手动 \`@\`，你必须根据任务复杂度**自主判断**是否开启子代理：
+- **何时直接执行（不开启 Subagent）**:
+  - 已知确切文件路径、仅涉及 1~2 个文件的局部读取或修改、或预计 3 次以内工具调用即可完成的简单任务，由你直接调用 \`read_file\` / \`edit_file\` 完成，避免子代理启动开销。
+- **何时开启单个 Subagent（上下文隔离）**:
+  - 开放式代码库探索（不确定逻辑散落在哪些目录）、需要阅读超过 4 个文件或长日志排查根因、或需要对代码进行独立专项审查（\`reviewer\`）时，主动调用 \`dispatch_subagent\`，防止大量中间搜索内容污染主会话上下文。
+- **何时开启多 Subagent 并行处理（大型任务加速 Fan-out）**:
+  - 当遇到涉及多个独立目录、前后端多层、或多个子系统的大型任务时，优先使用 \`dispatch_subagent\` 的 \`tasks\` 数组参数（或在同一轮并发发起多个 \`dispatch_subagent\` 调用），将大任务拆解为 2~4 个正交子任务**并行执行**。
+  - **读写冲突红线**: 并行探索/分析任务全部设为 \`readOnly: true\`；若并行派发写代码的子代理（\`general\` 或 \`readOnly: false\`），必须确保各子代理负责的文件路径完全不重叠，或先由并行只读子代理完成各模块分析，再由你汇总统一执行文件修改。
+- **支持动态角色生成**: 除了预设的 \`explore\` / \`planner\` / \`reviewer\` / \`general\`，你可以随时通过 \`role\` 参数动态定义符合当前领域的专项角色（如 \`role: "Electron IPC 安全审计员"\`）。`;
 
 function truncate(text, maxChars, label = "") {
   if (!text) return "";
@@ -82,6 +95,68 @@ function runGit(args, cwd) {
   } catch {
     return "";
   }
+}
+
+function runGitAsync(args, cwd) {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      args,
+      {
+        cwd,
+        timeout: 2500,
+        encoding: "utf8",
+      },
+      (err, stdout) => {
+        if (err || !stdout) return resolve("");
+        resolve(stdout.trim());
+      }
+    );
+  });
+}
+
+async function getGitSnapshotAsync(workDir) {
+  if (!workDir || !fs.existsSync(path.join(workDir, ".git"))) return null;
+
+  const cached = gitCache.get(workDir);
+  if (cached && Date.now() - cached.at < GIT_CACHE_TTL) {
+    return cached.value;
+  }
+
+  const [branchRaw, originHead, userRaw, statusRaw, commitsRaw] = await Promise.all([
+    runGitAsync(["rev-parse", "--abbrev-ref", "HEAD"], workDir),
+    runGitAsync(["symbolic-ref", "refs/remotes/origin/HEAD"], workDir),
+    runGitAsync(["config", "user.name"], workDir),
+    runGitAsync(["status", "--short"], workDir),
+    runGitAsync(["log", "--oneline", `-${RECENT_COMMITS}`], workDir),
+  ]);
+
+  const branch = branchRaw || "unknown";
+  let mainBranch = "";
+  if (originHead) {
+    mainBranch = originHead.replace("refs/remotes/origin/", "");
+  }
+  if (!mainBranch) {
+    const [hasMain, hasMaster] = await Promise.all([
+      runGitAsync(["rev-parse", "--verify", "main"], workDir),
+      runGitAsync(["rev-parse", "--verify", "master"], workDir),
+    ]);
+    if (hasMain) mainBranch = "main";
+    else if (hasMaster) mainBranch = "master";
+    else mainBranch = "main";
+  }
+
+  const user = userRaw || "unknown";
+  const statusLines = statusRaw ? statusRaw.split("\n").filter(Boolean) : [];
+  const commits = commitsRaw ? commitsRaw.split("\n").filter(Boolean) : [];
+
+  const value = { branch, mainBranch, user, statusLines, commits };
+  gitCache.set(workDir, { at: Date.now(), value });
+  if (gitCache.size > 20) {
+    const oldest = Array.from(gitCache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) gitCache.delete(oldest[0]);
+  }
+  return value;
 }
 
 function getGitSnapshot(workDir) {
@@ -216,6 +291,20 @@ function buildToolSection(toolDocs) {
   return `【工具手册】\n${body}`;
 }
 
+function buildSubagentSection(workDir) {
+  try {
+    const agents = discoverSubagents(workDir);
+    if (!agents || agents.length === 0) return "";
+    const lines = agents.map(
+      (a) =>
+        `- **${a.id}** (${a.name}, ${a.readOnly ? "只读" : "读写"}): ${a.description} [可用工具: ${(a.tools || []).join(", ")}]`
+    );
+    return `【预设子代理模板 (亦可通过 role 参数动态创建任意专项子代理)】\n${lines.join("\n")}`;
+  } catch {
+    return "";
+  }
+}
+
 function buildWorkspaceSection(matchedWorkspace, workDir) {
   if (matchedWorkspace && Array.isArray(matchedWorkspace.folders) && matchedWorkspace.folders.length > 0) {
     const folderLines = matchedWorkspace.folders
@@ -235,7 +324,36 @@ ${folderLines}
   return "";
 }
 
-function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model }) {
+function buildPermissionSandboxSection(permissionMode = "auto-sandbox") {
+  const policy = getPermissionModePolicy(permissionMode);
+  const lines = [
+    `【当前权限与沙箱模式: ${policy.label} (${policy.id})】`,
+    `- 模式说明: ${policy.description}`,
+  ];
+
+  if (policy.id === "plan") {
+    lines.push(
+      "- 执行约束: 当前处于只读规划模式，已隐藏 `write_file` / `edit_file` 工具，且所有子代理与命令均运行于只读沙箱中。请专注于代码检索、架构分析与方案设计（可使用 `todo_write` 拆解任务），切勿尝试修改文件。"
+    );
+  } else if (policy.id === "auto-sandbox") {
+    lines.push(
+      "- 执行约束: 工作空间目录内的文件读写与常规开发命令可自动执行；`run_command` 运行在 macOS Seatbelt (`workspace-write`) 内核沙箱内，禁止写入工作区外路径、`.git/hooks` 或 `.omcx` 配置，并严禁读取宿主机敏感凭据（`~/.ssh`、`~/.aws`、`~/.omcx/config.json`）。"
+    );
+  } else if (policy.id === "ask") {
+    lines.push(
+      "- 执行约束: 当前处于谨慎询问模式，每次调用 `write_file`、`edit_file` 或 `run_command` 均会请求用户确认，`run_command` 同时受工作区沙箱保护。请尽量合并同文件的修改以减少打扰。"
+    );
+  } else if (policy.id === "full-access") {
+    lines.push(
+      "- 执行约束: 当前已解除命令级 OS 沙箱限制，但高危破坏性命令与工作区外文件写入仍需用户确认，且宿主机高敏凭据路径仍受保护。"
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode = "auto-sandbox" }) {
+  const policy = getPermissionModePolicy(permissionMode);
   const lines = ["【环境信息】"];
   lines.push(`- 主工作目录: ${workDir || "未指定"}`);
 
@@ -248,6 +366,7 @@ function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model }) 
     lines.push(`- 附加工作目录: ${extraFolders.join(", ")}`);
   }
 
+  lines.push(`- 权限与沙箱模式: ${policy.label} (${policy.id})`);
   lines.push(`- 是否 Git 仓库: ${gitInfo ? "true" : "false"}`);
   lines.push(`- 平台: ${process.platform} / Shell: ${process.env.SHELL || "unknown"} / 系统: ${process.platform} ${os.release()} ${os.arch()}`);
   lines.push(`- 当前日期: ${new Date().toISOString().slice(0, 10)}`);
@@ -295,8 +414,10 @@ function buildSystemContext({
   toolDocs = [],
   model = "",
   enableTools = true,
+  permissionMode = "auto-sandbox",
+  gitInfo: providedGitInfo = undefined,
 } = {}) {
-  const gitInfo = getGitSnapshot(workDir);
+  const gitInfo = providedGitInfo !== undefined ? providedGitInfo : getGitSnapshot(workDir);
   const sections = [];
 
   const push = (name, content) => {
@@ -306,13 +427,17 @@ function buildSystemContext({
   };
 
   push("behavior", buildBehaviorSection());
+  push("sandbox", buildPermissionSandboxSection(permissionMode));
   push("rules", buildRulesSection(projectRules));
   push("skills", buildSkillsSection(skills));
   push("memory", buildMemorySection(memories, memoryIndex));
   push("todos", buildTodoSection(todos));
-  if (enableTools) push("tools", buildToolSection(toolDocs));
+  if (enableTools) {
+    push("tools", buildToolSection(toolDocs));
+    push("subagents", buildSubagentSection(workDir));
+  }
   push("workspace", buildWorkspaceSection(matchedWorkspace, workDir));
-  push("environment", buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model }));
+  push("environment", buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode }));
   push("git", buildGitSection(gitInfo));
 
   return {
@@ -324,5 +449,6 @@ function buildSystemContext({
 module.exports = {
   buildSystemContext,
   getGitSnapshot,
+  getGitSnapshotAsync,
   truncate,
 };
