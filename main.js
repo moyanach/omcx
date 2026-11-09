@@ -739,11 +739,9 @@ app.whenReady().then(() => {
       }
 
       let resolvedPath = path.resolve(filePath);
-      if (!fs.existsSync(resolvedPath) && resolvedPath.startsWith("/users/")) {
-        const capitalUsers = "/Users/" + resolvedPath.slice("/users/".length);
-        if (fs.existsSync(capitalUsers)) {
-          resolvedPath = capitalUsers;
-        }
+      // macOS APFS 大小写规范化：将小写的 /users/ 无条件规范化为标准大写的 /Users/，杜绝 path.relative 误判
+      if (process.platform === "darwin" && /^\/users\//i.test(resolvedPath)) {
+        resolvedPath = "/Users/" + resolvedPath.slice("/users/".length);
       }
 
       if (!isAllowedLocalMediaPath(resolvedPath)) {

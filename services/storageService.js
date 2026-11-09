@@ -373,7 +373,13 @@ function isSessionAttachmentPath(filePath) {
   if (!filePath || typeof filePath !== "string") return false;
   const resolved = path.resolve(filePath);
   const root = path.resolve(SESSIONS_DIR);
-  const relative = path.relative(root, resolved);
+
+  // 在 macOS APFS / Windows 大小写不敏感文件系统下做大小写对齐，彻底防止 /users 与 /Users 导致的 relative 误判
+  const isCaseInsensitive = process.platform === "darwin" || process.platform === "win32";
+  const compareRoot = isCaseInsensitive ? root.toLowerCase() : root;
+  const compareResolved = isCaseInsensitive ? resolved.toLowerCase() : resolved;
+
+  const relative = path.relative(compareRoot, compareResolved);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
   const segments = relative.split(path.sep);
   return segments.length >= 3 && segments[1] === "attachments";

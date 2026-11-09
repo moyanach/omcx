@@ -142,7 +142,11 @@ function isUnderFolderReal(targetPath, folderPath) {
   const realFolder = resolveRealPathSafe(folderPath);
   if (!realTarget || !realFolder) return false;
 
-  const rel = path.relative(realFolder, realTarget);
+  const isCaseInsensitive = process.platform === "darwin" || process.platform === "win32";
+  const compareTarget = isCaseInsensitive ? realTarget.toLowerCase() : realTarget;
+  const compareFolder = isCaseInsensitive ? realFolder.toLowerCase() : realFolder;
+
+  const rel = path.relative(compareFolder, compareTarget);
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
@@ -221,8 +225,11 @@ function checkSensitivePath(targetPath, sessionId = null) {
   ];
   for (const sRoot of sessionRoots) {
     if (isUnderFolderReal(realTarget, sRoot)) {
-      // 允许访问会话 attachments 附件静态媒体资源 (图片、文本、文档预览)
-      const relative = path.relative(sRoot, realTarget);
+      // 允许访问会话 attachments 附件静态媒体资源 (图片、文本、文档预览)，兼顾 macOS APFS 大小写不敏感
+      const isCaseInsensitive = process.platform === "darwin" || process.platform === "win32";
+      const compareRoot = isCaseInsensitive ? sRoot.toLowerCase() : sRoot;
+      const compareTarget = isCaseInsensitive ? realTarget.toLowerCase() : realTarget;
+      const relative = path.relative(compareRoot, compareTarget);
       const segments = relative.split(path.sep);
       if (segments.length >= 2 && segments[1] === "attachments") {
         return { blocked: false };
