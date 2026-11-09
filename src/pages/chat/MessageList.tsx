@@ -30,7 +30,7 @@ import {
   X,
   ArrowDown,
 } from 'lucide-react';
-import { Message } from '../../stores/chatStore';
+import { Message, useChatStore } from '../../stores/chatStore';
 import MarkdownContent, { ThinkingBlock } from '@/components/common/MarkdownContent';
 import CodeBlock, { DiffViewer, SplitDiffViewer } from '@/components/common/CodeBlock';
 import TodoListCard, { TodoItem } from '@/components/agent/TodoListCard';
