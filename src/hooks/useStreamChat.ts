@@ -164,6 +164,7 @@ export function useStreamChat() {
       const currentSession = useChatStore.getState().sessions.find((s) => s.id === targetSessionId);
       const currentWorkDir = currentSession?.workDir || null;
       const currentPermissionMode = currentSession?.permissionMode || "auto-sandbox";
+      const currentReasoningEffort = currentSession?.reasoningEffort || "medium";
 
       if (window.electronAPI?.streamChat) {
         window.electronAPI.streamChat(
@@ -264,7 +265,8 @@ export function useStreamChat() {
           (data: any) => {
             callbacks?.onCompaction?.(data);
           },
-          currentPermissionMode
+          currentPermissionMode,
+          currentReasoningEffort
         );
       } else {
         setSessionGenerating(targetSessionId, false);
@@ -329,6 +331,7 @@ export function useStreamChat() {
         const currentSession = useChatStore.getState().sessions.find((s) => s.id === targetSessionId);
         const currentWorkDir = currentSession?.workDir || null;
         const currentPermissionMode = currentSession?.permissionMode || "auto-sandbox";
+        const currentReasoningEffort = currentSession?.reasoningEffort || "medium";
 
         window.electronAPI.streamChat(
           targetSessionId,
@@ -428,7 +431,8 @@ export function useStreamChat() {
           (data: any) => {
             callbacks?.onCompaction?.(data);
           },
-          currentPermissionMode
+          currentPermissionMode,
+          currentReasoningEffort
         );
       } catch (err) {
         console.error("重试失败:", err);

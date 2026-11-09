@@ -1427,18 +1427,52 @@ const AgentLiveStatusBar: React.FC<{
 
   return (
     <div className='sticky bottom-0 z-10 pt-1 pb-0.5 w-full pointer-events-none'>
-      <div className='omcx-livebar-glow w-full px-3.5 py-2 rounded-xl backdrop-blur-md shadow-sm flex items-center justify-between gap-3 text-xs select-none'>
-        {/* 左侧：动态脉冲图标 + 当前实时动作语义 */}
-        <div className='flex items-center gap-2.5 min-w-0'>
+      <div className='relative w-full px-3.5 py-2 rounded-xl backdrop-blur-md shadow-sm border border-[color:var(--ui-border-hairline)] bg-[var(--ui-livebar-bg)] flex items-center justify-between gap-3 text-xs select-none overflow-hidden'>
+        {/* 一圈光晕紧贴 border 边框顺时针匀速巡航流光 (Border Beam) */}
+        <svg
+          className='absolute inset-0 w-full h-full pointer-events-none overflow-visible'
+          xmlns='http://www.w3.org/2000/svg'
+        >
+          <defs>
+            <linearGradient id='livebar-beam-grad' x1='0%' y1='0%' x2='100%' y2='100%'>
+              <stop offset='0%' stopColor='#38bdf8' stopOpacity='0' />
+              <stop offset='25%' stopColor='#60a5fa' stopOpacity='0.4' />
+              <stop offset='70%' stopColor='#93c5fd' stopOpacity='1' />
+              <stop offset='100%' stopColor='#38bdf8' stopOpacity='0' />
+            </linearGradient>
+          </defs>
+          {/* 底层高斯光晕 (沿边框发散) */}
+          <rect
+            rx='12'
+            fill='none'
+            stroke='url(#livebar-beam-grad)'
+            strokeWidth='3'
+            pathLength='100'
+            className='omcx-border-beam-glow'
+            style={{ width: 'calc(100% - 2px)', height: 'calc(100% - 2px)', x: 1, y: 1 }}
+          />
+          {/* 顶层高亮细线光核 (精准贴边顺时针流转) */}
+          <rect
+            rx='12'
+            fill='none'
+            stroke='url(#livebar-beam-grad)'
+            strokeWidth='1.5'
+            pathLength='100'
+            className='omcx-border-beam-core'
+            style={{ width: 'calc(100% - 2px)', height: 'calc(100% - 2px)', x: 1, y: 1 }}
+          />
+        </svg>
+
+        {/* 左侧：微光呼吸图标 + 当前实时动作语义 (已移除雷达同心圆扩散) */}
+        <div className='flex items-center gap-2.5 min-w-0 relative z-10'>
           <div className='relative flex items-center justify-center w-4 h-4 flex-shrink-0'>
-            <span className='absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-30 animate-ping' />
-            <Sparkles size={12} className='text-[var(--ui-accent-blue)] relative' />
+            <Sparkles size={13} className='text-[var(--ui-accent-blue)] omcx-icon-pulse-glow' />
           </div>
           <span className='font-medium text-[var(--ui-text-primary)] truncate'>{statusText}</span>
         </div>
 
         {/* 右侧：当前 Todo 阶段 + 步骤计数 + 实时秒表 */}
-        <div className='flex items-center gap-2 flex-shrink-0 font-mono text-[11px]'>
+        <div className='flex items-center gap-2 flex-shrink-0 font-mono text-[11px] relative z-10'>
           {currentTodo && (
             <span className='hidden sm:inline-block px-2 py-0.5 rounded bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border border-[color:var(--ui-accent-blue-border)] truncate max-w-[180px]'>
               阶段: {currentTodo.text}

@@ -24,6 +24,8 @@ export const WorkspaceSessionsPanel: React.FC = () => {
     sessions,
     activeSessionId,
     setActiveSession,
+    addSession,
+    saveWorkspace,
     setSessionWorkDir,
     archiveSession,
     deleteSession,
@@ -70,8 +72,15 @@ export const WorkspaceSessionsPanel: React.FC = () => {
   const handleAddWorkspace = async () => {
     if (window.electronAPI?.dialogSelectWorkDirectory) {
       const dir = await window.electronAPI.dialogSelectWorkDirectory();
-      if (dir && activeSessionId) {
-        await setSessionWorkDir(activeSessionId, dir);
+      if (dir) {
+        const folderName = dir.split(/[\\/]/).filter(Boolean).pop() || dir;
+        const wsId = `ws_${Date.now()}`;
+        await saveWorkspace({
+          id: wsId,
+          name: folderName,
+          folders: [{ path: dir, name: folderName, isPrimary: true }],
+        });
+        await addSession({ workspaceId: wsId, workDir: dir });
       }
     }
   };

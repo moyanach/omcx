@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Send,
   FolderGit2,
@@ -16,8 +17,14 @@ import {
   ShieldQuestion,
   ShieldAlert,
   Check,
+  Brain,
+  Zap,
+  Sparkles,
+  Flame,
+  Rocket,
+  Cpu,
 } from "lucide-react";
-import { useChatStore, type PermissionMode } from "@/stores/chatStore";
+import { useChatStore, type PermissionMode, type ReasoningEffort } from "@/stores/chatStore";
 import MentionPopover, { type MentionPosition } from "@/pages/chat/MentionPopover";
 import {
   MAX_CHAT_ATTACHMENTS,
@@ -123,6 +130,78 @@ const PERMISSION_MODE_OPTIONS: Array<{
   },
 ];
 
+export interface ReasoningOption {
+  id: ReasoningEffort;
+  level: number;
+  label: string;
+  shortLabel: string;
+  badge: string;
+  description: string;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+  colorClass: string;
+  bgClass: string;
+  recommended?: boolean;
+}
+
+export const REASONING_OPTIONS: ReasoningOption[] = [
+  {
+    id: "off",
+    level: 0,
+    label: "关闭 (Off)",
+    shortLabel: "极速响应",
+    badge: "常规",
+    description: "无显式思考过程，直接生成答复，响应最快且不消耗额外思考 Token",
+    icon: Zap,
+    colorClass: "text-neutral-400",
+    bgClass: "bg-neutral-500/10 text-neutral-300 border-neutral-700/50",
+  },
+  {
+    id: "low",
+    level: 1,
+    label: "低 (Low)",
+    shortLabel: "轻量思考",
+    badge: "轻快",
+    description: "约 2k tokens 思考预算，适合简单语法查错、函数注释生成与概念解释",
+    icon: Sparkles,
+    colorClass: "text-sky-400",
+    bgClass: "bg-sky-500/10 text-sky-400 border-sky-500/30",
+  },
+  {
+    id: "medium",
+    level: 2,
+    label: "中 (Medium)",
+    shortLabel: "推荐思考",
+    badge: "推荐",
+    recommended: true,
+    description: "约 4k tokens 思考预算，平衡响应速度与逻辑严密性，适合日常工程开发",
+    icon: Brain,
+    colorClass: "text-emerald-400",
+    bgClass: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+  },
+  {
+    id: "high",
+    level: 3,
+    label: "高 (High)",
+    shortLabel: "深度思考",
+    badge: "深度",
+    description: "约 8k tokens 思考预算，适合疑难 Bug 排查、跨模块重构与算法推演",
+    icon: Flame,
+    colorClass: "text-amber-400",
+    bgClass: "bg-amber-500/10 text-amber-400 border-amber-500/30",
+  },
+  {
+    id: "max",
+    level: 4,
+    label: "极高 (Max)",
+    shortLabel: "极限深思",
+    badge: "极高",
+    description: "16k+ tokens 极限深度演算，针对大型工程系统架构设计与极复杂数学证明",
+    icon: Rocket,
+    colorClass: "text-rose-400",
+    bgClass: "bg-rose-500/10 text-rose-400 border-rose-500/30",
+  },
+];
+
 const MENTION_TRIGGER = /(?:^|[\s(（[【"'`\u4e00-\u9fa5])@([^\s@]*)$/;
 
 const MessageInput: React.FC<Props> = ({
@@ -145,11 +224,35 @@ const MessageInput: React.FC<Props> = ({
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const permBtnRef = useRef<HTMLButtonElement>(null);
   const permMenuRef = useRef<HTMLDivElement>(null);
-  const { workspaces, skills, mcpServers, subagents } = useChatStore();
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
+
+  const {
+    activeSessionId,
+    sessions,
+    setSessionReasoningEffort,
+    workspaces,
+    skills,
+    mcpServers,
+    subagents,
+  } = useChatStore();
 
   const [dragging, setDragging] = useState(false);
   const [permMenuOpen, setPermMenuOpen] = useState(false);
+  const [permMenuPos, setPermMenuPos] = useState({ left: 24, bottom: 60 });
+
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelMenuPos, setModelMenuPos] = useState({ left: 160, bottom: 60 });
+
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const currentEffortId = activeSession?.reasoningEffort || "medium";
+  const currentEffortOption =
+    REASONING_OPTIONS.find((opt) => opt.id === currentEffortId) || REASONING_OPTIONS[2];
+
+  const currentModelObj = chatModels?.find((m) => m.id === selectedModel);
+  const currentModelName = currentModelObj?.name || currentModelObj?.model_id || selectedModel || "选择模型";
 
   const activePermOption =
     PERMISSION_MODE_OPTIONS.find((item) => item.id === permissionMode) ||
@@ -453,16 +556,50 @@ const MessageInput: React.FC<Props> = ({
     }
   }, [mentionItems.length, mentionIndex]);
 
+  const updatePermMenuPos = () => {
+    if (!permBtnRef.current) return;
+    const rect = permBtnRef.current.getBoundingClientRect();
+    const menuWidth = 340;
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - menuWidth - 12));
+    const bottom = Math.max(12, window.innerHeight - rect.top + 8);
+    setPermMenuPos({ left, bottom });
+  };
+
+  const updateModelMenuPos = () => {
+    if (!modelBtnRef.current) return;
+    const rect = modelBtnRef.current.getBoundingClientRect();
+    const menuWidth = 380;
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - menuWidth - 12));
+    const bottom = Math.max(12, window.innerHeight - rect.top + 8);
+    setModelMenuPos({ left, bottom });
+  };
+
   useEffect(() => {
-    if (!permMenuOpen) return;
+    if (!permMenuOpen && !modelMenuOpen) return;
     const handleClickOutside = (ev: MouseEvent) => {
-      if (permMenuRef.current && !permMenuRef.current.contains(ev.target as Node)) {
+      const target = ev.target as Node;
+      if (
+        permMenuOpen &&
+        permMenuRef.current &&
+        !permMenuRef.current.contains(target) &&
+        permBtnRef.current &&
+        !permBtnRef.current.contains(target)
+      ) {
         setPermMenuOpen(false);
+      }
+      if (
+        modelMenuOpen &&
+        modelMenuRef.current &&
+        !modelMenuRef.current.contains(target) &&
+        modelBtnRef.current &&
+        !modelBtnRef.current.contains(target)
+      ) {
+        setModelMenuOpen(false);
       }
     };
     window.addEventListener("mousedown", handleClickOutside);
     return () => window.removeEventListener("mousedown", handleClickOutside);
-  }, [permMenuOpen]);
+  }, [permMenuOpen, modelMenuOpen]);
 
   // 重置高度当 value 清空时
   useEffect(() => {
@@ -610,10 +747,14 @@ const MessageInput: React.FC<Props> = ({
 
             {/* 权限与沙箱模式选择器（对标 Claude Code / Cursor / Codex 主流 4 档沙箱权限） */}
             {onChangePermissionMode && (
-              <div ref={permMenuRef} className="relative">
+              <div className="relative">
                 <button
+                  ref={permBtnRef}
                   type="button"
-                  onClick={() => setPermMenuOpen((prev) => !prev)}
+                  onClick={() => {
+                    if (!permMenuOpen) updatePermMenuPos();
+                    setPermMenuOpen((prev) => !prev);
+                  }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg transition-colors select-none border cursor-pointer ${activePermOption.badgeClass}`}
                   title={`当前权限模式: ${activePermOption.label} (${activePermOption.sandboxTag})\n${activePermOption.description}\n快捷键: Shift + Tab 切换`}
                 >
@@ -627,102 +768,231 @@ const MessageInput: React.FC<Props> = ({
                   />
                 </button>
 
-                {permMenuOpen && (
-                  <div className="fixed z-[160] w-[340px] rounded-xl bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-[var(--ui-popover-shadow)] p-1.5 select-none"
-                    style={{
-                      left: Math.max(
-                        12,
-                        Math.min(
-                          (permMenuRef.current?.getBoundingClientRect().left ?? 24),
-                          window.innerWidth - 356
-                        )
-                      ),
-                      bottom:
-                        window.innerHeight -
-                        (permMenuRef.current?.getBoundingClientRect().top ?? window.innerHeight - 60) +
-                        8,
-                    }}
-                  >
-                    <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-[color:var(--ui-divider-hairline)] mb-1">
-                      <span className="text-[11px] font-semibold text-[var(--ui-text-secondary)]">
-                        Agent 权限与沙箱模式
-                      </span>
-                      <span className="text-[10px] font-mono text-[var(--ui-text-faint)] bg-[var(--ui-chip-bg)] px-1.5 py-0.5 rounded border border-[color:var(--ui-border-hairline)]">
-                        Shift + Tab 切换
-                      </span>
-                    </div>
+                {permMenuOpen &&
+                  typeof document !== "undefined" &&
+                  createPortal(
+                    <div
+                      ref={permMenuRef}
+                      className="fixed z-[99999] w-[340px] rounded-xl bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-2xl backdrop-blur-2xl p-1.5 select-none"
+                      style={{
+                        left: permMenuPos.left,
+                        bottom: permMenuPos.bottom,
+                      }}
+                    >
+                      <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-[color:var(--ui-divider-hairline)] mb-1">
+                        <span className="text-[11px] font-semibold text-[var(--ui-text-secondary)]">
+                          Agent 权限与沙箱模式
+                        </span>
+                        <span className="text-[10px] font-mono text-[var(--ui-text-faint)] bg-[var(--ui-chip-bg)] px-1.5 py-0.5 rounded border border-[color:var(--ui-border-hairline)]">
+                          Shift + Tab 切换
+                        </span>
+                      </div>
 
-                    <div className="flex flex-col gap-0.5">
-                      {PERMISSION_MODE_OPTIONS.map((opt) => {
-                        const Icon = opt.icon;
-                        const isSelected = opt.id === permissionMode;
-                        return (
-                          <button
-                            key={opt.id}
-                            type="button"
-                            onClick={() => {
-                              onChangePermissionMode(opt.id);
-                              setPermMenuOpen(false);
-                            }}
-                            className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors flex items-start gap-2.5 cursor-pointer ${
-                              isSelected
-                                ? "bg-[var(--ui-block-hover-bg)]"
-                                : "hover:bg-[var(--ui-block-bg)]"
-                            }`}
-                          >
-                            <div className="mt-0.5 flex-shrink-0">
-                              <Icon size={14} className={opt.iconClass} />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-xs font-medium text-[var(--ui-text-primary)]">
-                                  {opt.label}
-                                </span>
-                                {opt.recommended && (
-                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border border-[color:var(--ui-accent-emerald-border)] font-medium">
-                                    推荐
-                                  </span>
-                                )}
-                                <span className="text-[10px] font-mono text-[var(--ui-text-faint)] ml-auto">
-                                  {opt.sandboxTag}
-                                </span>
+                      <div className="flex flex-col gap-0.5">
+                        {PERMISSION_MODE_OPTIONS.map((opt) => {
+                          const Icon = opt.icon;
+                          const isSelected = opt.id === permissionMode;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => {
+                                onChangePermissionMode(opt.id);
+                                setPermMenuOpen(false);
+                              }}
+                              className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors flex items-start gap-2.5 cursor-pointer ${
+                                isSelected
+                                  ? "bg-[var(--ui-block-hover-bg)]"
+                                  : "hover:bg-[var(--ui-block-bg)]"
+                              }`}
+                            >
+                              <div className="mt-0.5 flex-shrink-0">
+                                <Icon size={14} className={opt.iconClass} />
                               </div>
-                              <p className="text-[11px] text-[var(--ui-text-muted)] leading-snug mt-0.5">
-                                {opt.description}
-                              </p>
-                            </div>
-                            <div className="w-4 h-4 flex items-center justify-center flex-shrink-0 mt-0.5">
-                              {isSelected && (
-                                <Check size={13} className="text-[var(--ui-accent-blue)]" />
-                              )}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-xs font-medium text-[var(--ui-text-primary)]">
+                                    {opt.label}
+                                  </span>
+                                  {opt.recommended && (
+                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border border-[color:var(--ui-accent-emerald-border)] font-medium">
+                                      推荐
+                                    </span>
+                                  )}
+                                  <span className="text-[10px] font-mono text-[var(--ui-text-faint)] ml-auto">
+                                    {opt.sandboxTag}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-[var(--ui-text-muted)] leading-snug mt-0.5">
+                                  {opt.description}
+                                </p>
+                              </div>
+                              <div className="w-4 h-4 flex items-center justify-center flex-shrink-0 mt-0.5">
+                                {isSelected && (
+                                  <Check size={13} className="text-[var(--ui-accent-blue)]" />
+                                )}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>,
+                    document.body
+                  )}
               </div>
             )}
 
-            {/* 模型下拉选择器 */}
+            {/* 模型与推理强度一体化选择器 */}
             {chatModels && chatModels.length > 0 && onChangeModel && (
               <div className="relative">
-                <select
-                  value={selectedModel}
-                  onChange={(e) => onChangeModel(e.target.value)}
-                  className="appearance-none bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] border border-[color:var(--ui-border-hairline)] rounded-lg pl-2.5 pr-7 py-1 text-xs font-medium text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] outline-none focus:border-[color:var(--ui-accent-blue-border)] transition-colors cursor-pointer"
+                <button
+                  ref={modelBtnRef}
+                  type="button"
+                  onClick={() => {
+                    if (!modelMenuOpen) updateModelMenuPos();
+                    setModelMenuOpen((prev) => !prev);
+                  }}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg transition-colors select-none border border-[color:var(--ui-border-hairline)] bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-primary)] cursor-pointer"
+                  title={`当前模型: ${currentModelName}\n推理强度: ${currentEffortOption.label}\n点击配置模型与滑动调节推理强度`}
                 >
-                  {chatModels.map((m) => (
-                    <option key={m.id} value={m.id} className="bg-[var(--ui-popover-bg)] text-[var(--ui-text-primary)]">
-                      {m.name || m.model_id}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown
-                  size={12}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--ui-text-faint)] pointer-events-none"
-                />
+                  <Cpu size={13} className="text-[var(--ui-accent-blue)] flex-shrink-0" />
+                  <span className="font-medium truncate max-w-[150px]">{currentModelName}</span>
+                  <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono border ${currentEffortOption.bgClass}`}>
+                    {currentEffortOption.badge}
+                  </span>
+                  <ChevronDown
+                    size={11}
+                    className={`opacity-75 transition-transform duration-150 ${
+                      modelMenuOpen ? "rotate-180" : ""
+                    }`}
+                  />
+                </button>
+
+                {modelMenuOpen &&
+                  typeof document !== "undefined" &&
+                  createPortal(
+                    <div
+                      ref={modelMenuRef}
+                      className="fixed z-[99999] w-[380px] rounded-2xl bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-2xl backdrop-blur-2xl p-3.5 select-none flex flex-col gap-3"
+                      style={{
+                        left: modelMenuPos.left,
+                        bottom: modelMenuPos.bottom,
+                      }}
+                    >
+                      {/* 1. 推理强度调节头部 */}
+                      <div className="flex items-center justify-between pb-2 border-b border-[color:var(--ui-divider-hairline)]">
+                        <div className="flex items-center gap-1.5">
+                          <Brain size={14} className="text-emerald-400" />
+                          <span className="text-xs font-semibold text-[var(--ui-text-primary)]">
+                            推理强度调节 (Reasoning)
+                          </span>
+                        </div>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono border font-medium ${currentEffortOption.bgClass}`}>
+                          {currentEffortOption.label}
+                        </span>
+                      </div>
+
+                      {/* 当前档位说明卡片 */}
+                      <div className="p-2.5 rounded-xl bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] flex flex-col gap-1">
+                        <div className="flex items-center justify-between text-xs font-medium">
+                          <span className="text-[var(--ui-text-primary)] flex items-center gap-1.5">
+                            <currentEffortOption.icon size={13} className={currentEffortOption.colorClass} />
+                            <span>{currentEffortOption.shortLabel}</span>
+                          </span>
+                          {currentEffortOption.recommended && (
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-medium">
+                              推荐档位
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-[var(--ui-text-muted)] leading-relaxed">
+                          {currentEffortOption.description}
+                        </p>
+                      </div>
+
+                      {/* 5 档平滑滑动条 */}
+                      <div className="flex flex-col gap-2 px-1">
+                        <input
+                          type="range"
+                          min={0}
+                          max={4}
+                          step={1}
+                          value={currentEffortOption.level}
+                          onChange={(e) => {
+                            const level = Number(e.target.value);
+                            const targetOpt =
+                              REASONING_OPTIONS.find((opt) => opt.level === level) ||
+                              REASONING_OPTIONS[2];
+                            if (activeSessionId) {
+                              setSessionReasoningEffort(activeSessionId, targetOpt.id);
+                              onNotify?.(`已动态调整推理强度：${targetOpt.label}`);
+                            }
+                          }}
+                          className="w-full h-1.5 bg-[var(--ui-chip-hover-bg)] rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                        />
+                        {/* 5 档刻度标签 (点击刻度快速直达) */}
+                        <div className="flex justify-between items-center text-[10px] text-[var(--ui-text-faint)] font-mono px-0.5">
+                          {REASONING_OPTIONS.map((opt) => {
+                            const isCur = opt.id === currentEffortId;
+                            return (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => {
+                                  if (activeSessionId) {
+                                    setSessionReasoningEffort(activeSessionId, opt.id);
+                                    onNotify?.(`已动态调整推理强度：${opt.label}`);
+                                  }
+                                }}
+                                className={`transition-all cursor-pointer hover:text-[var(--ui-text-primary)] ${
+                                  isCur
+                                    ? "text-emerald-400 font-bold scale-110 underline underline-offset-4"
+                                    : ""
+                                }`}
+                                title={opt.description}
+                              >
+                                {opt.badge}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* 2. 模型切换列表 */}
+                      <div className="pt-2 border-t border-[color:var(--ui-divider-hairline)] flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between px-0.5">
+                          <span className="text-[11px] font-semibold text-[var(--ui-text-secondary)]">
+                            切换对话模型 ({chatModels.length})
+                          </span>
+                        </div>
+                        <div className="max-h-[170px] overflow-y-auto custom-scrollbar flex flex-col gap-0.5 pr-0.5">
+                          {chatModels.map((m) => {
+                            const isSel = m.id === selectedModel;
+                            return (
+                              <button
+                                key={m.id}
+                                type="button"
+                                onClick={() => {
+                                  onChangeModel(m.id);
+                                }}
+                                className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-colors flex items-center justify-between cursor-pointer ${
+                                  isSel
+                                    ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] font-medium border border-[color:var(--ui-accent-blue-border)]"
+                                    : "text-[var(--ui-text-secondary)] hover:bg-[var(--ui-block-bg)] hover:text-[var(--ui-text-primary)]"
+                                }`}
+                              >
+                                <span className="truncate">{m.name || m.model_id}</span>
+                                {isSel && (
+                                  <Check size={13} className="text-[var(--ui-accent-blue)] flex-shrink-0" />
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>,
+                    document.body
+                  )}
               </div>
             )}
           </div>

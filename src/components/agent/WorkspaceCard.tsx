@@ -22,6 +22,8 @@ export const WorkspaceCard: React.FC = () => {
 
   const {
     activeSessionId,
+    activeWorkspaceId,
+    setActiveWorkspace,
     sessions,
     setSessionWorkDir,
     gitStatus,
@@ -42,11 +44,12 @@ export const WorkspaceCard: React.FC = () => {
     fetchWorkspaces();
   }, []);
 
-  // 匹配当前会话绑定的工作空间 (匹配 primary 目录或者任一挂载目录)
+  // 匹配当前会话绑定的工作空间 (优先通过 session.workspaceId 或 activeWorkspaceId，降级匹配目录)
   const currentWorkspace = workspaces.find(
     (ws) =>
-      ws.folders.some((f) => f.path === currentWorkDir) ||
-      ws.id === activeSession?.workDir
+      ws.id === activeSession?.workspaceId ||
+      ws.id === activeWorkspaceId ||
+      ws.folders.some((f) => f.path === currentWorkDir)
   ) || workspaces[0];
 
   // 异步获取各工作空间目录当前的 Git 分支状态
@@ -101,10 +104,14 @@ export const WorkspaceCard: React.FC = () => {
   // 保存工作空间 (来自图 8 弹窗)
   const handleSaveWorkspaceModal = async (updated: WorkspaceData) => {
     await saveWorkspace(updated);
-    if (activeSessionId) {
-      const primary = updated.folders.find((f) => f.isPrimary) || updated.folders[0];
-      if (primary) {
-        await setSessionWorkDir(activeSessionId, primary.path);
+    // 仅当当前会话明确归属于该工作空间时，若其目录不在新目录列表中，才平滑迁移到新主目录
+    if (activeSessionId && activeSession?.workspaceId === updated.id) {
+      const isPathStillValid = updated.folders.some((f) => f.path === currentWorkDir);
+      if (!isPathStillValid) {
+        const primary = updated.folders.find((f) => f.isPrimary) || updated.folders[0];
+        if (primary) {
+          await setSessionWorkDir(activeSessionId, primary.path);
+        }
       }
     }
   };

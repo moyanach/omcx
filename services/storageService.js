@@ -326,7 +326,31 @@ function deleteModel(modelId) {
 // ─────────────────────────────────────────────────────────────
 
 function getSessions() {
-  return readJsonSafe(SESSIONS_INDEX_FILE, []);
+  const sessions = readJsonSafe(SESSIONS_INDEX_FILE, []);
+  if (!Array.isArray(sessions) || sessions.length === 0) return [];
+
+  // 对历史无 workspace_id 的会话进行平滑推断回填
+  let hasMissing = false;
+  for (const s of sessions) {
+    if (!s.workspace_id && s.work_dir) {
+      hasMissing = true;
+      break;
+    }
+  }
+  if (hasMissing) {
+    const workspaces = getWorkspaces();
+    for (const s of sessions) {
+      if (!s.workspace_id && s.work_dir) {
+        const matched = workspaces.find((w) =>
+          Array.isArray(w.folders) && w.folders.some((f) => f.path === s.work_dir)
+        );
+        if (matched) {
+          s.workspace_id = matched.id;
+        }
+      }
+    }
+  }
+  return sessions;
 }
 
 function getSessionFilePath(sessionId) {
@@ -390,6 +414,24 @@ function saveSession(session) {
     resolvedWorkDir = session.workDir || null;
   }
 
+  // 智能继承与兼容提取 workspace_id (双向支持 workspace_id 与 workspaceId)
+  let resolvedWorkspaceId = existing.workspace_id || null;
+  if (session.workspace_id !== undefined) {
+    resolvedWorkspaceId = session.workspace_id || null;
+  } else if (session.workspaceId !== undefined) {
+    resolvedWorkspaceId = session.workspaceId || null;
+  }
+  // 若未指定 workspace_id 但有 work_dir，尝试从已有工作空间列表自动匹配绑定
+  if (!resolvedWorkspaceId && resolvedWorkDir) {
+    const workspaces = getWorkspaces();
+    const matched = workspaces.find((w) =>
+      Array.isArray(w.folders) && w.folders.some((f) => f.path === resolvedWorkDir)
+    );
+    if (matched) {
+      resolvedWorkspaceId = matched.id;
+    }
+  }
+
   // 智能继承 title
   const resolvedTitle = session.title !== undefined ? (session.title || "新会话") : (existing.title || "新会话");
 
@@ -413,13 +455,23 @@ function saveSession(session) {
       ? session.permissionMode
       : existing.permission_mode || existing.permissionMode || "auto-sandbox";
 
+  // 智能继承 reasoning_effort (off / low / medium / high / max)
+  const resolvedReasoningEffort =
+    session.reasoning_effort !== undefined
+      ? session.reasoning_effort
+      : session.reasoningEffort !== undefined
+      ? session.reasoningEffort
+      : existing.reasoning_effort || existing.reasoningEffort || "medium";
+
   const sessionSummary = {
     id: session.id,
     title: resolvedTitle,
     title_source: resolvedTitleSource,
     model: resolvedModel,
+    workspace_id: resolvedWorkspaceId,
     work_dir: resolvedWorkDir,
     permission_mode: resolvedPermissionMode,
+    reasoning_effort: resolvedReasoningEffort,
     archived: resolvedArchived,
     updated_at: session.updated_at || now,
     created_at: existing.created_at || session.created_at || now,
@@ -442,8 +494,10 @@ function saveSession(session) {
   detail.title = sessionSummary.title;
   detail.title_source = sessionSummary.title_source;
   detail.model = sessionSummary.model;
+  detail.workspace_id = sessionSummary.workspace_id;
   detail.work_dir = sessionSummary.work_dir;
   detail.permission_mode = sessionSummary.permission_mode;
+  detail.reasoning_effort = sessionSummary.reasoning_effort;
   detail.archived = sessionSummary.archived;
   detail.updated_at = sessionSummary.updated_at;
   writeJsonSafe(filePath, detail);
@@ -923,6 +977,18 @@ function deleteWorkspace(id) {
 // 最近项目管理 (Recent Projects)
 // ─────────────────────────────────────────────────────────────
 
+function updateSessionWorkspace(sessionId, workspaceId, workDir = null) {
+  const sessions = getSessions();
+  const target = sessions.find((s) => s.id === sessionId);
+  if (!target) return false;
+  target.workspace_id = workspaceId || null;
+  if (workDir) {
+    target.work_dir = workDir;
+  }
+  saveSession(target);
+  return true;
+}
+
 function getRecentProjects() {
   const cfg = getAllConfig();
   if (Array.isArray(cfg.recent_projects) && cfg.recent_projects.length > 0) {
@@ -965,6 +1031,7 @@ module.exports = {
   deleteWorkspace,
   getSessions,
   saveSession,
+  updateSessionWorkspace,
   updateSessionGeneratedTitle,
   deleteSession,
   getMessages,
