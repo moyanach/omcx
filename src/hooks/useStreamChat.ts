@@ -198,6 +198,33 @@ export function useStreamChat() {
         });
 
       let accumulatedContent = "";
+      let deltaBuffer = "";
+      let flushRafId: number | null = null;
+
+      // 流式增量批处理节流：借助 rAF 合并微小 chunk，彻底消除高频 setState 导致的渲染进程 CPU 暴击
+      const flushBuffer = () => {
+        if (flushRafId !== null) {
+          cancelAnimationFrame(flushRafId);
+          flushRafId = null;
+        }
+        if (deltaBuffer) {
+          const chunk = deltaBuffer;
+          deltaBuffer = "";
+          appendMessageDelta(targetSessionId, assistantMsgId, chunk);
+        }
+      };
+
+      const handleIncomingDelta = (delta: string) => {
+        accumulatedContent += delta;
+        deltaBuffer += delta;
+        if (flushRafId === null) {
+          flushRafId = requestAnimationFrame(() => {
+            flushRafId = null;
+            flushBuffer();
+          });
+        }
+      };
+
       const currentSession = useChatStore.getState().sessions.find((s) => s.id === targetSessionId);
       const currentWorkDir = currentSession?.workDir || null;
       const currentPermissionMode = currentSession?.permissionMode || "auto-sandbox";
@@ -210,11 +237,9 @@ export function useStreamChat() {
           selectedModel,
           enableTools,
           currentWorkDir,
-          (delta: string) => {
-            accumulatedContent += delta;
-            appendMessageDelta(targetSessionId, assistantMsgId, delta);
-          },
+          handleIncomingDelta,
           (endPayload: any) => {
+            flushBuffer();
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
@@ -268,6 +293,7 @@ export function useStreamChat() {
             }
           },
           (err: string) => {
+            flushBuffer();
             const errorContent = formatErrorContent(err);
             accumulatedContent += errorContent;
             appendMessageDelta(targetSessionId, assistantMsgId, errorContent);
@@ -409,6 +435,32 @@ export function useStreamChat() {
           });
 
         let accumulatedContent = "";
+        let deltaBuffer = "";
+        let flushRafId: number | null = null;
+
+        const flushBuffer = () => {
+          if (flushRafId !== null) {
+            cancelAnimationFrame(flushRafId);
+            flushRafId = null;
+          }
+          if (deltaBuffer) {
+            const chunk = deltaBuffer;
+            deltaBuffer = "";
+            appendMessageDelta(targetSessionId, assistantMsgId, chunk);
+          }
+        };
+
+        const handleIncomingDelta = (delta: string) => {
+          accumulatedContent += delta;
+          deltaBuffer += delta;
+          if (flushRafId === null) {
+            flushRafId = requestAnimationFrame(() => {
+              flushRafId = null;
+              flushBuffer();
+            });
+          }
+        };
+
         const currentSession = useChatStore.getState().sessions.find((s) => s.id === targetSessionId);
         const currentWorkDir = currentSession?.workDir || null;
         const currentPermissionMode = currentSession?.permissionMode || "auto-sandbox";
@@ -420,11 +472,9 @@ export function useStreamChat() {
           selectedModel,
           enableTools,
           currentWorkDir,
-          (delta: string) => {
-            accumulatedContent += delta;
-            appendMessageDelta(targetSessionId, assistantMsgId, delta);
-          },
+          handleIncomingDelta,
           (endPayload: any) => {
+            flushBuffer();
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
@@ -478,6 +528,7 @@ export function useStreamChat() {
             }
           },
           (err: string) => {
+            flushBuffer();
             const errorContent = formatErrorContent(err);
             accumulatedContent += errorContent;
             appendMessageDelta(targetSessionId, assistantMsgId, errorContent);

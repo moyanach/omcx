@@ -16,6 +16,16 @@ export function parseMessageContent(raw: string): ParsedMessageResult {
     };
   }
 
+  // 极速快径：若消息文本根本不包含思考标签，直接跳过所有正则解析，0ms 返回
+  if (!raw.includes('<think') && !raw.includes('<thinking')) {
+    const cleanedRemaining = raw.replace(/^\s*task ready\s*$/gim, '').trim();
+    return {
+      thinkingBlocks: [],
+      isThinkingStreaming: false,
+      markdownContent: healStreamingMarkdown(cleanedRemaining),
+    };
+  }
+
   const thinkingBlocks: string[] = [];
   let isThinkingStreaming = false;
   let remaining = raw;

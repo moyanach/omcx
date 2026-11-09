@@ -32,12 +32,26 @@ export const ThinkingBlock: React.FC<{
   className?: string;
 }> = memo(({ thoughts, isStreaming, className = 'mb-1.5' }) => {
   const [isOpen, setIsOpen] = useState(true);
+  const [showFullHistory, setShowFullHistory] = useState(false);
 
   if (thoughts.length === 0) return null;
   const combinedThought = thoughts.join('\n\n');
+  const totalChars = combinedThought.length;
+
+  // 超长思考排版性能保护：超过 12,000 字时，流式期间仅挂载末尾活跃区，避免十万级字符单一文本节点引发排版引擎重排风暴
+  const THRESHOLD = 12000;
+  const TAIL_CHARS = 8000;
+  const isHuge = totalChars > THRESHOLD;
+  const shouldTruncate = isHuge && !showFullHistory && isStreaming;
+
+  const visibleText = shouldTruncate
+    ? combinedThought.slice(-TAIL_CHARS)
+    : combinedThought;
+  const hiddenCount = shouldTruncate ? totalChars - TAIL_CHARS : 0;
 
   return (
     <div
+      style={{ contain: 'content' }}
       className={`${className} w-full rounded-xl border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] bg-[var(--ui-block-bg)] overflow-hidden select-none transition-colors`}
     >
       <div
@@ -54,7 +68,7 @@ export const ThinkingBlock: React.FC<{
             {isStreaming ? '正在深度思考与推演...' : '已深度思考'}
           </span>
           <span className='text-[10px] font-mono text-[var(--ui-text-faint)]'>
-            ({combinedThought.length} 字)
+            ({totalChars.toLocaleString()} 字)
           </span>
         </div>
         <div className='flex items-center gap-1 text-[11px] text-[var(--ui-text-faint)] font-mono'>
@@ -64,8 +78,26 @@ export const ThinkingBlock: React.FC<{
       </div>
 
       {isOpen && (
-        <div className='px-3.5 py-2.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar'>
-          {combinedThought}
+        <div
+          style={{ contain: 'content' }}
+          className='px-3.5 py-2.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar flex flex-col gap-2'
+        >
+          {shouldTruncate && (
+            <div className='sticky top-0 z-10 -mt-1 py-1 px-2.5 rounded-lg bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] text-[var(--ui-text-faint)] flex items-center justify-between shadow-sm select-none'>
+              <span>⚡️ 已动态折叠前序 {hiddenCount.toLocaleString()} 字早期推演（实时渲染末尾活跃区）</span>
+              <button
+                type='button'
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowFullHistory(true);
+                }}
+                className='text-[var(--ui-accent-blue)] hover:underline ml-2 flex-shrink-0 cursor-pointer'
+              >
+                查看完整
+              </button>
+            </div>
+          )}
+          <div>{visibleText}</div>
         </div>
       )}
     </div>

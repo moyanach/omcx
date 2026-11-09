@@ -1424,9 +1424,13 @@ const AgentLiveStatusBar: React.FC<{
     if (!barRef.current) return;
     const updateSize = () => {
       if (barRef.current) {
-        setBarDimensions({
-          width: Math.max(0, barRef.current.offsetWidth - 2),
-          height: Math.max(0, barRef.current.offsetHeight - 2),
+        const nextW = Math.max(0, barRef.current.offsetWidth - 2);
+        const nextH = Math.max(0, barRef.current.offsetHeight - 2);
+        setBarDimensions((prev) => {
+          if (Math.abs(prev.width - nextW) < 1 && Math.abs(prev.height - nextH) < 1) {
+            return prev;
+          }
+          return { width: nextW, height: nextH };
         });
       }
     };
@@ -1856,6 +1860,7 @@ export const MessageList: React.FC<Props> = ({
   const [isPinnedToBottom, setIsPinnedToBottom] = useState(true);
   const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
   const [activeNavMsgId, setActiveNavMsgId] = useState<string | null>(null);
+  const navCalcRafRef = useRef<number | null>(null);
 
   // 监听滚动位置：判定是否吸底，并计算当前视口展示的消息节点
   const handleScroll = useCallback(() => {
@@ -1867,18 +1872,34 @@ export const MessageList: React.FC<Props> = ({
     setIsPinnedToBottom(atBottom);
     setShowScrollBottomBtn(!atBottom && el.scrollHeight > el.clientHeight + 120);
 
-    // 动态计算视口顶部的消息 ID
-    const containerTop = el.getBoundingClientRect().top;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      const bubbleEl = document.getElementById(`msg-bubble-${msg.id}`);
-      if (bubbleEl) {
-        const rect = bubbleEl.getBoundingClientRect();
-        if (rect.top <= containerTop + 240) {
-          setActiveNavMsgId(msg.id);
-          break;
-        }
+    // 性能优化：当处于吸底状态时（如流式生成期间），当前活跃节点必然是最后一条消息，
+    // 严禁在此高频路径下对整个消息列表做 getBoundingClientRect 循环测量，消除强制同步回流风暴
+    if (atBottom) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg) {
+        setActiveNavMsgId((prev) => (prev === lastMsg.id ? prev : lastMsg.id));
       }
+      return;
+    }
+
+    // 用户向上翻阅时，通过 rAF 节流单帧计算视口顶部节点
+    if (navCalcRafRef.current === null) {
+      navCalcRafRef.current = requestAnimationFrame(() => {
+        navCalcRafRef.current = null;
+        if (!scrollRef.current) return;
+        const containerTop = scrollRef.current.getBoundingClientRect().top;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const msg = messages[i];
+          const bubbleEl = document.getElementById(`msg-bubble-${msg.id}`);
+          if (bubbleEl) {
+            const rect = bubbleEl.getBoundingClientRect();
+            if (rect.top <= containerTop + 240) {
+              setActiveNavMsgId((prev) => (prev === msg.id ? prev : msg.id));
+              break;
+            }
+          }
+        }
+      });
     }
   }, [messages]);
 
