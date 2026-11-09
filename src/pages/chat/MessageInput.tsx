@@ -11,8 +11,13 @@ import {
   FileText,
   FileArchive,
   File as GenericFileIcon,
+  Compass,
+  ShieldCheck,
+  ShieldQuestion,
+  ShieldAlert,
+  Check,
 } from "lucide-react";
-import { useChatStore } from "@/stores/chatStore";
+import { useChatStore, type PermissionMode } from "@/stores/chatStore";
 import MentionPopover, { type MentionPosition } from "@/pages/chat/MentionPopover";
 import {
   MAX_CHAT_ATTACHMENTS,
@@ -47,6 +52,10 @@ interface Props {
   chatModels?: any[];
   onChangeModel?: (modelId: string) => void;
 
+  // 权限与沙箱模式
+  permissionMode?: PermissionMode;
+  onChangePermissionMode?: (mode: PermissionMode) => void;
+
   // 图片附件
   attachments?: DraftChatAttachment[];
   onChangeAttachments?: (next: DraftChatAttachment[]) => void;
@@ -55,6 +64,64 @@ interface Props {
   // 中断当前生成任务
   onCancel?: () => void;
 }
+
+const PERMISSION_MODE_OPTIONS: Array<{
+  id: PermissionMode;
+  label: string;
+  shortLabel: string;
+  sandboxTag: string;
+  recommended?: boolean;
+  description: string;
+  icon: React.FC<{ size?: number; className?: string }>;
+  badgeClass: string;
+  iconClass: string;
+}> = [
+  {
+    id: "plan",
+    label: "只读规划",
+    shortLabel: "只读规划",
+    sandboxTag: "Seatbelt 只读沙箱",
+    description: "仅允许检索、阅读代码与架构规划，隐藏写文件工具并锁定只读命令沙箱",
+    icon: Compass,
+    badgeClass:
+      "bg-[var(--ui-accent-sky-soft)] text-[var(--ui-accent-sky)] border-[color:var(--ui-accent-sky-border)]",
+    iconClass: "text-[var(--ui-accent-sky)]",
+  },
+  {
+    id: "auto-sandbox",
+    label: "工作区沙箱",
+    shortLabel: "工作区沙箱",
+    sandboxTag: "Seatbelt 写隔离",
+    recommended: true,
+    description: "工作区内文件读写与常规命令自动放行，内核级拦截越界写入与敏感凭据读取",
+    icon: ShieldCheck,
+    badgeClass:
+      "bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border-[color:var(--ui-accent-emerald-border)]",
+    iconClass: "text-[var(--ui-accent-emerald)]",
+  },
+  {
+    id: "ask",
+    label: "询问确认",
+    shortLabel: "询问确认",
+    sandboxTag: "Seatbelt 写隔离",
+    description: "每次修改文件或执行命令前请求确认，命令同样受工作区沙箱边界保护",
+    icon: ShieldQuestion,
+    badgeClass:
+      "bg-[var(--ui-accent-amber-soft)] text-[var(--ui-accent-amber)] border-[color:var(--ui-accent-amber-border)]",
+    iconClass: "text-[var(--ui-accent-amber)]",
+  },
+  {
+    id: "full-access",
+    label: "完全访问",
+    shortLabel: "完全访问",
+    sandboxTag: "关闭命令沙箱",
+    description: "解除命令级 OS 沙箱限制，仅对高危破坏性命令与工作区外写入请求确认",
+    icon: ShieldAlert,
+    badgeClass:
+      "bg-[var(--ui-accent-rose-soft)] text-[var(--ui-accent-rose)] border-[color:var(--ui-accent-rose-border)]",
+    iconClass: "text-[var(--ui-accent-rose)]",
+  },
+];
 
 const MENTION_TRIGGER = /(?:^|[\s(（[【"'`\u4e00-\u9fa5])@([^\s@]*)$/;
 
@@ -69,6 +136,8 @@ const MessageInput: React.FC<Props> = ({
   selectedModel,
   chatModels,
   onChangeModel,
+  permissionMode = "auto-sandbox",
+  onChangePermissionMode,
   attachments = [] as DraftChatAttachment[],
   onChangeAttachments,
   onNotify,
@@ -76,9 +145,16 @@ const MessageInput: React.FC<Props> = ({
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { workspaces, skills, mcpServers } = useChatStore();
+  const permMenuRef = useRef<HTMLDivElement>(null);
+  const { workspaces, skills, mcpServers, subagents } = useChatStore();
 
   const [dragging, setDragging] = useState(false);
+  const [permMenuOpen, setPermMenuOpen] = useState(false);
+
+  const activePermOption =
+    PERMISSION_MODE_OPTIONS.find((item) => item.id === permissionMode) ||
+    PERMISSION_MODE_OPTIONS[1];
+  const ActivePermIcon = activePermOption.icon;
 
   const [fileIndex, setFileIndex] = useState<FileIndexEntry[]>([]);
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
@@ -99,9 +175,9 @@ const MessageInput: React.FC<Props> = ({
   const { items: mentionItems, grouped: mentionGrouped } = useMemo(
     () =>
       mention
-        ? filterUnifiedMentions(mention.query, fileIndex, skills, mcpServers)
-        : { items: [], grouped: { skills: [], mcps: [], files: [] } },
-    [mention, fileIndex, skills, mcpServers]
+        ? filterUnifiedMentions(mention.query, fileIndex, skills, mcpServers, subagents)
+        : { items: [], grouped: { subagents: [], skills: [], mcps: [], files: [] } },
+    [mention, fileIndex, skills, mcpServers, subagents]
   );
 
   const resizeTextarea = (el: HTMLTextAreaElement) => {
@@ -318,6 +394,16 @@ const MessageInput: React.FC<Props> = ({
       }
     }
 
+    // Shift + Tab 快捷循环切换 Agent 权限与沙箱模式（对齐主流 Agent CLI/IDE 交互）
+    if (e.key === "Tab" && e.shiftKey && onChangePermissionMode) {
+      e.preventDefault();
+      const idx = PERMISSION_MODE_OPTIONS.findIndex((item) => item.id === permissionMode);
+      const next = PERMISSION_MODE_OPTIONS[(idx + 1) % PERMISSION_MODE_OPTIONS.length];
+      onChangePermissionMode(next.id);
+      onNotify?.(`已切换权限模式：${next.label} (${next.sandboxTag})`);
+      return;
+    }
+
     if (e.key === "Escape" && mention) {
       e.preventDefault();
       setMention(null);
@@ -367,6 +453,17 @@ const MessageInput: React.FC<Props> = ({
     }
   }, [mentionItems.length, mentionIndex]);
 
+  useEffect(() => {
+    if (!permMenuOpen) return;
+    const handleClickOutside = (ev: MouseEvent) => {
+      if (permMenuRef.current && !permMenuRef.current.contains(ev.target as Node)) {
+        setPermMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handleClickOutside);
+    return () => window.removeEventListener("mousedown", handleClickOutside);
+  }, [permMenuOpen]);
+
   // 重置高度当 value 清空时
   useEffect(() => {
     if (!value && textareaRef.current) {
@@ -382,10 +479,10 @@ const MessageInput: React.FC<Props> = ({
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className={`w-full bg-[#1e1e1e] hover:bg-[#202020] focus-within:bg-[#1f1f1f] border rounded-xl shadow-lg transition-all duration-200 overflow-hidden flex flex-col ${
+        className={`w-full bg-[var(--ui-input-bg)] hover:bg-[var(--ui-input-hover-bg)] border rounded-xl shadow-sm transition-all duration-200 overflow-hidden flex flex-col ${
           dragging
             ? "border-blue-500/70 ring-2 ring-blue-500/20"
-            : "border-[#2d2d2d] focus-within:border-[#3e3e3e]"
+            : "border-[color:var(--ui-border-subtle)] focus-within:border-[color:var(--ui-accent-blue-border)]"
         }`}
       >
         {/* 多类型附件预览条 (支持图片缩略图与多样化文件胶囊卡片) */}
@@ -394,40 +491,40 @@ const MessageInput: React.FC<Props> = ({
             {attachments.map((item) => (
               <div
                 key={item.id}
-                className="relative flex-shrink-0 group rounded-xl overflow-hidden border border-[#353535] bg-[#141414]"
+                className="relative flex-shrink-0 group rounded-xl overflow-hidden border border-[color:var(--ui-border-hairline)] bg-[var(--ui-card-inner-bg)]"
                 title={`${item.name} (${formatFileSize(item.size)}) · ${item.placeholder}`}
               >
                 {item.category === "image" && item.previewUrl ? (
                   <div className="relative w-16 h-16">
                     <img src={item.previewUrl} alt={item.name} className="w-full h-full object-cover" />
-                    <span className="absolute bottom-0 left-0 right-0 text-[9px] leading-4 bg-black/70 text-neutral-300 text-center font-mono truncate px-1">
+                    <span className="absolute bottom-0 left-0 right-0 text-[9px] leading-4 bg-black/70 text-white text-center font-mono truncate px-1">
                       {item.placeholder}
                     </span>
                   </div>
                 ) : (
                   <div className="flex items-center gap-2 px-3 py-2 h-14 max-w-[200px] select-none">
-                    <div className="w-8 h-8 rounded-lg bg-[#222222] border border-[#333333] flex items-center justify-center flex-shrink-0">
+                    <div className="w-8 h-8 rounded-lg bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] flex items-center justify-center flex-shrink-0">
                       {item.category === "spreadsheet" && (
-                        <FileSpreadsheet size={16} className="text-emerald-400" />
+                        <FileSpreadsheet size={16} className="text-[var(--ui-accent-emerald)]" />
                       )}
                       {item.category === "text" && (
-                        <FileCode size={16} className="text-blue-400" />
+                        <FileCode size={16} className="text-[var(--ui-accent-blue)]" />
                       )}
                       {item.category === "document" && (
-                        <FileText size={16} className="text-rose-400" />
+                        <FileText size={16} className="text-[var(--ui-accent-rose)]" />
                       )}
                       {item.category === "archive" && (
-                        <FileArchive size={16} className="text-amber-400" />
+                        <FileArchive size={16} className="text-[var(--ui-accent-amber)]" />
                       )}
                       {item.category === "binary" && (
-                        <GenericFileIcon size={16} className="text-purple-400" />
+                        <GenericFileIcon size={16} className="text-[var(--ui-accent-purple)]" />
                       )}
                     </div>
                     <div className="flex flex-col min-w-0 pr-4">
-                      <span className="text-xs font-medium text-neutral-200 truncate" title={item.name}>
+                      <span className="text-xs font-medium text-[var(--ui-text-primary)] truncate" title={item.name}>
                         {item.name}
                       </span>
-                      <span className="text-[10px] text-neutral-500 font-mono">
+                      <span className="text-[10px] text-[var(--ui-text-faint)] font-mono">
                         {formatFileSize(item.size)}
                       </span>
                     </div>
@@ -437,7 +534,7 @@ const MessageInput: React.FC<Props> = ({
                 <button
                   type="button"
                   onClick={() => removeAttachment(item.id)}
-                  className="absolute top-1 right-1 w-4 h-4 rounded-full bg-black/80 text-neutral-300 hover:text-white hover:bg-rose-600 flex items-center justify-center transition-colors shadow-sm"
+                  className="absolute top-1 right-1 w-4 h-4 rounded-full bg-black/75 text-white hover:bg-rose-600 flex items-center justify-center transition-colors shadow-sm"
                   title="移除此附件"
                 >
                   <X size={10} />
@@ -458,12 +555,12 @@ const MessageInput: React.FC<Props> = ({
             onBlur={() => window.setTimeout(() => setMention(null), 150)}
             placeholder="输入消息或任务，输入 @ 引用资源，粘贴或拖入图片、表格、文档，Enter 发送，Shift + Enter 换行..."
             style={{ border: 'none', outline: 'none', boxShadow: 'none' }}
-            className="chat-textarea-seamless w-full max-h-44 min-h-[46px] bg-transparent text-neutral-100 placeholder-neutral-500 resize-none border-none outline-none ring-0 focus:ring-0 focus:outline-none focus:border-none shadow-none text-sm leading-relaxed scroll-smooth"
+            className="chat-textarea-seamless w-full max-h-44 min-h-[46px] bg-transparent text-[var(--ui-text-primary)] placeholder-[var(--ui-text-faint)] resize-none border-none outline-none ring-0 focus:ring-0 focus:outline-none focus:border-none shadow-none text-sm leading-relaxed scroll-smooth"
             rows={1}
           />
         </div>
 
-        {/* 底部功能栏 (彻底移除 border-t 割裂线条，自然与文本区融为一体) */}
+        {/* 底部功能栏 */}
         <div className="flex items-center justify-between px-4 pb-3 pt-0">
           <div className="flex items-center gap-2">
             {/* 全格式文件上传按钮 */}
@@ -482,19 +579,19 @@ const MessageInput: React.FC<Props> = ({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={!onChangeAttachments || attachments.length >= MAX_CHAT_ATTACHMENTS}
-              className="flex items-center justify-center w-7 h-7 rounded-lg text-neutral-400 hover:text-white bg-[#161616] hover:bg-[#222222] border border-[#2d2d2d] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center justify-center w-7 h-7 rounded-lg text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] border border-[color:var(--ui-border-hairline)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               title={`添加附件 (支持图片、代码、表格、文档等，最多 ${MAX_CHAT_ATTACHMENTS} 个)`}
             >
               <Paperclip size={13} />
             </button>
-            {/* 工作空间目录按钮 (优先展示项目工作空间名称) */}
+            {/* 工作空间目录按钮 */}
             {onSelectWorkDir && (
               <button
                 onClick={onSelectWorkDir}
-                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg transition-colors select-none shadow-sm group border ${
+                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg transition-colors select-none group border ${
                   workDir
-                    ? "bg-blue-500/10 text-blue-300 border-blue-500/20 hover:bg-blue-500/20"
-                    : "text-neutral-300 hover:text-white bg-[#161616] hover:bg-[#222222] border-[#2d2d2d]"
+                    ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border-[color:var(--ui-accent-blue-border)] hover:opacity-90"
+                    : "text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] border-[color:var(--ui-border-hairline)]"
                 }`}
                 title={
                   matchedWs
@@ -504,11 +601,108 @@ const MessageInput: React.FC<Props> = ({
                     : "未指定工作空间，点击选择本地项目目录"
                 }
               >
-                <FolderGit2 size={13} className="text-blue-400 group-hover:scale-105 transition-transform flex-shrink-0" />
+                <FolderGit2 size={13} className="text-[var(--ui-accent-blue)] group-hover:scale-105 transition-transform flex-shrink-0" />
                 <span className="max-w-[200px] truncate font-medium">
                   {workspaceDisplayName}
                 </span>
               </button>
+            )}
+
+            {/* 权限与沙箱模式选择器（对标 Claude Code / Cursor / Codex 主流 4 档沙箱权限） */}
+            {onChangePermissionMode && (
+              <div ref={permMenuRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => setPermMenuOpen((prev) => !prev)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg transition-colors select-none border cursor-pointer ${activePermOption.badgeClass}`}
+                  title={`当前权限模式: ${activePermOption.label} (${activePermOption.sandboxTag})\n${activePermOption.description}\n快捷键: Shift + Tab 切换`}
+                >
+                  <ActivePermIcon size={13} className="flex-shrink-0" />
+                  <span className="font-medium whitespace-nowrap">{activePermOption.shortLabel}</span>
+                  <ChevronDown
+                    size={11}
+                    className={`opacity-75 transition-transform duration-150 ${
+                      permMenuOpen ? "rotate-180" : ""
+                    }`}
+                  />
+                </button>
+
+                {permMenuOpen && (
+                  <div className="fixed z-[160] w-[340px] rounded-xl bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-[var(--ui-popover-shadow)] p-1.5 select-none"
+                    style={{
+                      left: Math.max(
+                        12,
+                        Math.min(
+                          (permMenuRef.current?.getBoundingClientRect().left ?? 24),
+                          window.innerWidth - 356
+                        )
+                      ),
+                      bottom:
+                        window.innerHeight -
+                        (permMenuRef.current?.getBoundingClientRect().top ?? window.innerHeight - 60) +
+                        8,
+                    }}
+                  >
+                    <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-[color:var(--ui-divider-hairline)] mb-1">
+                      <span className="text-[11px] font-semibold text-[var(--ui-text-secondary)]">
+                        Agent 权限与沙箱模式
+                      </span>
+                      <span className="text-[10px] font-mono text-[var(--ui-text-faint)] bg-[var(--ui-chip-bg)] px-1.5 py-0.5 rounded border border-[color:var(--ui-border-hairline)]">
+                        Shift + Tab 切换
+                      </span>
+                    </div>
+
+                    <div className="flex flex-col gap-0.5">
+                      {PERMISSION_MODE_OPTIONS.map((opt) => {
+                        const Icon = opt.icon;
+                        const isSelected = opt.id === permissionMode;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => {
+                              onChangePermissionMode(opt.id);
+                              setPermMenuOpen(false);
+                            }}
+                            className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors flex items-start gap-2.5 cursor-pointer ${
+                              isSelected
+                                ? "bg-[var(--ui-block-hover-bg)]"
+                                : "hover:bg-[var(--ui-block-bg)]"
+                            }`}
+                          >
+                            <div className="mt-0.5 flex-shrink-0">
+                              <Icon size={14} className={opt.iconClass} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-xs font-medium text-[var(--ui-text-primary)]">
+                                  {opt.label}
+                                </span>
+                                {opt.recommended && (
+                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border border-[color:var(--ui-accent-emerald-border)] font-medium">
+                                    推荐
+                                  </span>
+                                )}
+                                <span className="text-[10px] font-mono text-[var(--ui-text-faint)] ml-auto">
+                                  {opt.sandboxTag}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-[var(--ui-text-muted)] leading-snug mt-0.5">
+                                {opt.description}
+                              </p>
+                            </div>
+                            <div className="w-4 h-4 flex items-center justify-center flex-shrink-0 mt-0.5">
+                              {isSelected && (
+                                <Check size={13} className="text-[var(--ui-accent-blue)]" />
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
 
             {/* 模型下拉选择器 */}
@@ -517,17 +711,17 @@ const MessageInput: React.FC<Props> = ({
                 <select
                   value={selectedModel}
                   onChange={(e) => onChangeModel(e.target.value)}
-                  className="appearance-none bg-[#161616] hover:bg-[#222222] border border-[#2d2d2d] rounded-lg pl-2.5 pr-7 py-1 text-xs font-medium text-neutral-300 hover:text-white outline-none focus:border-blue-500/50 transition-colors cursor-pointer"
+                  className="appearance-none bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] border border-[color:var(--ui-border-hairline)] rounded-lg pl-2.5 pr-7 py-1 text-xs font-medium text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] outline-none focus:border-[color:var(--ui-accent-blue-border)] transition-colors cursor-pointer"
                 >
                   {chatModels.map((m) => (
-                    <option key={m.id} value={m.id} className="bg-[#1c1c1c] text-neutral-200">
+                    <option key={m.id} value={m.id} className="bg-[var(--ui-popover-bg)] text-[var(--ui-text-primary)]">
                       {m.name || m.model_id}
                     </option>
                   ))}
                 </select>
                 <ChevronDown
                   size={12}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--ui-text-faint)] pointer-events-none"
                 />
               </div>
             )}
@@ -539,7 +733,7 @@ const MessageInput: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={() => onCancel?.()}
-                className="w-8 h-8 rounded-xl flex items-center justify-center bg-rose-500/15 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 hover:border-rose-500 transition-all shadow-md shadow-rose-600/10 active:scale-95 cursor-pointer"
+                className="w-8 h-8 rounded-xl flex items-center justify-center bg-[var(--ui-accent-rose-soft)] hover:bg-rose-600 text-[var(--ui-accent-rose)] hover:text-white border border-[color:var(--ui-accent-rose-border)] hover:border-rose-500 transition-all shadow-sm active:scale-95 cursor-pointer"
                 title="停止生成 (Esc)"
               >
                 <Square size={11} fill="currentColor" />
@@ -550,8 +744,8 @@ const MessageInput: React.FC<Props> = ({
                 disabled={!value.trim() || disabled}
                 className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all ${
                   value.trim() && !disabled
-                    ? "bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/30 active:scale-95 cursor-pointer"
-                    : "bg-[#252525] text-neutral-500 cursor-not-allowed border border-[#303030]"
+                    ? "bg-blue-600 hover:bg-blue-500 text-white shadow-sm active:scale-95 cursor-pointer"
+                    : "bg-[var(--ui-chip-bg)] text-[var(--ui-text-faint)] cursor-not-allowed border border-[color:var(--ui-border-hairline)]"
                 }`}
                 title="发送 (Enter)"
               >

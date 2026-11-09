@@ -12,6 +12,7 @@ import {
   Trash2,
   Settings,
   Check,
+  Loader2,
 } from "lucide-react";
 import { useChatStore, type Session } from "@/stores/chatStore";
 import { useAppStore } from "@/stores/appStore";
@@ -31,6 +32,7 @@ const LeftSidebar: React.FC = () => {
   const {
     sessions,
     activeSessionId,
+    generatingBySession,
     workspaces,
     setActiveSession,
     addSession,
@@ -193,6 +195,7 @@ const LeftSidebar: React.FC = () => {
   const renderSession = (session: Session) => {
     const isActive = session.id === activeSessionId;
     const isEditing = session.id === editingSessionId;
+    const isRunning = Boolean(generatingBySession[session.id]);
 
     return (
       <div
@@ -200,14 +203,21 @@ const LeftSidebar: React.FC = () => {
         onClick={() => !isEditing && handleSelectSession(session.id)}
         className={`group/session mx-1.5 flex items-center gap-2 pl-7 pr-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
           isActive
-            ? "bg-blue-500/10 text-blue-400"
-            : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-500/10"
+            ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)]"
+            : "text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)]"
         }`}
       >
-        <MessageSquare
-          size={12}
-          className={`flex-shrink-0 ${isActive ? "text-blue-400" : "text-neutral-600"}`}
-        />
+        {isRunning ? (
+          <Loader2
+            size={12}
+            className="flex-shrink-0 text-[var(--ui-accent-blue)] animate-spin"
+          />
+        ) : (
+          <MessageSquare
+            size={12}
+            className={`flex-shrink-0 ${isActive ? "text-[var(--ui-accent-blue)]" : "text-[var(--ui-text-faint)]"}`}
+          />
+        )}
 
         {isEditing ? (
           <input
@@ -227,14 +237,14 @@ const LeftSidebar: React.FC = () => {
               }
             }}
             onBlur={() => finishRename(session.id)}
-            className="flex-1 min-w-0 h-5 px-1 text-[11px] rounded bg-[#202020] text-neutral-100 border border-blue-500 outline-none"
+            className="flex-1 min-w-0 h-5 px-1 text-[11px] rounded bg-[var(--ui-card-inner-bg)] text-[var(--ui-text-primary)] border border-blue-500 outline-none"
           />
         ) : (
           <>
             <span className="flex-1 min-w-0 text-[11px] truncate tracking-tight">
               {session.title || "新的 Agent 会话"}
             </span>
-            <span className="text-[10px] text-neutral-600 flex-shrink-0 group-hover/session:hidden">
+            <span className="text-[10px] text-[var(--ui-text-faint)] flex-shrink-0 group-hover/session:hidden">
               {formatRelativeTime(session.updatedAt)}
             </span>
             <div className="hidden group-hover/session:flex items-center gap-0.5 flex-shrink-0">
@@ -243,7 +253,7 @@ const LeftSidebar: React.FC = () => {
                   e.stopPropagation();
                   startRename(session);
                 }}
-                className="p-0.5 rounded text-neutral-500 hover:text-neutral-200 hover:bg-neutral-500/20"
+                className="p-0.5 rounded text-[var(--ui-text-faint)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)]"
                 title="重命名"
               >
                 <Pencil size={10} />
@@ -253,7 +263,7 @@ const LeftSidebar: React.FC = () => {
                   e.stopPropagation();
                   deleteSession(session.id);
                 }}
-                className="p-0.5 rounded text-neutral-500 hover:text-rose-400 hover:bg-rose-500/10"
+                className="p-0.5 rounded text-[var(--ui-text-faint)] hover:text-[var(--ui-accent-rose)] hover:bg-[var(--ui-accent-rose-soft)]"
                 title="删除会话"
               >
                 <Trash2 size={10} />
@@ -272,14 +282,14 @@ const LeftSidebar: React.FC = () => {
       <div key={group.key} className="mb-0.5">
         <div
           onClick={() => toggleGroup(group.key)}
-          className="group/ws mx-1.5 flex items-center gap-1.5 pl-1.5 pr-1 py-1.5 rounded-lg cursor-pointer text-neutral-300 hover:bg-neutral-500/10 transition-colors"
+          className="group/ws mx-1.5 flex items-center gap-1.5 pl-1.5 pr-1 py-1.5 rounded-lg cursor-pointer text-[var(--ui-text-secondary)] hover:bg-[var(--ui-chip-bg)] transition-colors"
         >
           {isExpanded ? (
-            <ChevronDown size={12} className="text-neutral-500 flex-shrink-0" />
+            <ChevronDown size={12} className="text-[var(--ui-text-faint)] flex-shrink-0" />
           ) : (
-            <ChevronRight size={12} className="text-neutral-500 flex-shrink-0" />
+            <ChevronRight size={12} className="text-[var(--ui-text-faint)] flex-shrink-0" />
           )}
-          <FolderGit2 size={14} className="text-blue-400/80 flex-shrink-0" />
+          <FolderGit2 size={14} className="text-[var(--ui-accent-blue)] flex-shrink-0" />
           <span className="flex-1 min-w-0 text-xs font-medium truncate">{group.name}</span>
           {group.workspaceId && group.canCreate && (
             <button
@@ -287,7 +297,7 @@ const LeftSidebar: React.FC = () => {
                 e.stopPropagation();
                 handleNewInWorkspace(group.workspaceId as string);
               }}
-              className="w-5 h-5 flex items-center justify-center rounded-md text-neutral-400 hover:text-white hover:bg-neutral-500/20 transition-colors"
+              className="w-5 h-5 flex items-center justify-center rounded-md text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)] transition-colors"
               title="在此工作空间新建会话"
             >
               <Plus size={13} />
@@ -297,7 +307,7 @@ const LeftSidebar: React.FC = () => {
 
         {isExpanded && group.sessions.map(renderSession)}
         {isExpanded && group.sessions.length === 0 && (
-          <div className="pl-9 pr-3 py-1 text-[10px] text-neutral-600">暂无会话</div>
+          <div className="pl-9 pr-3 py-1 text-[10px] text-[var(--ui-text-faint)]">暂无会话</div>
         )}
       </div>
     );
@@ -306,25 +316,25 @@ const LeftSidebar: React.FC = () => {
   const navClass = (tab: "workspaces" | "tools") =>
     `w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-colors ${
       activeNavTab === tab
-        ? "bg-blue-500/10 text-blue-300"
-        : "text-neutral-300 hover:text-neutral-100 hover:bg-neutral-500/10"
+        ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)]"
+        : "text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)]"
     }`;
 
   const initial = (username || "本").trim().charAt(0).toUpperCase();
 
   return (
-    <aside className="w-[280px] h-full bg-[#141414] border-r border-[#222222] flex flex-col flex-shrink-0 select-none">
+    <aside className="w-[280px] h-full bg-[var(--ui-panel-bg)] border-r border-[color:var(--ui-divider-hairline)] flex flex-col flex-shrink-0 select-none">
       {/* 顶部留出 macOS 原生红绿灯安全间距与窗口拖拽区 */}
       <div className="h-9 w-full titlebar-drag flex-shrink-0" />
 
-      <div className="p-2.5 pb-2 space-y-0.5 border-b border-[#202020] titlebar-no-drag">
+      <div className="p-2.5 pb-2 space-y-0.5 border-b border-[color:var(--ui-divider-hairline)] titlebar-no-drag">
         <button
           onClick={handleNewTask}
-          className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-neutral-200 hover:bg-neutral-500/10 transition-colors"
+          className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)] transition-colors"
         >
-          <Plus size={15} className="text-neutral-400" />
+          <Plus size={15} className="text-[var(--ui-text-muted)]" />
           <span className="flex-1 text-left text-xs font-medium">新建任务</span>
-          <span className="text-[10px] text-neutral-500 font-mono">⌘N</span>
+          <span className="text-[10px] text-[var(--ui-text-faint)] font-mono">⌘N</span>
         </button>
 
         <button onClick={() => setActiveNavTab("workspaces")} className={navClass("workspaces")}>
@@ -339,14 +349,14 @@ const LeftSidebar: React.FC = () => {
       </div>
 
       <div className="px-3 pt-3 pb-1 flex items-center justify-between">
-        <span className="text-[11px] font-semibold text-neutral-500 tracking-wide">
+        <span className="text-[11px] font-semibold text-[var(--ui-text-muted)] tracking-wide">
           任务列表
         </span>
         <div className="flex items-center gap-0.5">
           <button
             onClick={() => setSearchOpen((open) => !open)}
             className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors ${
-              searchOpen ? "text-blue-400 bg-blue-500/10" : "text-neutral-500 hover:text-neutral-200 hover:bg-neutral-500/10"
+              searchOpen ? "text-[var(--ui-accent-blue)] bg-[var(--ui-accent-blue-soft)]" : "text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)]"
             }`}
             title="搜索任务"
           >
@@ -359,14 +369,14 @@ const LeftSidebar: React.FC = () => {
                 setFilterOpen((open) => !open);
               }}
               className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors ${
-                filterOpen ? "text-blue-400 bg-blue-500/10" : "text-neutral-500 hover:text-neutral-200 hover:bg-neutral-500/10"
+                filterOpen ? "text-[var(--ui-accent-blue)] bg-[var(--ui-accent-blue-soft)]" : "text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)]"
               }`}
               title="筛选任务"
             >
               <SlidersHorizontal size={13} />
             </button>
             {filterOpen && (
-              <div className="absolute right-0 top-7 z-50 w-28 py-1 rounded-lg bg-[#1f1f1f] border border-[#333333] shadow-2xl">
+              <div className="absolute right-0 top-7 z-50 w-28 py-1 rounded-lg bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-[var(--ui-popover-shadow)]">
                 {[
                   { value: "active" as const, label: "活动任务" },
                   { value: "archived" as const, label: "已归档" },
@@ -377,10 +387,10 @@ const LeftSidebar: React.FC = () => {
                       setFilter(option.value);
                       setFilterOpen(false);
                     }}
-                    className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] text-neutral-300 hover:bg-neutral-500/10"
+                    className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] text-[var(--ui-text-secondary)] hover:bg-[var(--ui-block-hover-bg)]"
                   >
                     <span>{option.label}</span>
-                    {filter === option.value && <Check size={11} className="text-blue-400" />}
+                    {filter === option.value && <Check size={11} className="text-[var(--ui-accent-blue)]" />}
                   </button>
                 ))}
               </div>
@@ -402,17 +412,17 @@ const LeftSidebar: React.FC = () => {
               }
             }}
             placeholder="搜索任务标题..."
-            className="w-full h-7 px-2 text-[11px] rounded-lg bg-[#1c1c1c] border border-[#2e2e2e] text-neutral-200 placeholder-neutral-600 outline-none focus:border-blue-500/60"
+            className="w-full h-7 px-2 text-[11px] rounded-lg bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] text-[var(--ui-text-primary)] placeholder-[var(--ui-text-faint)] outline-none focus:border-blue-500/60"
           />
         </div>
       )}
 
       <div className="flex-1 overflow-y-auto pb-3 custom-scrollbar">
-        <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-neutral-600 tracking-wide uppercase">
+        <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-[var(--ui-text-faint)] tracking-wide uppercase">
           项目
         </div>
         {workspaceGroups.length === 0 && standaloneGroups.length === 0 ? (
-          <div className="px-3 py-2 text-[11px] text-neutral-600">
+          <div className="px-3 py-2 text-[11px] text-[var(--ui-text-faint)]">
             {normalizedQuery ? "未找到匹配项目" : "暂无项目"}
           </div>
         ) : (
@@ -422,11 +432,11 @@ const LeftSidebar: React.FC = () => {
           </>
         )}
 
-        <div className="px-3 pt-4 pb-1 text-[10px] font-semibold text-neutral-600 tracking-wide uppercase">
+        <div className="px-3 pt-4 pb-1 text-[10px] font-semibold text-[var(--ui-text-faint)] tracking-wide uppercase">
           任务
         </div>
         {unassigned.length === 0 ? (
-          <div className="px-3 py-1.5 text-[11px] text-neutral-600">
+          <div className="px-3 py-1.5 text-[11px] text-[var(--ui-text-faint)]">
             {normalizedQuery ? "未找到匹配任务" : "暂无任务"}
           </div>
         ) : (
@@ -434,17 +444,17 @@ const LeftSidebar: React.FC = () => {
         )}
       </div>
 
-      <div className="border-t border-[#202020] p-3 flex items-center gap-2.5 flex-shrink-0">
-        <div className="w-7 h-7 rounded-full bg-blue-500/15 text-blue-400 flex items-center justify-center text-[11px] font-bold flex-shrink-0">
+      <div className="border-t border-[color:var(--ui-divider-hairline)] p-3 flex items-center gap-2.5 flex-shrink-0">
+        <div className="w-7 h-7 rounded-full bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] flex items-center justify-center text-[11px] font-bold flex-shrink-0">
           {initial}
         </div>
-        <span className="flex-1 min-w-0 text-xs text-neutral-300 truncate">{username}</span>
+        <span className="flex-1 min-w-0 text-xs text-[var(--ui-text-secondary)] truncate">{username}</span>
         <button
           onClick={() => setActiveNavTab("settings")}
           className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors ${
             activeNavTab === "settings"
-              ? "text-blue-400 bg-blue-500/10"
-              : "text-neutral-500 hover:text-neutral-200 hover:bg-neutral-500/10"
+              ? "text-[var(--ui-accent-blue)] bg-[var(--ui-accent-blue-soft)]"
+              : "text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)]"
           }`}
           title="设置"
         >

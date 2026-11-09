@@ -1,5 +1,12 @@
-import React from 'react';
-import { ListTodo, CheckCircle2, Circle, Loader2 } from 'lucide-react';
+import React, { useState } from 'react';
+import {
+  ListTodo,
+  CheckCircle2,
+  Circle,
+  Loader2,
+  ChevronDown,
+  ChevronRight,
+} from 'lucide-react';
 
 export interface TodoItem {
   id: string;
@@ -9,100 +16,133 @@ export interface TodoItem {
 
 interface TodoListCardProps {
   todos: TodoItem[];
+  isActive?: boolean;
 }
 
 /**
- * TodoListCard — 任务规划待办清单卡片
- * 始终锚定在执行步骤列表 (ToolStepList) 的正下方，随步骤滚动始终处于视野下方，实时呈现任务规划与阶段进度
+ * TodoListCard — 紧凑型可折叠任务规划进度条卡片 (ZCode / DSH 风格)
+ * 存在任务规划时默认展开清单，直观呈现各阶段状态与进度；支持点击顶栏手动折叠
  */
-export const TodoListCard: React.FC<TodoListCardProps> = ({ todos }) => {
+export const TodoListCard: React.FC<TodoListCardProps> = ({ todos, isActive = false }) => {
+  const [isExpanded, setIsExpanded] = useState(true);
+
   if (!todos || todos.length === 0) return null;
 
   const completedCount = todos.filter((t) => t.status === 'completed').length;
   const totalCount = todos.length;
   const progressPercent = Math.round((completedCount / totalCount) * 100);
+  const activeTodo = todos.find((t) => t.status === 'in_progress');
+  const allCompleted = completedCount === totalCount;
 
   return (
-    <div className='mb-4 w-full max-w-full bg-[#1c1c1c] border border-[#2d2d2d] rounded-xl overflow-hidden select-none shadow-md transition-all animate-in fade-in duration-200'>
-      {/* 头部状态与进度 */}
-      <div className='px-4 py-2.5 bg-[#202020] border-b border-[#282828] flex items-center justify-between'>
-        <div className='flex items-center gap-2'>
-          <div className='w-5 h-5 rounded-md bg-blue-500/15 text-blue-400 flex items-center justify-center flex-shrink-0'>
-            <ListTodo size={13} />
+    <div className='mb-1.5 w-full max-w-full bg-[var(--ui-block-bg)] border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] rounded-xl overflow-hidden select-none transition-colors'>
+      {/* 紧凑单行顶栏 */}
+      <div
+        onClick={() => setIsExpanded((v) => !v)}
+        className='px-3 py-1.5 flex items-center justify-between gap-3 cursor-pointer hover:bg-[var(--ui-block-hover-bg)] transition-colors'
+      >
+        <div className='flex items-center gap-2 min-w-0'>
+          <div
+            className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 ${
+              allCompleted
+                ? 'bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)]'
+                : 'bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)]'
+            }`}
+          >
+            {allCompleted ? (
+              <CheckCircle2 size={11} />
+            ) : activeTodo && isActive ? (
+              <Loader2 size={11} className='animate-spin' />
+            ) : (
+              <ListTodo size={11} />
+            )}
           </div>
-          <span className='text-xs font-bold text-neutral-200 tracking-wide'>
-            任务规划待办清单 (Todo List)
+
+          <span className='text-xs font-semibold text-[var(--ui-text-secondary)] flex-shrink-0'>
+            任务规划
+          </span>
+
+          <span className='text-[11px] text-[var(--ui-text-muted)] truncate'>
+            {activeTodo
+              ? `当前: ${activeTodo.text}`
+              : allCompleted
+              ? '全部任务已完成'
+              : `待执行 (${totalCount - completedCount} 项)`}
           </span>
         </div>
 
-        <div className='flex items-center gap-2'>
-          <span className='text-[11px] font-mono text-neutral-400'>
+        <div className='flex items-center gap-2 flex-shrink-0'>
+          <span className='text-[10px] font-mono text-[var(--ui-text-muted)]'>
             {completedCount}/{totalCount}
           </span>
-          <div className='w-16 h-1.5 rounded-full bg-[#2a2a2a] overflow-hidden'>
+          <div className='w-14 h-1.5 rounded-full bg-[var(--ui-chip-bg)] overflow-hidden'>
             <div
-              className='h-full bg-blue-500 rounded-full transition-all duration-300'
+              className={`h-full rounded-full transition-all duration-300 ${
+                allCompleted ? 'bg-emerald-500' : 'bg-blue-500'
+              }`}
               style={{ width: `${progressPercent}%` }}
             />
           </div>
+          <div className='text-[var(--ui-text-faint)]'>
+            {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </div>
         </div>
       </div>
 
-      {/* 待办事项逐条展示 */}
-      <div className='p-3 flex flex-col gap-2'>
-        {todos.map((item, idx) => {
-          const isDone = item.status === 'completed';
-          const isRunning = item.status === 'in_progress';
+      {/* 展开后的详细清单 */}
+      {isExpanded && (
+        <div className='px-3 py-2 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] flex flex-col gap-1'>
+          {todos.map((item, idx) => {
+            const isDone = item.status === 'completed';
+            const isRunning = item.status === 'in_progress';
 
-          return (
-            <div
-              key={item.id || idx}
-              className={`flex items-center justify-between py-1.5 px-2.5 rounded-lg text-xs transition-colors ${
-                isRunning
-                  ? 'bg-blue-500/10 border border-blue-500/25 shadow-sm'
-                  : 'hover:bg-white/[0.02] border border-transparent'
-              }`}
-            >
-              <div className='flex items-center gap-2.5 min-w-0 pr-2'>
-                {/* 状态图标 */}
-                {isDone ? (
-                  <CheckCircle2 size={13} className='text-emerald-400 flex-shrink-0' />
-                ) : isRunning ? (
-                  <Loader2 size={13} className='text-blue-400 animate-spin flex-shrink-0' />
-                ) : (
-                  <Circle size={13} className='text-neutral-500 flex-shrink-0' />
-                )}
-
-                {/* 任务文本 */}
-                <span
-                  className={`truncate font-medium transition-colors ${
-                    isDone
-                      ? 'text-neutral-400 line-through opacity-85'
-                      : isRunning
-                      ? 'text-blue-300 font-bold'
-                      : 'text-neutral-200'
-                  }`}
-                >
-                  {item.text}
-                </span>
-              </div>
-
-              {/* 右侧阶段状态指示 */}
-              <span
-                className={`text-[10px] font-mono px-1.5 py-0.2 rounded flex-shrink-0 ${
-                  isDone
-                    ? 'bg-emerald-500/10 text-emerald-400'
-                    : isRunning
-                    ? 'bg-blue-500/20 text-blue-400 font-bold'
-                    : 'text-neutral-400'
+            return (
+              <div
+                key={item.id || idx}
+                className={`flex items-center justify-between py-1 px-2 rounded-lg text-xs transition-colors ${
+                  isRunning
+                    ? 'bg-[var(--ui-accent-blue-soft)] border border-[color:var(--ui-accent-blue-border)]'
+                    : 'hover:bg-[var(--ui-block-hover-bg)]'
                 }`}
               >
-                {isDone ? '已完成' : isRunning ? '进行中' : '待办'}
-              </span>
-            </div>
-          );
-        })}
-      </div>
+                <div className='flex items-center gap-2 min-w-0 pr-2'>
+                  {isDone ? (
+                    <CheckCircle2 size={12} className='text-[var(--ui-accent-emerald)] flex-shrink-0' />
+                  ) : isRunning && isActive ? (
+                    <Loader2 size={12} className='text-[var(--ui-accent-blue)] animate-spin flex-shrink-0' />
+                  ) : (
+                    <Circle size={12} className='text-[var(--ui-text-faint)] flex-shrink-0' />
+                  )}
+
+                  <span
+                    className={`truncate ${
+                      isDone
+                        ? 'text-[var(--ui-text-faint)] line-through'
+                        : isRunning
+                        ? 'text-[var(--ui-accent-blue)] font-medium'
+                        : 'text-[var(--ui-text-secondary)]'
+                    }`}
+                  >
+                    {item.text}
+                  </span>
+                </div>
+
+                <span
+                  className={`text-[10px] font-mono px-1.5 py-0.2 rounded flex-shrink-0 ${
+                    isDone
+                      ? 'text-[var(--ui-accent-emerald)]'
+                      : isRunning
+                      ? 'bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)]'
+                      : 'text-[var(--ui-text-faint)]'
+                  }`}
+                >
+                  {isDone ? '已完成' : isRunning ? '进行中' : '待办'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

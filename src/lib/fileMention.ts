@@ -3,7 +3,7 @@ export interface FileIndexEntry {
   isDir: boolean;
 }
 
-export type MentionCategory = "file" | "skill" | "mcp";
+export type MentionCategory = "file" | "skill" | "mcp" | "subagent";
 
 export interface UnifiedMentionItem {
   id: string;
@@ -12,7 +12,7 @@ export interface UnifiedMentionItem {
   subtitle?: string;
   insertText: string;
   isDir?: boolean;
-  scope?: "project" | "global";
+  scope?: "project" | "global" | "builtin";
   tools?: string[];
 }
 
@@ -132,10 +132,12 @@ export function filterUnifiedMentions(
   files: FileIndexEntry[],
   skills: Array<{ id?: string; name: string; description?: string; scope?: string; tools?: string[] }> = [],
   mcps: Array<{ id?: string; name: string; description?: string; command?: string }> = [],
+  subagents: Array<{ id: string; name: string; description?: string; scope?: string; readOnly?: boolean }> = [],
   limit = 12
 ): {
   items: UnifiedMentionItem[];
   grouped: {
+    subagents: UnifiedMentionItem[];
     skills: UnifiedMentionItem[];
     mcps: UnifiedMentionItem[];
     files: UnifiedMentionItem[];
@@ -146,13 +148,51 @@ export function filterUnifiedMentions(
 
   const isSkillPrefix = lowerQ.startsWith("skill:");
   const isMcpPrefix = lowerQ.startsWith("mcp:");
+  const isAgentPrefix = lowerQ.startsWith("agent:");
 
   const skillFilterTerm = isSkillPrefix ? q.slice(6).trim() : q;
   const mcpFilterTerm = isMcpPrefix ? q.slice(4).trim() : q;
+  const agentFilterTerm = isAgentPrefix ? q.slice(6).trim() : q;
+
+  // 0. 过滤与排序 Subagents
+  const scoredSubagents: Array<{ item: UnifiedMentionItem; score: number }> = [];
+  if (!isSkillPrefix && !isMcpPrefix) {
+    for (const agent of subagents) {
+      const id = agent.id || "";
+      const name = agent.name || id;
+      const desc = agent.description || "";
+      let score = 0;
+      if (!agentFilterTerm) {
+        score = 10;
+      } else {
+        const idScore = fuzzyScore(agentFilterTerm, id);
+        const nameScore = fuzzyScore(agentFilterTerm, name);
+        const descScore = desc ? fuzzyScore(agentFilterTerm, desc) - 15 : -1;
+        score = Math.max(idScore, nameScore, descScore);
+        if (isAgentPrefix && id.toLowerCase().startsWith(agentFilterTerm.toLowerCase())) {
+          score += 50;
+        }
+      }
+      if (score >= 0) {
+        scoredSubagents.push({
+          item: {
+            id: `subagent:${id}`,
+            category: "subagent",
+            title: name,
+            subtitle: desc,
+            insertText: `@agent:${id} `,
+            scope: (agent.scope as any) || "builtin",
+          },
+          score,
+        });
+      }
+    }
+  }
+  scoredSubagents.sort((a, b) => b.score - a.score);
 
   // 1. 过滤与排序 Skills
   const scoredSkills: Array<{ item: UnifiedMentionItem; score: number }> = [];
-  if (!isMcpPrefix) {
+  if (!isMcpPrefix && !isAgentPrefix) {
     for (const skill of skills) {
       const name = skill.name || "";
       const desc = skill.description || "";
@@ -187,7 +227,7 @@ export function filterUnifiedMentions(
 
   // 2. 过滤与排序 MCP Servers
   const scoredMcps: Array<{ item: UnifiedMentionItem; score: number }> = [];
-  if (!isSkillPrefix) {
+  if (!isSkillPrefix && !isAgentPrefix) {
     for (const mcp of mcps) {
       const name = mcp.name || "";
       const desc = mcp.description || mcp.command || "";
@@ -220,7 +260,7 @@ export function filterUnifiedMentions(
 
   // 3. 过滤与排序 Files & Dirs
   const scoredFiles: Array<{ item: UnifiedMentionItem; score: number }> = [];
-  if (!isSkillPrefix && !isMcpPrefix) {
+  if (!isSkillPrefix && !isMcpPrefix && !isAgentPrefix) {
     const matchedFiles = filterMentions(files, q, 10);
     matchedFiles.forEach((file) => {
       scoredFiles.push({
@@ -238,34 +278,45 @@ export function filterUnifiedMentions(
   }
 
   // 分组与配额截断 (默认展示时均衡配比)
+  let subagentItems = scoredSubagents.map((s) => s.item);
   let skillItems = scoredSkills.map((s) => s.item);
   let mcpItems = scoredMcps.map((m) => m.item);
   let fileItems = scoredFiles.map((f) => f.item);
 
   if (!q) {
-    skillItems = skillItems.slice(0, 4);
+    subagentItems = subagentItems.slice(0, 4);
+    skillItems = skillItems.slice(0, 3);
     mcpItems = mcpItems.slice(0, 2);
-    fileItems = fileItems.slice(0, 6);
+    fileItems = fileItems.slice(0, 5);
+  } else if (isAgentPrefix) {
+    subagentItems = subagentItems.slice(0, limit);
+    skillItems = [];
+    mcpItems = [];
+    fileItems = [];
   } else if (isSkillPrefix) {
     skillItems = skillItems.slice(0, limit);
+    subagentItems = [];
     mcpItems = [];
     fileItems = [];
   } else if (isMcpPrefix) {
     mcpItems = mcpItems.slice(0, limit);
+    subagentItems = [];
     skillItems = [];
     fileItems = [];
   } else {
     // 综合搜索模式：高分混合截取
-    skillItems = skillItems.slice(0, 4);
+    subagentItems = subagentItems.slice(0, 3);
+    skillItems = skillItems.slice(0, 3);
     mcpItems = mcpItems.slice(0, 2);
     fileItems = fileItems.slice(0, 6);
   }
 
-  const items = [...skillItems, ...mcpItems, ...fileItems];
+  const items = [...subagentItems, ...skillItems, ...mcpItems, ...fileItems];
 
   return {
     items,
     grouped: {
+      subagents: subagentItems,
       skills: skillItems,
       mcps: mcpItems,
       files: fileItems,

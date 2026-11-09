@@ -246,46 +246,91 @@ function buildTranscript(messages, maxChars) {
   return transcript;
 }
 
+function cleanSummaryText(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  const withoutThink = raw
+    .replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, "")
+    .replace(/<(?:think|thinking)>[\s\S]*$/gi, "")
+    .trim();
+  if (!withoutThink || withoutThink.toLowerCase() === "task ready") {
+    return "";
+  }
+  return withoutThink;
+}
+
 async function summarizeMessages({
   messages,
   modelBaseUrl,
   modelApiKey,
   apiModelId,
   headers = {},
-  maxTokens = DEFAULTS.summaryMaxTokens,
   maxChars = 120000,
+  depth = 0,
 }) {
   const transcript = buildTranscript(messages, maxChars);
   const prompt = buildSummaryPrompt();
 
-  const response = await fetch(`${modelBaseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { ...headers, Accept: "application/json" },
-    body: JSON.stringify({
-      model: apiModelId,
-      messages: [
-        {
-          role: "user",
-          content: `以下是需要压缩的对话记录：\n\n${transcript}\n\n---\n\n${prompt}`,
-        },
-      ],
-      stream: false,
-      max_tokens: maxTokens,
-      temperature: 0.2,
-    }),
-  });
+  try {
+    const response = await fetch(`${modelBaseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { ...headers, Accept: "application/json" },
+      body: JSON.stringify({
+        model: apiModelId,
+        messages: [
+          {
+            role: "user",
+            content: `以下是需要压缩的对话记录：\n\n${transcript}\n\n---\n\n${prompt}`,
+          },
+        ],
+        stream: false,
+        reasoning_effort: "low",
+        temperature: 0.2,
+      }),
+    });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`摘要请求失败 (${response.status}): ${errorText}`);
-  }
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`摘要请求失败 (${response.status}): ${errorText}`);
+    }
 
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content || !String(content).trim()) {
-    throw new Error("摘要请求返回为空");
+    const data = await response.json();
+    const finishReason = data?.choices?.[0]?.finish_reason;
+    const rawContent = data?.choices?.[0]?.message?.content;
+    const cleaned = cleanSummaryText(rawContent);
+
+    if (!cleaned || (finishReason === "length" && cleaned.length < 100)) {
+      throw new Error("摘要生成被截断或返回为空");
+    }
+    return cleaned;
+  } catch (err) {
+    // Map-Reduce 递归二分兜底：当待摘要消息过长导致超限或截断时，自动拆分为两半分别摘要再合并
+    if (depth < 2 && Array.isArray(messages) && messages.length >= 4) {
+      const mid = Math.floor(messages.length / 2);
+      const halfChars = Math.max(15000, Math.floor(maxChars / 2));
+      const [part1, part2] = await Promise.all([
+        summarizeMessages({
+          messages: messages.slice(0, mid),
+          modelBaseUrl,
+          modelApiKey,
+          apiModelId,
+          headers,
+          maxChars: halfChars,
+          depth: depth + 1,
+        }),
+        summarizeMessages({
+          messages: messages.slice(mid),
+          modelBaseUrl,
+          modelApiKey,
+          apiModelId,
+          headers,
+          maxChars: halfChars,
+          depth: depth + 1,
+        }),
+      ]);
+      return `${part1}\n\n### 后续阶段摘要\n${part2}`;
+    }
+    throw err;
   }
-  return String(content).trim();
 }
 
 async function compactMessages({ messages, systemMessage, thresholds, modelCfg, cfg = {} }) {
@@ -306,7 +351,6 @@ async function compactMessages({ messages, systemMessage, thresholds, modelCfg, 
     modelApiKey: modelCfg.apiKey,
     apiModelId: modelCfg.modelId,
     headers: modelCfg.headers,
-    maxTokens: DEFAULTS.summaryMaxTokens,
     maxChars: Math.max(20000, thresholds.threshold * 3.5),
   });
 

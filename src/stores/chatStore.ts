@@ -20,6 +20,8 @@ export interface Message {
   attachments?: ChatAttachment[];
 }
 
+export type PermissionMode = "plan" | "auto-sandbox" | "ask" | "full-access";
+
 export interface Session {
   id: string;
   title: string;
@@ -27,6 +29,7 @@ export interface Session {
   updatedAt: number;
   model?: string;
   workDir?: string;
+  permissionMode?: PermissionMode;
   archived?: boolean;
 }
 
@@ -68,6 +71,17 @@ export interface SessionOutput {
   createdAt: number;
 }
 
+export interface WorkbenchTab {
+  id: string;
+  title: string;
+  type: "newtab" | "url" | "files" | "changes" | "terminal";
+  url?: string;
+  filePath?: string;
+  lineNumber?: number;
+  viewMode?: "preview" | "code";
+  refreshKey?: number;
+}
+
 export interface WorkspaceGitStatus {
   isGit: boolean;
   branch?: string;
@@ -91,6 +105,19 @@ export interface SkillItem {
   description: string;
   tools: string[];
   scope: string;
+}
+
+export interface SubagentItem {
+  id: string;
+  name: string;
+  description: string;
+  tools: string[];
+  readOnly: boolean;
+  modelTier?: string;
+  maxRounds?: number;
+  scope: string;
+  filePath?: string;
+  systemPrompt?: string;
 }
 
 export interface WorkspaceFolder {
@@ -121,19 +148,50 @@ interface ChatState {
   sessions: Session[];
   activeSessionId: string | null;
   messages: Record<string, Message[]>;
+  generatingBySession: Record<string, boolean>;
+  toolCallsBySession: Record<string, any[]>;
+  todosBySession: Record<string, any[]>;
+  permissionBySession: Record<string, any | null>;
+  contextMetricsBySession: Record<string, ContextMetrics | null>;
   contextMetrics: ContextMetrics | null;
   outputs: SessionOutput[];
   gitStatus: WorkspaceGitStatus | null;
   mcpServers: McpServerItem[];
   skills: SkillItem[];
+  subagents: SubagentItem[];
   workspaces: WorkspaceItem[];
   models: LlmModelItem[];
   isWorkspaceModalOpen: boolean;
   activeEditingWorkspace: WorkspaceItem | null;
-  stepDisplayStyle: 'detailed' | 'compact';
+  defaultPermissionMode: PermissionMode;
+
+  // 右侧全能工作台 (浏览器 / 文件树 / 终端 / Git Diff) 全局状态
+  workbenchOpen: boolean;
+  workbenchWidth: number;
+  workbenchMaximized: boolean;
+  workbenchTabs: WorkbenchTab[];
+  activeWorkbenchTabId: string;
+  autoOpenHtmlOutputs: boolean;
+  pendingMentionInsert: string | null;
 
   initStore: () => Promise<void>;
-  setStepDisplayStyle: (style: 'detailed' | 'compact') => Promise<void>;
+  setSessionPermissionMode: (sessionId: string, mode: PermissionMode) => Promise<void>;
+  setWorkbenchOpen: (open: boolean) => void;
+  setWorkbenchWidth: (width: number) => void;
+  setWorkbenchMaximized: (maximized: boolean) => void;
+  setAutoOpenHtmlOutputs: (enabled: boolean) => Promise<void>;
+  setPendingMentionInsert: (text: string | null) => void;
+  addWorkbenchTab: (tab?: Partial<WorkbenchTab>) => void;
+  closeWorkbenchTab: (tabId: string) => void;
+  setActiveWorkbenchTab: (tabId: string) => void;
+  updateWorkbenchTab: (tabId: string, patch: Partial<WorkbenchTab>) => void;
+  openUrlInWorkbench: (url: string, title?: string, filePath?: string) => void;
+  openFileInWorkbench: (
+    filePath: string,
+    options?: { line?: number; viewMode?: "preview" | "code" }
+  ) => void;
+  openDiffInWorkbench: (filePath?: string) => void;
+  openTerminalInWorkbench: () => void;
   fetchModels: () => Promise<void>;
   fetchWorkspaces: () => Promise<void>;
   saveWorkspace: (ws: WorkspaceItem) => Promise<void>;
@@ -159,7 +217,12 @@ interface ChatState {
   updateMessageMetadata: (sessionId: string, messageId: string, metadata: any) => void;
   truncateMessages: (sessionId: string, messageId: string) => Promise<void>;
 
-  setContextMetrics: (metrics: ContextMetrics | null) => void;
+  setSessionGenerating: (sessionId: string, isGenerating: boolean) => void;
+  upsertSessionToolCall: (sessionId: string, status: any) => void;
+  clearSessionToolCalls: (sessionId: string) => void;
+  setSessionTodos: (sessionId: string, todos: any[]) => void;
+  setSessionPermission: (sessionId: string, perm: any | null) => void;
+  setContextMetrics: (metrics: ContextMetrics | null, sessionId?: string) => void;
   lastCompaction: CompactionInfo | null;
   setLastCompaction: (data: CompactionInfo | null) => void;
   refreshOutputs: (sessionId: string) => Promise<void>;
@@ -171,23 +234,382 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   messages: {},
+  generatingBySession: {},
+  toolCallsBySession: {},
+  todosBySession: {},
+  permissionBySession: {},
+  contextMetricsBySession: {},
   contextMetrics: null,
   lastCompaction: null,
   outputs: [],
   gitStatus: null,
   mcpServers: [],
   skills: [],
+  subagents: [],
   workspaces: [],
   models: [],
-  stepDisplayStyle: 'detailed',
+  defaultPermissionMode: 'auto-sandbox',
+  workbenchOpen: false,
+  workbenchWidth: 560,
+  workbenchMaximized: true,
+  workbenchTabs: [{ id: 't_home', title: '工具台', type: 'newtab' }],
+  activeWorkbenchTabId: 't_home',
+  autoOpenHtmlOutputs: true,
+  pendingMentionInsert: null,
 
-  setStepDisplayStyle: async (style) => {
-    set({ stepDisplayStyle: style });
+  setWorkbenchOpen: (open) => set({ workbenchOpen: open }),
+  setWorkbenchWidth: (width) => {
+    const maxW =
+      typeof window !== "undefined" ? Math.floor(window.innerWidth * 0.9) : 1800;
+    set({ workbenchWidth: Math.max(400, Math.min(maxW, Math.round(width))) });
+  },
+  setWorkbenchMaximized: (maximized) => set({ workbenchMaximized: maximized }),
+  setPendingMentionInsert: (text) => set({ pendingMentionInsert: text }),
+
+  setAutoOpenHtmlOutputs: async (enabled) => {
+    set({ autoOpenHtmlOutputs: enabled });
     if (window.electronAPI?.setConfig) {
       try {
-        await window.electronAPI.setConfig("step_display_style", style);
+        await window.electronAPI.setConfig("auto_open_html_outputs", enabled ? "true" : "false");
       } catch (err) {
-        console.error("保存步骤展示风格失败:", err);
+        console.error("保存自动打开产物配置失败:", err);
+      }
+    }
+  },
+
+  addWorkbenchTab: (tab) => {
+    const newId = tab?.id || `tab_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+    const newTab: WorkbenchTab = {
+      id: newId,
+      title: tab?.title || "新标签页",
+      type: tab?.type || "newtab",
+      url: tab?.url,
+      filePath: tab?.filePath,
+      lineNumber: tab?.lineNumber,
+      viewMode: tab?.viewMode,
+      refreshKey: Date.now(),
+    };
+    set((state) => ({
+      workbenchOpen: true,
+      workbenchTabs: [...state.workbenchTabs, newTab],
+      activeWorkbenchTabId: newId,
+    }));
+  },
+
+  closeWorkbenchTab: (tabId) => {
+    set((state) => {
+      if (state.workbenchTabs.length <= 1) {
+        return {
+          workbenchOpen: false,
+          workbenchTabs: [{ id: "t_home", title: "工具台", type: "newtab" }],
+          activeWorkbenchTabId: "t_home",
+        };
+      }
+      const filtered = state.workbenchTabs.filter((t) => t.id !== tabId);
+      const nextActive =
+        state.activeWorkbenchTabId === tabId
+          ? filtered[filtered.length - 1].id
+          : state.activeWorkbenchTabId;
+      return {
+        workbenchTabs: filtered,
+        activeWorkbenchTabId: nextActive,
+      };
+    });
+  },
+
+  setActiveWorkbenchTab: (tabId) => set({ activeWorkbenchTabId: tabId }),
+
+  updateWorkbenchTab: (tabId, patch) =>
+    set((state) => ({
+      workbenchTabs: state.workbenchTabs.map((t) =>
+        t.id === tabId ? { ...t, ...patch } : t
+      ),
+    })),
+
+  openUrlInWorkbench: (url, title, filePath) => {
+    set((state) => {
+      const existing = state.workbenchTabs.find(
+        (t) =>
+          t.type === "url" &&
+          ((filePath && t.filePath === filePath) || (!filePath && t.url === url))
+      );
+      const displayTitle =
+        title ||
+        (filePath ? filePath.split(/[\\/]/).pop() : url.replace(/^https?:\/\//, "")) ||
+        "网页预览";
+
+      if (existing) {
+        return {
+          workbenchOpen: true,
+          activeWorkbenchTabId: existing.id,
+          workbenchTabs: state.workbenchTabs.map((t) =>
+            t.id === existing.id
+              ? {
+                  ...t,
+                  title: displayTitle,
+                  url,
+                  filePath: filePath || t.filePath,
+                  refreshKey: Date.now(),
+                }
+              : t
+          ),
+        };
+      }
+
+      // 如果当前激活的是空白新标签页，直接复用它
+      const activeTab = state.workbenchTabs.find((t) => t.id === state.activeWorkbenchTabId);
+      if (activeTab && activeTab.type === "newtab") {
+        return {
+          workbenchOpen: true,
+          workbenchTabs: state.workbenchTabs.map((t) =>
+            t.id === activeTab.id
+              ? {
+                  ...t,
+                  title: displayTitle,
+                  type: "url",
+                  url,
+                  filePath,
+                  viewMode: "preview",
+                  refreshKey: Date.now(),
+                }
+              : t
+          ),
+        };
+      }
+
+      const newId = `tab_url_${Date.now()}`;
+      return {
+        workbenchOpen: true,
+        activeWorkbenchTabId: newId,
+        workbenchTabs: [
+          ...state.workbenchTabs,
+          {
+            id: newId,
+            title: displayTitle,
+            type: "url",
+            url,
+            filePath,
+            viewMode: "preview",
+            refreshKey: Date.now(),
+          },
+        ],
+      };
+    });
+  },
+
+  openFileInWorkbench: (filePath, options) => {
+    const cleanPath = String(filePath || "").trim();
+    if (!cleanPath) return;
+    const lower = cleanPath.toLowerCase();
+
+    // 若是 HTML 网页且未强制指定看源码，优先以内置 Chromium 网页模式渲染
+    if ((lower.endsWith(".html") || lower.endsWith(".htm")) && options?.viewMode !== "code") {
+      const activeSess = get().sessions.find((s) => s.id === get().activeSessionId);
+      const workDir = activeSess?.workDir || "";
+      const absPath =
+        cleanPath.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(cleanPath)
+          ? cleanPath
+          : workDir
+          ? `${workDir.replace(/\/+$/, "")}/${cleanPath.replace(/^\.?\//, "")}`
+          : cleanPath;
+      const localUrl = `local-media://local${encodeURI(absPath)}`;
+      get().openUrlInWorkbench(localUrl, cleanPath.split(/[\\/]/).pop(), absPath);
+      return;
+    }
+
+    set((state) => {
+      const shortName = cleanPath.split(/[\\/]/).pop() || cleanPath;
+      const existing = state.workbenchTabs.find((t) => t.type === "files");
+      const defaultMode =
+        options?.viewMode ||
+        (lower.endsWith(".md") ||
+        lower.endsWith(".markdown") ||
+        lower.endsWith(".svg") ||
+        lower.endsWith(".png") ||
+        lower.endsWith(".jpg") ||
+        lower.endsWith(".jpeg") ||
+        lower.endsWith(".webp") ||
+        lower.endsWith(".gif")
+          ? "preview"
+          : "code");
+
+      if (existing) {
+        return {
+          workbenchOpen: true,
+          activeWorkbenchTabId: existing.id,
+          workbenchTabs: state.workbenchTabs.map((t) =>
+            t.id === existing.id
+              ? {
+                  ...t,
+                  title: `文件 · ${shortName}`,
+                  filePath: cleanPath,
+                  lineNumber: options?.line,
+                  viewMode: defaultMode,
+                  refreshKey: Date.now(),
+                }
+              : t
+          ),
+        };
+      }
+
+      const activeTab = state.workbenchTabs.find((t) => t.id === state.activeWorkbenchTabId);
+      if (activeTab && activeTab.type === "newtab") {
+        return {
+          workbenchOpen: true,
+          workbenchTabs: state.workbenchTabs.map((t) =>
+            t.id === activeTab.id
+              ? {
+                  ...t,
+                  title: `文件 · ${shortName}`,
+                  type: "files",
+                  filePath: cleanPath,
+                  lineNumber: options?.line,
+                  viewMode: defaultMode,
+                  refreshKey: Date.now(),
+                }
+              : t
+          ),
+        };
+      }
+
+      const newId = `tab_files_${Date.now()}`;
+      return {
+        workbenchOpen: true,
+        activeWorkbenchTabId: newId,
+        workbenchTabs: [
+          ...state.workbenchTabs,
+          {
+            id: newId,
+            title: `文件 · ${shortName}`,
+            type: "files",
+            filePath: cleanPath,
+            lineNumber: options?.line,
+            viewMode: defaultMode,
+            refreshKey: Date.now(),
+          },
+        ],
+      };
+    });
+  },
+
+  openDiffInWorkbench: (filePath) => {
+    set((state) => {
+      const existing = state.workbenchTabs.find((t) => t.type === "changes");
+      if (existing) {
+        return {
+          workbenchOpen: true,
+          activeWorkbenchTabId: existing.id,
+          workbenchTabs: state.workbenchTabs.map((t) =>
+            t.id === existing.id
+              ? {
+                  ...t,
+                  filePath: filePath || t.filePath,
+                  refreshKey: Date.now(),
+                }
+              : t
+          ),
+        };
+      }
+
+      const activeTab = state.workbenchTabs.find((t) => t.id === state.activeWorkbenchTabId);
+      if (activeTab && activeTab.type === "newtab") {
+        return {
+          workbenchOpen: true,
+          workbenchTabs: state.workbenchTabs.map((t) =>
+            t.id === activeTab.id
+              ? {
+                  ...t,
+                  title: "代码变更",
+                  type: "changes",
+                  filePath,
+                  refreshKey: Date.now(),
+                }
+              : t
+          ),
+        };
+      }
+
+      const newId = `tab_changes_${Date.now()}`;
+      return {
+        workbenchOpen: true,
+        activeWorkbenchTabId: newId,
+        workbenchTabs: [
+          ...state.workbenchTabs,
+          {
+            id: newId,
+            title: "代码变更",
+            type: "changes",
+            filePath,
+            refreshKey: Date.now(),
+          },
+        ],
+      };
+    });
+  },
+
+  openTerminalInWorkbench: () => {
+    set((state) => {
+      const existing = state.workbenchTabs.find((t) => t.type === "terminal");
+      if (existing) {
+        return {
+          workbenchOpen: true,
+          activeWorkbenchTabId: existing.id,
+        };
+      }
+
+      const activeTab = state.workbenchTabs.find((t) => t.id === state.activeWorkbenchTabId);
+      if (activeTab && activeTab.type === "newtab") {
+        return {
+          workbenchOpen: true,
+          workbenchTabs: state.workbenchTabs.map((t) =>
+            t.id === activeTab.id
+              ? {
+                  ...t,
+                  title: "集成终端",
+                  type: "terminal",
+                  refreshKey: Date.now(),
+                }
+              : t
+          ),
+        };
+      }
+
+      const newId = `tab_term_${Date.now()}`;
+      return {
+        workbenchOpen: true,
+        activeWorkbenchTabId: newId,
+        workbenchTabs: [
+          ...state.workbenchTabs,
+          {
+            id: newId,
+            title: "集成终端",
+            type: "terminal",
+            refreshKey: Date.now(),
+          },
+        ],
+      };
+    });
+  },
+
+  setSessionPermissionMode: async (sessionId, mode) => {
+    set((state) => ({
+      defaultPermissionMode: mode,
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId ? { ...s, permissionMode: mode, updatedAt: Date.now() } : s
+      ),
+    }));
+    if (window.electronAPI?.dbUpdateSessionPermissionMode) {
+      try {
+        await window.electronAPI.dbUpdateSessionPermissionMode(sessionId, mode);
+      } catch (err) {
+        console.error("更新会话权限模式失败:", err);
+      }
+    }
+    if (window.electronAPI?.setConfig) {
+      try {
+        await window.electronAPI.setConfig("default_permission_mode", mode);
+      } catch (err) {
+        console.error("保存默认权限模式失败:", err);
       }
     }
   },
@@ -286,6 +708,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   initStore: async () => {
     if (!window.electronAPI) return;
+    if ((get() as any)._storeInitialized && get().sessions.length > 0) {
+      return;
+    }
+    (get() as any)._storeInitialized = true;
     try {
       await get().fetchModels();
       await get().fetchWorkspaces();
@@ -357,6 +783,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           updatedAt: s.updated_at || s.updatedAt,
           model: s.model || "",
           workDir: s.work_dir || s.workDir || undefined,
+          permissionMode: (s.permission_mode || s.permissionMode || "auto-sandbox") as PermissionMode,
           archived: !!s.archived,
         })),
         activeSessionId: activeId,
@@ -382,11 +809,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
       }
 
+      // 注册会话权限模式热更新监听 (例如用户在询问弹窗中点击「切换为工作区沙箱并允许」)
+      if (
+        window.electronAPI?.onSessionPermissionModeUpdated &&
+        !(get() as any)._permModeListenerAttached
+      ) {
+        (get() as any)._permModeListenerAttached = true;
+        window.electronAPI.onSessionPermissionModeUpdated(
+          ({ sessionId, permissionMode }: { sessionId: string; permissionMode: PermissionMode }) => {
+            set((state) => ({
+              defaultPermissionMode: permissionMode,
+              sessions: state.sessions.map((s) =>
+                s.id === sessionId ? { ...s, permissionMode } : s
+              ),
+            }));
+          }
+        );
+      }
+
       if (window.electronAPI?.getConfig) {
         try {
-          const savedStyle = await window.electronAPI.getConfig("step_display_style");
-          if (savedStyle === "detailed" || savedStyle === "compact") {
-            set({ stepDisplayStyle: savedStyle });
+          const savedPermMode = await window.electronAPI.getConfig("default_permission_mode");
+          if (
+            savedPermMode === "plan" ||
+            savedPermMode === "auto-sandbox" ||
+            savedPermMode === "ask" ||
+            savedPermMode === "full-access"
+          ) {
+            set({ defaultPermissionMode: savedPermMode });
+          }
+          const savedAutoOpen = await window.electronAPI.getConfig("auto_open_html_outputs");
+          if (savedAutoOpen === "false") {
+            set({ autoOpenHtmlOutputs: false });
           }
         } catch (e) {
           console.error("加载步骤风格失败:", e);
@@ -407,12 +861,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     );
     const fallbackModel = usableModels[0]?.id || chatModels[0]?.id || "";
 
-    const newSession = {
+    const newSession: Session = {
       id: newId,
       title: "新的 Agent 会话",
       updatedAt: Date.now(),
       model: options?.model || fallbackModel,
       workDir: options?.workDir || undefined,
+      permissionMode: get().defaultPermissionMode || "auto-sandbox",
     };
 
     try {
@@ -461,12 +916,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       "";
 
     const newId = crypto.randomUUID();
-    const newSession = {
+    const newSession: Session = {
       id: newId,
       title: "新的 Agent 会话",
       updatedAt: Date.now(),
       model,
       workDir: workDir || undefined,
+      permissionMode:
+        workspaceSessions[0]?.permissionMode ||
+        get().defaultPermissionMode ||
+        "auto-sandbox",
     };
 
     try {
@@ -518,13 +977,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         set((state) => ({
           activeSessionId: id,
+          contextMetrics: state.contextMetricsBySession[id] || null,
           messages: { ...state.messages, [id]: mappedMsgs }
         }));
       } catch (err) {
         console.error("获取消息历史失败:", err);
       }
     } else {
-      set({ activeSessionId: id });
+      set((state) => ({
+        activeSessionId: id,
+        contextMetrics: state.contextMetricsBySession[id] || null,
+      }));
     }
 
     get().refreshOutputs(id);
@@ -775,7 +1238,66 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  setContextMetrics: (metrics) => set({ contextMetrics: metrics }),
+  setSessionGenerating: (sessionId, isGenerating) =>
+    set((state) => ({
+      generatingBySession: {
+        ...state.generatingBySession,
+        [sessionId]: isGenerating,
+      },
+    })),
+
+  upsertSessionToolCall: (sessionId, status) =>
+    set((state) => {
+      const prev = state.toolCallsBySession[sessionId] || [];
+      const matched = prev.some((t) => t.tool === status.tool && t.callId && t.callId === status.callId);
+      const next = matched
+        ? prev.map((t) => (t.tool === status.tool && t.callId === status.callId ? status : t))
+        : [...prev, status];
+      return {
+        toolCallsBySession: {
+          ...state.toolCallsBySession,
+          [sessionId]: next,
+        },
+      };
+    }),
+
+  clearSessionToolCalls: (sessionId) =>
+    set((state) => ({
+      toolCallsBySession: {
+        ...state.toolCallsBySession,
+        [sessionId]: [],
+      },
+    })),
+
+  setSessionTodos: (sessionId, todos) =>
+    set((state) => ({
+      todosBySession: {
+        ...state.todosBySession,
+        [sessionId]: Array.isArray(todos) ? todos : [],
+      },
+    })),
+
+  setSessionPermission: (sessionId, perm) =>
+    set((state) => ({
+      permissionBySession: {
+        ...state.permissionBySession,
+        [sessionId]: perm,
+      },
+    })),
+
+  setContextMetrics: (metrics, sessionId) =>
+    set((state) => {
+      const targetId = sessionId || state.activeSessionId;
+      const nextBySession = targetId
+        ? { ...state.contextMetricsBySession, [targetId]: metrics }
+        : state.contextMetricsBySession;
+      const shouldUpdateCurrent = !sessionId || sessionId === state.activeSessionId;
+      return {
+        contextMetricsBySession: nextBySession,
+        ...(shouldUpdateCurrent ? { contextMetrics: metrics } : {}),
+      };
+    }),
+
   setLastCompaction: (data) => set({ lastCompaction: data }),
 
   refreshOutputs: async (sessionId) => {
@@ -801,12 +1323,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   refreshMcpAndSkills: async (workDir) => {
     if (!window.electronAPI) return;
     try {
-      const [mcps, skills, tools] = await Promise.all([
+      const [mcps, skills, subagents, tools] = await Promise.all([
         window.electronAPI.getMcpServers ? window.electronAPI.getMcpServers(workDir) : [],
         window.electronAPI.getSkills ? window.electronAPI.getSkills(workDir) : [],
+        window.electronAPI.getSubagents ? window.electronAPI.getSubagents(workDir) : [],
         window.electronAPI.getTools ? window.electronAPI.getTools() : [],
       ]);
-      set({ mcpServers: mcps || [], skills: skills || [] });
+      set({ mcpServers: mcps || [], skills: skills || [], subagents: subagents || [] });
 
       // 联动重算 ContextMetrics
       const activeSessionId = get().activeSessionId;

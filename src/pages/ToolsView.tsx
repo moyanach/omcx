@@ -10,16 +10,19 @@ import {
   FolderGit2,
   Globe,
   Power,
+  Bot,
+  Shield,
 } from 'lucide-react';
-import { useChatStore, SkillItem } from '@/stores/chatStore';
+import { useChatStore, SkillItem, SubagentItem } from '@/stores/chatStore';
 
 export const ToolsView: React.FC = () => {
-  const { skills, mcpServers, refreshMcpAndSkills, sessions, activeSessionId } = useChatStore();
+  const { skills, mcpServers, subagents, refreshMcpAndSkills, sessions, activeSessionId } = useChatStore();
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
-  const [activeTab, setActiveTab] = useState<'skills' | 'mcp'>('skills');
+  const [activeTab, setActiveTab] = useState<'skills' | 'subagents' | 'mcp'>('skills');
   const [skillFilter, setSkillFilter] = useState<'all' | 'project' | 'global'>('all');
   const [inspectingSkill, setInspectingSkill] = useState<SkillItem | null>(null);
+  const [inspectingSubagent, setInspectingSubagent] = useState<SubagentItem | null>(null);
   const [copied, setCopied] = useState(false);
 
   // 技能次级筛选
@@ -74,22 +77,26 @@ export const ToolsView: React.FC = () => {
       {/* 主工作台内容区 */}
       <div className='flex-1 overflow-y-auto p-6 custom-scrollbar'>
         <div className='flex flex-col gap-5 max-w-6xl mx-auto'>
-          {/* 内容区顶栏：左侧分类说明，右上角放双 Tab */}
+          {/* 内容区顶栏：左侧分类说明，右上角放三 Tab */}
           <div className='flex items-center justify-between border-b border-[#242424] pb-4'>
             <div>
               <h2 className='text-sm font-bold text-neutral-100'>
                 {activeTab === 'skills'
                   ? '声明式技能扩展 (Declared Skills)'
+                  : activeTab === 'subagents'
+                  ? '专家子代理与并行分治引擎 (Autonomous & Parallel Subagents)'
                   : '模型上下文协议服务节点 (Model Context Protocol Servers)'}
               </h2>
               <p className='text-[11px] text-neutral-500 mt-0.5'>
                 {activeTab === 'skills'
                   ? '支持 ~/.agents/skills 与当前项目 .agents/skills，任务匹配时按需读取指令'
+                  : activeTab === 'subagents'
+                  ? '主 Agent 根据任务复杂度自动调度或并行扇出 (Fan-out)，同时支持 ~/.omcx/agents/*.md 自定义扩展与 @agent: 点名'
                   : '标准协议驱动，完全兼容 Claude Desktop / Cursor 配置文件 (~/.omcx/mcp.json)'}
               </p>
             </div>
 
-            {/* 双 Tab 切换器 (置于渲染内容右上角) */}
+            {/* 三 Tab 切换器 (置于渲染内容右上角) */}
             <div className='flex items-center gap-1.5 bg-[#181818] p-1 rounded-xl border border-[#282828] flex-shrink-0'>
               <button
                 onClick={() => setActiveTab('skills')}
@@ -106,6 +113,23 @@ export const ToolsView: React.FC = () => {
                 <span>技能扩展 (Skills)</span>
                 <span className='px-1.5 py-0.2 rounded-full text-[10px] bg-white/20 font-mono'>
                   {skills.length}
+                </span>
+              </button>
+              <button
+                onClick={() => setActiveTab('subagents')}
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs transition-all ${
+                  activeTab === 'subagents'
+                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                    : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
+                }`}
+              >
+                <Bot
+                  size={14}
+                  className={activeTab === 'subagents' ? 'text-sky-200' : 'text-sky-400'}
+                />
+                <span>子代理 (Subagents)</span>
+                <span className='px-1.5 py-0.2 rounded-full text-[10px] bg-white/20 font-mono'>
+                  {subagents.length}
                 </span>
               </button>
               <button
@@ -248,6 +272,91 @@ export const ToolsView: React.FC = () => {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* ═════════ 1.5 SUBAGENTS 视图 ═════════ */}
+        {activeTab === 'subagents' && (
+          <div className='flex flex-col gap-4'>
+            <div className='p-3.5 rounded-2xl bg-[#181818] border border-[#282828] flex items-center justify-between gap-4'>
+              <div className='flex items-center gap-3 min-w-0'>
+                <div className='w-8 h-8 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 flex-shrink-0'>
+                  <Bot size={16} />
+                </div>
+                <div className='min-w-0'>
+                  <div className='text-xs font-semibold text-neutral-200'>
+                    支持「主 Agent 自主判断 + 零预设动态生成 + 多路并行 Fan-out」
+                  </div>
+                  <div className='text-[11px] text-neutral-500 truncate'>
+                    复杂检索或多模块任务时，主 Agent 会自动通过 dispatch_subagent 单路或多路并发委派；你也可在 ~/.omcx/agents/*.md 定义专属模板或在输入框用 @agent: 点名。
+                  </div>
+                </div>
+              </div>
+              <span className='text-[11px] text-neutral-500 flex-shrink-0'>
+                点击卡片查看系统提示词
+              </span>
+            </div>
+
+            <div className='grid grid-cols-1 md:grid-cols-2 gap-3.5'>
+              {subagents.map((ag) => (
+                <div
+                  key={ag.id}
+                  onClick={() => setInspectingSubagent(ag)}
+                  className='p-4 rounded-2xl bg-[#1c1c1c] border border-[#292929] hover:border-[#383838] hover:bg-[#202020] transition-all duration-150 cursor-pointer flex flex-col justify-between gap-3 group shadow-sm'
+                >
+                  <div className='flex flex-col gap-2'>
+                    <div className='flex items-center justify-between gap-2'>
+                      <div className='flex items-center gap-2 min-w-0'>
+                        <Bot size={15} className='text-sky-400 flex-shrink-0' />
+                        <span className='font-bold text-sm text-neutral-100 group-hover:text-sky-400 transition-colors truncate'>
+                          {ag.name}
+                        </span>
+                        <code className='text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#252525] text-sky-300 border border-[#333]'>
+                          @{ag.id}
+                        </code>
+                      </div>
+
+                      <div className='flex items-center gap-1.5 flex-shrink-0'>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-mono border flex items-center gap-1 ${
+                            ag.readOnly
+                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
+                              : 'bg-amber-500/10 text-amber-300 border-amber-500/25'
+                          }`}
+                        >
+                          <Shield size={10} />
+                          <span>{ag.readOnly ? '只读安全' : '完整读写'}</span>
+                        </span>
+                        <span className='px-2 py-0.5 rounded-full text-[10px] font-mono uppercase bg-[#262626] text-neutral-400 border border-[#333]'>
+                          {ag.scope || 'builtin'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <p className='text-xs text-neutral-400 line-clamp-2 leading-relaxed'>
+                      {ag.description}
+                    </p>
+                  </div>
+
+                  <div className='space-y-2 pt-2 border-t border-[#262626]'>
+                    <div className='flex items-center justify-between text-[10.5px] font-mono text-neutral-500'>
+                      <span>模型策略: {ag.modelTier === 'lite' ? 'Lite (高速轻量优先)' : 'Inherit (继承主模型)'}</span>
+                      <span>最大轮次: {ag.maxRounds || 10} 轮</span>
+                    </div>
+                    <div className='flex items-center gap-1.5 flex-wrap'>
+                      {(ag.tools || []).map((t) => (
+                        <span
+                          key={t}
+                          className='px-2 py-0.5 rounded-md bg-[#252525] border border-[#303030] text-[10px] font-mono text-neutral-300'
+                        >
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -416,6 +525,79 @@ export const ToolsView: React.FC = () => {
             <div className='flex-1 overflow-y-auto p-5 custom-scrollbar bg-[#141414]'>
               <pre className='text-xs font-mono text-neutral-200 whitespace-pre-wrap leading-relaxed select-text'>
                 {inspectingSkill.prompt || '该技能未包含额外的提示词正文'}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═════════ 4. SUBAGENT 详情弹窗 ═════════ */}
+      {inspectingSubagent && (
+        <div
+          className='fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-6'
+          onClick={() => setInspectingSubagent(null)}
+        >
+          <div
+            className='w-full max-w-2xl bg-[#1c1c1c] border border-[#333333] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]'
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className='px-5 py-3.5 border-b border-[#282828] flex items-center justify-between flex-shrink-0'>
+              <div className='flex items-center gap-2 min-w-0'>
+                <Bot size={16} className='text-sky-400 flex-shrink-0' />
+                <h3 className='font-bold text-sm text-neutral-100 truncate'>
+                  {inspectingSubagent.name}
+                </h3>
+                <code className='px-2 py-0.5 rounded text-[10px] font-mono bg-[#252525] text-sky-300 border border-[#333]'>
+                  @agent:{inspectingSubagent.id}
+                </code>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                    inspectingSubagent.readOnly
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
+                      : 'bg-amber-500/10 text-amber-300 border-amber-500/25'
+                  }`}
+                >
+                  {inspectingSubagent.readOnly ? '只读安全' : '完整读写'}
+                </span>
+              </div>
+
+              <div className='flex items-center gap-1.5 flex-shrink-0'>
+                <button
+                  onClick={() => handleCopyPrompt(inspectingSubagent.systemPrompt || '')}
+                  className='px-2.5 py-1 rounded-lg bg-[#252525] hover:bg-[#2f2f2f] text-neutral-300 text-xs flex items-center gap-1 transition-colors'
+                  title='复制系统提示词'
+                >
+                  {copied ? <Check size={12} className='text-emerald-400' /> : <Copy size={12} />}
+                  <span>{copied ? '已复制' : '复制'}</span>
+                </button>
+                <button
+                  onClick={() => setInspectingSubagent(null)}
+                  className='p-1 rounded-lg text-neutral-400 hover:text-white hover:bg-white/[0.08] transition-colors'
+                  title='关闭'
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            </div>
+
+            <div className='px-5 py-3 border-b border-[#262626] bg-[#171717] flex flex-col gap-2 flex-shrink-0 text-xs'>
+              <p className='text-neutral-300 leading-relaxed'>{inspectingSubagent.description}</p>
+              <div className='flex items-center gap-1.5 flex-wrap pt-1'>
+                <span className='text-[10px] text-neutral-500'>授权工具白名单:</span>
+                {(inspectingSubagent.tools || []).map((t) => (
+                  <span
+                    key={t}
+                    className='px-2 py-0.5 rounded-md bg-[#222222] border border-[#2f2f2f] text-[10px] font-mono text-neutral-300'
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div className='flex-1 overflow-y-auto p-5 custom-scrollbar bg-[#141414]'>
+              <pre className='text-xs font-mono text-neutral-200 whitespace-pre-wrap leading-relaxed select-text'>
+                {inspectingSubagent.systemPrompt || '无独立系统提示词'}
               </pre>
             </div>
           </div>

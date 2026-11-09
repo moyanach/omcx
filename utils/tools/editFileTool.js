@@ -5,35 +5,13 @@
  * 1. 精确匹配：在目标文件中定位唯一匹配的 old_string，执行原子化替换
  * 2. 唯一性防呆：若 old_string 匹配到多处且未开启 replace_all，抛出警告要求提供更多上下文
  * 3. 容错诊断：若未找到匹配，诊断并提示就近行号与内容，指导 Agent 快速自我修复
+ * 4. 沙箱与权限联动：遵循 plan 只读拦截、ask 写入确认、受保护配置拦截与 realpath 校验
  */
 
 const fs = require("fs");
-const path = require("path");
 const { z } = require("zod");
 const { StructuredTool } = require("@langchain/core/tools");
-
-function getProjectRoot() {
-  const candidates = [
-    path.join(__dirname, "..", ".."),
-    process.cwd(),
-  ];
-  for (const dir of candidates) {
-    const pkg = path.join(dir, "package.json");
-    if (fs.existsSync(pkg)) return dir;
-  }
-  return path.resolve(__dirname, "..", "..");
-}
-
-const DEFAULT_ROOT = getProjectRoot();
-
-function resolveRoot(workDir) {
-  if (workDir && fs.existsSync(workDir)) {
-    return path.resolve(workDir);
-  }
-  return DEFAULT_ROOT;
-}
-
-const { resolveWorkspacePath } = require("./pathResolver");
+const { checkSafePath } = require("./fileTools");
 
 class EditFileTool extends StructuredTool {
   constructor() {
@@ -48,17 +26,34 @@ class EditFileTool extends StructuredTool {
     });
   }
 
-  async _call({ path: filePath, old_string, new_string, replace_all = false, __workDir, __allowedFolders, __checkPermission }) {
-    const { resolvedPath: targetPath, isExternal } = resolveWorkspacePath(filePath, __workDir, __allowedFolders);
-
-    if (isExternal && typeof __checkPermission === "function") {
-      const isAllowed = await __checkPermission(targetPath, "精准修改");
-      if (!isAllowed) {
-        return JSON.stringify({
-          success: false,
-          error: `用户已拒绝授权修改工作空间外部文件: ${targetPath}`,
-        });
-      }
+  async _call({
+    path: filePath,
+    old_string,
+    new_string,
+    replace_all = false,
+    __workDir,
+    __allowedFolders,
+    __checkPermission,
+    __toolContext,
+  }) {
+    let targetPath;
+    try {
+      targetPath = await checkSafePath(
+        filePath,
+        __workDir,
+        __allowedFolders,
+        __checkPermission,
+        "精准修改",
+        {
+          mode: "write",
+          toolContext: __toolContext,
+        }
+      );
+    } catch (err) {
+      return JSON.stringify({
+        success: false,
+        error: err.message,
+      });
     }
 
     if (!fs.existsSync(targetPath)) {

@@ -3,7 +3,9 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("electronAPI", {
   // ─── 文件系统与工作区 ──────────────────────────────
   showInFolder: (filePath) => ipcRenderer.send("show-in-folder", filePath),
+  openExternalUrl: (targetUrl) => ipcRenderer.send("open-external-url", targetUrl),
   selectSaveDirectory: () => ipcRenderer.invoke("select-save-directory"),
+  selectBackgroundImage: () => ipcRenderer.invoke("select-background-image"),
   dialogSelectWorkDirectory: () => ipcRenderer.invoke("dialog-select-work-directory"),
   getConfig: (key) => ipcRenderer.invoke("get-config", key),
   setConfig: (key, value) => ipcRenderer.invoke("set-config", key, value),
@@ -22,6 +24,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   dbDeleteSession: (id) => ipcRenderer.invoke("db-delete-session", id),
   dbGetSessionWorkDir: (id) => ipcRenderer.invoke("db-get-session-work-dir", id),
   dbUpdateSessionWorkDir: (id, workDir) => ipcRenderer.invoke("db-update-session-work-dir", id, workDir),
+  dbUpdateSessionPermissionMode: (id, permissionMode) =>
+    ipcRenderer.invoke("db-update-session-permission-mode", { id, permissionMode }),
   dbGetMessages: (sessionId) => ipcRenderer.invoke("db-get-messages", sessionId),
   dbAddMessage: (message) => ipcRenderer.invoke("db-add-message", message),
   dbDeleteMessagesAfter: (sessionId, timestamp) =>
@@ -33,10 +37,37 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getMcpServers: (workDir) => ipcRenderer.invoke("get-mcp-servers", workDir),
   saveMcpServers: (servers) => ipcRenderer.invoke("save-mcp-servers", servers),
   getSkills: (workDir) => ipcRenderer.invoke("get-skills", workDir),
+  getSubagents: (workDir) => ipcRenderer.invoke("get-subagents", workDir),
   getMemories: (workDir) => ipcRenderer.invoke("get-memories", workDir),
   getSessionOutputs: (sessionId) => ipcRenderer.invoke("get-session-outputs", sessionId),
   getContextMetrics: (params) => ipcRenderer.invoke("get-context-metrics", params),
   getWorkspaceGitStatus: (workDir) => ipcRenderer.invoke("get-workspace-git-status", workDir),
+  getWorkspaceFileDiff: (workDir, filePath) =>
+    ipcRenderer.invoke("workspace-git-diff", { workDir, filePath }),
+  commitWorkspaceChanges: (workDir, message) =>
+    ipcRenderer.invoke("workspace-git-commit", { workDir, message }),
+  listWorkspaceDir: (workDir, dirPath) =>
+    ipcRenderer.invoke("workspace-list-dir", { workDir, dirPath }),
+  readWorkspaceFile: (workDir, filePath, maxChars) =>
+    ipcRenderer.invoke("workspace-read-file", { workDir, filePath, maxChars }),
+  runTerminalCommand: (params, onStream) => {
+    const cmdId = params?.cmdId || `term_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const channel = `terminal-stream-${cmdId}`;
+    const handler = (event, payload) => {
+      if (onStream) onStream(payload);
+    };
+    if (onStream) {
+      ipcRenderer.on(channel, handler);
+    }
+    return ipcRenderer
+      .invoke("terminal-run-command", { ...params, cmdId })
+      .finally(() => {
+        if (onStream) {
+          ipcRenderer.removeListener(channel, handler);
+        }
+      });
+  },
+  killTerminalCommand: (cmdId) => ipcRenderer.invoke("terminal-kill-command", cmdId),
   getWorkspaceFileIndex: (workDir) => ipcRenderer.invoke("get-workspace-file-index", workDir),
   getRecentProjects: () => ipcRenderer.invoke("get-recent-projects"),
   addRecentProject: (proj) => ipcRenderer.invoke("add-recent-project", proj),
@@ -48,7 +79,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getTools: () => ipcRenderer.invoke("get-tools"),
   executeTool: (name, args) => ipcRenderer.invoke("execute-tool", { name, args }),
 
-  respondPermission: (id, allow) => ipcRenderer.send("chat-permission-response", { id, allow }),
+  respondPermission: (id, allow, decision) =>
+    ipcRenderer.send("chat-permission-response", { id, allow, decision }),
   cancelChat: (sessionId) => ipcRenderer.send("chat-cancel", sessionId),
 
   // ─── 流式 Agent 调用 ───────────────────────────────
@@ -66,7 +98,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     onOutputsUpdated,
     onPermissionRequest,
     onTodosUpdate,
-    onCompaction
+    onCompaction,
+    permissionMode
   ) => {
     const dataChannel = `chat-stream-data-${sessionId}`;
     const endChannel = `chat-stream-end-${sessionId}`;
@@ -109,8 +142,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const metricsHandler = (e, metrics) => {
       if (onContextMetrics) onContextMetrics(metrics);
     };
-    const outputsHandler = () => {
-      if (onOutputsUpdated) onOutputsUpdated();
+    const outputsHandler = (e, outputItem) => {
+      if (onOutputsUpdated) onOutputsUpdated(outputItem);
     };
     const permHandler = (e, permData) => {
       if (onPermissionRequest) onPermissionRequest(permData);
@@ -132,8 +165,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.once(endChannel, endHandler);
     ipcRenderer.once(errorChannel, errorHandler);
 
-    // 触发主进程的流式 Agent 请求 (显式透传当前绑定的工作空间目录)
-    ipcRenderer.send("chat-request", { sessionId, messages, model, enableTools, workDir });
+    // 触发主进程的流式 Agent 请求 (显式透传当前绑定的工作空间目录与权限模式)
+    ipcRenderer.send("chat-request", {
+      sessionId,
+      messages,
+      model,
+      enableTools,
+      workDir,
+      permissionMode,
+    });
   },
 
   // ─── 会话标题异步更新监听 ─────────────────────────
@@ -141,5 +181,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (event, data) => callback(data);
     ipcRenderer.on("session-title-updated", handler);
     return () => ipcRenderer.removeListener("session-title-updated", handler);
+  },
+
+  // ─── 会话权限模式异步更新监听 ─────────────────────
+  onSessionPermissionModeUpdated: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("session-permission-mode-updated", handler);
+    return () => ipcRenderer.removeListener("session-permission-mode-updated", handler);
   },
 });

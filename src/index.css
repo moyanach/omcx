@@ -1,3 +1,4 @@
+@import "katex/dist/katex.min.css";
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -14,17 +15,18 @@
 }
 
 /* ─── 暗色主题（默认） ─── */
-html[data-theme="dark"] {
+html[data-theme="dark"],
+:root {
   color-scheme: dark;
   color: rgba(255, 255, 255, 0.87);
-  background-color: #1a1a1a;
+  background-color: #141414;
 
-  --app-bg: #1a1a1a;
+  --app-bg: #141414;
   --surface: #202020;
   --surface-muted: #151515;
   --assistant-bubble: #2a2a2a;
-  --border: rgba(148, 163, 184, 0.22);
-  --border-strong: rgba(148, 163, 184, 0.32);
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.10);
   --text-primary: #f3f4f6;
   --text-secondary: #9ca3af;
   --text-muted: #6b7280;
@@ -42,13 +44,198 @@ html[data-theme="dark"] {
   /* Sidebar */
   --sidebar-bg: #111111;
   --sidebar-hover: rgba(255, 255, 255, 0.08);
+
+  /* 语义化分层表面（会话区 / 监控栏 / 代码块 / Diff 浮层） */
+  --ui-app-bg: #121212;
+  --ui-panel-bg: #141414;
+  --ui-stage-wrap-bg: #131313;
+  --ui-stage-bg: #171717;
+  --ui-card-bg: #1b1b1b;
+  --ui-card-header-bg: #1e1e1e;
+  --ui-card-inner-bg: #222222;
+  --ui-block-bg: rgba(255, 255, 255, 0.022);
+  --ui-block-hover-bg: rgba(255, 255, 255, 0.038);
+  --ui-block-body-bg: rgba(0, 0, 0, 0.16);
+  --ui-bubble-assistant-bg: rgba(255, 255, 255, 0.024);
+  --ui-bubble-user-bg: rgba(255, 255, 255, 0.07);
+  --ui-input-bg: #1d1d1d;
+  --ui-input-hover-bg: #1f1f1f;
+  --ui-chip-bg: rgba(255, 255, 255, 0.04);
+  --ui-chip-hover-bg: rgba(255, 255, 255, 0.075);
+  --ui-popover-bg: #161616;
+  --ui-livebar-bg: rgba(22, 22, 22, 0.94);
+  --ui-code-bg: #121212;
+  --ui-code-header-bg: #181818;
+  --ui-code-subheader-bg: #151515;
+  --ui-terminal-bg: #0f0f10;
+
+  /* 隐约可见的发丝级边框与分割线 */
+  --ui-border-hairline: rgba(255, 255, 255, 0.05);
+  --ui-border-subtle: rgba(255, 255, 255, 0.085);
+  --ui-divider-hairline: rgba(255, 255, 255, 0.045);
+
+  /* 阴影 */
+  --ui-stage-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.45);
+  --ui-popover-shadow: 0 24px 56px -12px rgba(0, 0, 0, 0.8);
+
+  /* 文字与语义色 */
+  --ui-text-primary: #f3f4f6;
+  --ui-text-secondary: #d4d4d8;
+  --ui-text-muted: #9ca3af;
+  --ui-text-faint: #71717a;
+
+  --ui-accent-blue: #60a5fa;
+  --ui-accent-blue-soft: rgba(59, 130, 246, 0.12);
+  --ui-accent-blue-border: rgba(59, 130, 246, 0.25);
+
+  --ui-accent-emerald: #34d399;
+  --ui-accent-emerald-soft: rgba(16, 185, 129, 0.12);
+  --ui-accent-emerald-border: rgba(16, 185, 129, 0.22);
+
+  --ui-accent-rose: #fb7185;
+  --ui-accent-rose-soft: rgba(244, 63, 94, 0.12);
+  --ui-accent-rose-border: rgba(244, 63, 94, 0.22);
+
+  --ui-accent-amber: #fbbf24;
+  --ui-accent-amber-soft: rgba(245, 158, 11, 0.12);
+  --ui-accent-amber-border: rgba(245, 158, 11, 0.22);
+
+  --ui-accent-purple: #c084fc;
+  --ui-accent-sky: #38bdf8;
+  --ui-accent-sky-soft: rgba(14, 165, 233, 0.12);
+  --ui-accent-sky-border: rgba(14, 165, 233, 0.24);
+
+  /* Diff 语义 */
+  --ui-diff-add-bg: rgba(16, 185, 129, 0.12);
+  --ui-diff-add-text: #d1fae5;
+  --ui-diff-del-bg: rgba(244, 63, 94, 0.12);
+  --ui-diff-del-text: #ffe4e6;
+  --ui-diff-empty-bg: rgba(255, 255, 255, 0.015);
+  --ui-diff-hunk-bg: rgba(59, 130, 246, 0.10);
+  --ui-diff-hunk-text: #93c5fd;
+
+  /* Markdown 细节 */
+  --md-link: #818cf8;
+  --md-link-hover: #6366f1;
+  --md-code-bg: rgba(255, 255, 255, 0.07);
+  --md-code-border: rgba(255, 255, 255, 0.07);
+  --md-code-text: #a5b4fc;
+  --md-blockquote-border: rgba(255, 255, 255, 0.14);
+}
+
+/* ─── 亮色主题 ─── */
+html[data-theme="light"] {
+  color-scheme: light;
+  color: #0f172a;
+  background-color: #f5f7fa;
+
+  --app-bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --assistant-bubble: #ffffff;
+  --border: rgba(15, 23, 42, 0.055);
+  --border-strong: rgba(15, 23, 42, 0.09);
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --accent-indigo: #4f46e5;
+  --accent-indigo-soft: rgba(79, 70, 229, 0.09);
+  --accent-violet: #7c3aed;
+  --accent-violet-soft: rgba(124, 58, 237, 0.09);
+  --accent-cyan: #0891b2;
+  --accent-cyan-soft: rgba(8, 145, 178, 0.09);
+  --accent-emerald: #059669;
+  --accent-emerald-soft: rgba(5, 150, 105, 0.09);
+  --accent-red: #dc2626;
+  --accent-red-soft: rgba(220, 38, 38, 0.09);
+
+  /* Sidebar */
+  --sidebar-bg: #f1f5f9;
+  --sidebar-hover: rgba(15, 23, 42, 0.05);
+
+  /* 语义化分层表面（纯净透亮，绝无灰蒙感） */
+  --ui-app-bg: #f5f7fa;
+  --ui-panel-bg: #f8fafc;
+  --ui-stage-wrap-bg: #f1f5f9;
+  --ui-stage-bg: #ffffff;
+  --ui-card-bg: #ffffff;
+  --ui-card-header-bg: #fafbfd;
+  --ui-card-inner-bg: #f8fafc;
+  --ui-block-bg: #f8fafc;
+  --ui-block-hover-bg: #f1f5f9;
+  --ui-block-body-bg: #ffffff;
+  --ui-bubble-assistant-bg: #fcfdff;
+  --ui-bubble-user-bg: #f1f5f9;
+  --ui-input-bg: #ffffff;
+  --ui-input-hover-bg: #ffffff;
+  --ui-chip-bg: rgba(15, 23, 42, 0.04);
+  --ui-chip-hover-bg: rgba(15, 23, 42, 0.075);
+  --ui-popover-bg: #ffffff;
+  --ui-livebar-bg: rgba(255, 255, 255, 0.95);
+  --ui-code-bg: #f8fafc;
+  --ui-code-header-bg: #f1f5f9;
+  --ui-code-subheader-bg: #f4f7fb;
+  --ui-terminal-bg: #f8fafc;
+
+  /* 隐约可见的发丝级边框与分割线 */
+  --ui-border-hairline: rgba(15, 23, 42, 0.055);
+  --ui-border-subtle: rgba(15, 23, 42, 0.095);
+  --ui-divider-hairline: rgba(15, 23, 42, 0.048);
+
+  /* 阴影 */
+  --ui-stage-shadow: 0 4px 20px -6px rgba(15, 23, 42, 0.06);
+  --ui-popover-shadow: 0 18px 46px -12px rgba(15, 23, 42, 0.16);
+
+  /* 文字与语义色（亮色下确保深色高对比可读性） */
+  --ui-text-primary: #0f172a;
+  --ui-text-secondary: #334155;
+  --ui-text-muted: #64748b;
+  --ui-text-faint: #94a3b8;
+
+  --ui-accent-blue: #2563eb;
+  --ui-accent-blue-soft: rgba(37, 99, 235, 0.08);
+  --ui-accent-blue-border: rgba(37, 99, 235, 0.18);
+
+  --ui-accent-emerald: #047857;
+  --ui-accent-emerald-soft: rgba(16, 185, 129, 0.10);
+  --ui-accent-emerald-border: rgba(5, 150, 105, 0.20);
+
+  --ui-accent-rose: #be123c;
+  --ui-accent-rose-soft: rgba(225, 29, 72, 0.08);
+  --ui-accent-rose-border: rgba(225, 29, 72, 0.18);
+
+  --ui-accent-amber: #b45309;
+  --ui-accent-amber-soft: rgba(217, 119, 6, 0.09);
+  --ui-accent-amber-border: rgba(217, 119, 6, 0.18);
+
+  --ui-accent-purple: #7e22ce;
+  --ui-accent-sky: #0369a1;
+  --ui-accent-sky-soft: rgba(2, 132, 199, 0.09);
+  --ui-accent-sky-border: rgba(2, 132, 199, 0.20);
+
+  /* Diff 语义（浅底深字，鲜明可读） */
+  --ui-diff-add-bg: rgba(16, 185, 129, 0.10);
+  --ui-diff-add-text: #065f46;
+  --ui-diff-del-bg: rgba(239, 68, 68, 0.085);
+  --ui-diff-del-text: #9f1239;
+  --ui-diff-empty-bg: rgba(15, 23, 42, 0.02);
+  --ui-diff-hunk-bg: rgba(37, 99, 235, 0.07);
+  --ui-diff-hunk-text: #1d4ed8;
+
+  /* Markdown 细节 */
+  --md-link: #4f46e5;
+  --md-link-hover: #4338ca;
+  --md-code-bg: rgba(15, 23, 42, 0.045);
+  --md-code-border: rgba(15, 23, 42, 0.06);
+  --md-code-text: #2563eb;
+  --md-blockquote-border: rgba(15, 23, 42, 0.12);
 }
 
 body {
   margin: 0;
   overflow: hidden;
-  background-color: #111111;
-  color: #f3f4f6;
+  background-color: var(--ui-app-bg);
+  color: var(--ui-text-primary);
 }
 
 /* ─── 主题变量工具类 ─── */
@@ -71,6 +258,14 @@ body {
 .theme-accent-emerald-soft { background-color: var(--accent-emerald-soft); }
 .theme-accent-red { color: var(--accent-red); }
 .theme-accent-red-soft { background-color: var(--accent-red-soft); }
+
+/* 工作台与全局 UI 语义别名类（自动跟随暗色/亮色主题） */
+.bg-ui-bg { background-color: var(--ui-stage-bg); }
+.bg-ui-panel { background-color: var(--ui-panel-bg); }
+.bg-ui-panel-2 { background-color: var(--ui-card-inner-bg); }
+.text-ui-text { color: var(--ui-text-primary); }
+.text-ui-muted { color: var(--ui-text-muted); }
+.text-ui-subtle { color: var(--ui-text-faint); }
 
 /* ─── 侧边栏容器 ─── */
 .sidebar-container {
@@ -139,7 +334,7 @@ body {
   line-height: 1.25;
   margin-top: 1.25rem;
   margin-bottom: 0.5rem;
-  color: #f3f4f6;
+  color: var(--ui-text-primary);
 }
 
 .markdown-body h1 { font-size: 1.4rem; }
@@ -147,39 +342,40 @@ body {
 .markdown-body h3 { font-size: 1.1rem; }
 
 .markdown-body a {
-  color: #818cf8;
+  color: var(--md-link);
   text-decoration: underline;
 }
 
 .markdown-body a:hover {
-  color: #6366f1;
+  color: var(--md-link-hover);
 }
 
-.markdown-body pre {
-  background-color: #121212;
+.markdown-body > pre {
+  background-color: var(--ui-code-bg);
   padding: 0.85rem;
   border-radius: 0.5rem;
   overflow-x: auto;
   margin-top: 0.75rem;
   margin-bottom: 0.75rem;
-  border: 1px solid rgba(75, 85, 99, 0.4);
+  border: 1px solid var(--ui-border-hairline);
 }
 
-.markdown-body code {
+.markdown-body :not(pre) > code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.85em;
-  background-color: rgba(255, 255, 255, 0.1);
-  padding: 0.15rem 0.35rem;
-  border-radius: 0.25rem;
-  color: #a5b4fc;
+  background-color: var(--md-code-bg);
+  border: 1px solid var(--md-code-border);
+  padding: 0.12rem 0.35rem;
+  border-radius: 0.3rem;
+  color: var(--md-code-text);
 }
 
-.markdown-body pre code {
-  background-color: transparent;
+.markdown-body pre code,
+.markdown-body pre span {
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
   padding: 0;
-  border-radius: 0;
-  color: #e5e7eb;
-  font-size: 0.9em;
 }
 
 .markdown-body ul {
@@ -202,9 +398,9 @@ body {
 }
 
 .markdown-body blockquote {
-  border-left: 4px solid #4b5563;
+  border-left: 3px solid var(--md-blockquote-border);
   padding-left: 1rem;
-  color: #9ca3af;
+  color: var(--ui-text-muted);
   margin-top: 0.75rem;
   margin-bottom: 0.75rem;
   font-style: italic;
@@ -219,21 +415,25 @@ body {
 
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid rgba(75, 85, 99, 0.4);
+  border: 1px solid var(--ui-divider-hairline);
   padding: 0.5rem 0.75rem;
 }
 
 .markdown-body th {
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: var(--ui-chip-bg);
   font-weight: 600;
   text-align: left;
 }
 
 .markdown-body hr {
   border: 0;
-  border-top: 1px solid rgba(75, 85, 99, 0.4);
+  border-top: 1px solid var(--ui-divider-hairline);
   margin-top: 1.25rem;
   margin-bottom: 1.25rem;
+}
+
+.ui-divide-hairline > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--ui-divider-hairline);
 }
 
 /* ─── 全局精致高对比滚动条 (确保可见且支持拖拽) ─── */
@@ -272,5 +472,56 @@ html[data-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb {
 }
 html[data-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #64748b !important;
+}
+
+/* ─── 实时状态条：会话进行中顺时针环绕边框光线特效 ─── */
+@property --omcx-border-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes omcx-border-spin {
+  to {
+    --omcx-border-angle: 360deg;
+  }
+}
+
+.omcx-livebar-glow {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--ui-livebar-bg), var(--ui-livebar-bg)) padding-box,
+    conic-gradient(
+      from var(--omcx-border-angle),
+      rgba(96, 165, 250, 0.10) 0deg,
+      rgba(96, 165, 250, 0.95) 45deg,
+      rgba(147, 197, 253, 1) 60deg,
+      rgba(96, 165, 250, 0.95) 75deg,
+      rgba(96, 165, 250, 0.10) 120deg,
+      rgba(96, 165, 250, 0.10) 360deg
+    ) border-box;
+  animation: omcx-border-spin 2.6s linear infinite;
+}
+
+/* 亮色主题下光线略加深以保证可见 */
+html[data-theme="light"] .omcx-livebar-glow {
+  background:
+    linear-gradient(var(--ui-livebar-bg), var(--ui-livebar-bg)) padding-box,
+    conic-gradient(
+      from var(--omcx-border-angle),
+      rgba(37, 99, 235, 0.12) 0deg,
+      rgba(37, 99, 235, 0.9) 45deg,
+      rgba(59, 130, 246, 1) 60deg,
+      rgba(37, 99, 235, 0.9) 75deg,
+      rgba(37, 99, 235, 0.12) 120deg,
+      rgba(37, 99, 235, 0.12) 360deg
+    ) border-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .omcx-livebar-glow {
+    animation: none;
+    border-color: var(--ui-accent-blue-border);
+  }
 }
 

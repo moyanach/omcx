@@ -1,6 +1,6 @@
 import React from "react";
 import { Session } from "../../stores/chatStore";
-import { PanelLeft, PanelRight, Compass } from "lucide-react";
+import { PanelLeft, Compass } from "lucide-react";
 
 interface Props {
   session: Session | undefined;
@@ -8,6 +8,7 @@ interface Props {
   onToggleLeftPanel: () => void;
   rightDrawerOpen: boolean;
   onToggleRightDrawer: () => void;
+  compact?: boolean;
 }
 
 const ChatHeader: React.FC<Props> = ({
@@ -16,51 +17,58 @@ const ChatHeader: React.FC<Props> = ({
   onToggleLeftPanel,
   rightDrawerOpen,
   onToggleRightDrawer,
+  compact = false,
 }) => {
   if (!session) return null;
 
   return (
-    <div className="h-[48px] border-b border-[#242424] bg-[#141414] flex-shrink-0 flex items-center justify-between px-5 titlebar-drag select-none z-30">
-      {/* 会话标题与当前工作区路径简略提示 */}
-      <div className="flex items-center gap-2.5 min-w-0">
-        <h1 className="font-semibold text-neutral-200 text-xs truncate max-w-[280px]">
+    <div className="h-[48px] border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-panel-bg)] flex-shrink-0 flex items-center justify-between gap-2 px-3.5 overflow-hidden titlebar-drag select-none z-30">
+      {/* 会话标题与当前工作区路径简略提示（弹性自适应截断，绝不挤压右侧按钮） */}
+      <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+        <h1
+          className="font-semibold text-[var(--ui-text-primary)] text-xs truncate min-w-0"
+          title={session.title}
+        >
           {session.title}
         </h1>
-        {session.workDir && (
-          <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#202020] text-neutral-400 font-mono border border-[#2e2e2e] truncate max-w-[240px]">
-            {session.workDir.split('/').pop()}
+        {session.workDir && !compact && (
+          <span
+            className="hidden sm:inline-block text-[10px] px-2 py-0.5 rounded-full bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] font-mono border border-[color:var(--ui-border-hairline)] truncate max-w-[160px] flex-shrink-0"
+            title={session.workDir}
+          >
+            {session.workDir.split("/").pop()}
           </span>
         )}
       </div>
 
-      {/* 顶部右上角：两个控制图标 (精准符合用户要求) */}
-      <div className="flex items-center gap-2 titlebar-no-drag">
-        {/* 开关 1: 控制左侧内容（工作空间 + Inspector 两大块） */}
+      {/* 顶部右上角：两个控制图标（固定不换行、不收缩） */}
+      <div className="flex items-center gap-1.5 titlebar-no-drag flex-shrink-0">
         <button
           onClick={onToggleLeftPanel}
-          className={`h-7 px-2 flex items-center gap-1.5 rounded-lg border text-xs font-medium transition-all ${
+          className={`h-7 px-2 flex items-center gap-1.5 rounded-lg border text-xs font-medium transition-all flex-shrink-0 whitespace-nowrap ${
             leftPanelOpen
-              ? "bg-blue-500/15 text-blue-400 border-blue-500/30"
-              : "bg-[#202020] text-neutral-400 border-[#2d2d2d] hover:text-white hover:bg-[#282828]"
+              ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border-[color:var(--ui-accent-blue-border)]"
+              : "bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border-[color:var(--ui-border-hairline)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)]"
           }`}
-          title={leftPanelOpen ? "收起左侧监控与工作空间" : "展开左侧监控与工作空间"}
+          title={leftPanelOpen ? "收起监控与工作空间" : "展开监控与工作空间"}
         >
-          <PanelLeft size={14} />
-          <span className="text-[11px]">监控</span>
+          <PanelLeft size={13.5} className="flex-shrink-0" />
+          <span className="text-[11px] whitespace-nowrap">监控</span>
         </button>
 
-        {/* 开关 2: 控制最右侧额外功能（集成浏览器、测试场景、终端与文件目录） */}
         <button
           onClick={onToggleRightDrawer}
-          className={`h-7 px-2 flex items-center gap-1.5 rounded-lg border text-xs font-medium transition-all ${
+          className={`h-7 px-2 flex items-center gap-1.5 rounded-lg border text-xs font-medium transition-all flex-shrink-0 whitespace-nowrap ${
             rightDrawerOpen
-              ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
-              : "bg-[#202020] text-neutral-400 border-[#2d2d2d] hover:text-white hover:bg-[#282828]"
+              ? "bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border-[color:var(--ui-accent-emerald-border)]"
+              : "bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border-[color:var(--ui-border-hairline)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)]"
           }`}
           title={rightDrawerOpen ? "收起右侧浏览器与工具" : "展开右侧浏览器与工具"}
         >
-          <Compass size={14} />
-          <span className="text-[11px]">浏览器/工具</span>
+          <Compass size={13.5} className="flex-shrink-0" />
+          <span className="text-[11px] whitespace-nowrap">
+            {compact ? "工具台" : "浏览器/工具"}
+          </span>
         </button>
       </div>
     </div>
