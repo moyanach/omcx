@@ -28,6 +28,7 @@ import {
   FileDiff,
   Pin,
   X,
+  ArrowDown,
 } from 'lucide-react';
 import { Message } from '../../stores/chatStore';
 import MarkdownContent, { ThinkingBlock } from '@/components/common/MarkdownContent';
@@ -1592,7 +1593,10 @@ const MessageBubble: React.FC<{
       : [];
 
   return (
-    <div className={`group flex w-full ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div
+      id={`msg-bubble-${msg.id}`}
+      className={`group flex w-full scroll-mt-6 ${isUser ? 'justify-end' : 'justify-start'}`}
+    >
       <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} w-full max-w-full min-w-0`}>
         {/* Assistant 回复顶端：用时展示指示条 */}
         {!isUser && durationFormatted && (
@@ -1732,6 +1736,69 @@ const MessageBubble: React.FC<{
   );
 };
 
+/**
+ * 消息快速定位点位导航轨 (Message Navigator Track)
+ * - 纯暗色工业级设计，对标参考图红框横杠点位
+ * - 鼠标悬停展示提问内容摘要 Tooltip
+ * - 点击平滑滚动至对应消息位置
+ * - 随滚动自动高亮当前视口的消息横杠
+ */
+interface MessageNavProps {
+  messages: Message[];
+  activeId: string | null;
+  onNavigate: (id: string) => void;
+}
+
+const MessageNavigator: React.FC<MessageNavProps> = ({ messages, activeId, onNavigate }) => {
+  // 筛选提问或对话节点 (至少 2 轮对话才展示导航轨，避免单条消息冗余)
+  const navNodes = useMemo(() => {
+    const userNodes = messages.filter((m) => m.role === 'user');
+    if (userNodes.length >= 2) return userNodes;
+    if (messages.length >= 3) return messages.filter((_, idx) => idx % 2 === 0);
+    return [];
+  }, [messages]);
+
+  if (navNodes.length < 2) return null;
+
+  return (
+    <div className='absolute left-3 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-2 p-1.5 rounded-full bg-[var(--ui-panel-bg,#161616)]/80 backdrop-blur-md border border-[color:var(--ui-border-hairline)] shadow-lg select-none transition-all'>
+      {navNodes.map((msg, idx) => {
+        const isActive = activeId === msg.id || (idx === navNodes.length - 1 && !activeId);
+        const snippet =
+          (msg.content || '').replace(/\s+/g, ' ').trim().slice(0, 36) ||
+          `第 ${idx + 1} 轮会话`;
+
+        return (
+          <div
+            key={msg.id}
+            onClick={(e) => {
+              e.stopPropagation();
+              onNavigate(msg.id);
+            }}
+            className='group/navdot relative flex items-center justify-center p-1 cursor-pointer'
+            title={snippet}
+          >
+            {/* 刻度小横杠 (严格还原参考图红框 9px-15px 矩形横线) */}
+            <div
+              className={`h-[2px] rounded-full transition-all duration-200 ${
+                isActive
+                  ? 'w-[15px] bg-[var(--ui-accent-blue,#3b82f6)] shadow-[0_0_8px_rgba(59,130,246,0.7)]'
+                  : 'w-[9px] bg-neutral-400/40 group-hover/navdot:w-[13px] group-hover/navdot:bg-neutral-300'
+              }`}
+            />
+
+            {/* Hover 浮出摘要 Tooltip */}
+            <div className='absolute left-full ml-2.5 px-2.5 py-1 rounded-lg bg-[var(--ui-popover-bg,#1c1c1c)] border border-[color:var(--ui-border-subtle)] text-[11px] text-[var(--ui-text-primary)] whitespace-nowrap shadow-xl pointer-events-none opacity-0 translate-x-[-4px] group-hover/navdot:opacity-100 group-hover/navdot:translate-x-0 transition-all z-30 flex items-center gap-1.5'>
+              <span className='w-1.5 h-1.5 rounded-full bg-[var(--ui-accent-blue,#3b82f6)] flex-shrink-0' />
+              <span className='max-w-[220px] truncate'>{snippet}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 export const MessageList: React.FC<Props> = ({
   messages,
   isGenerating,
@@ -1743,11 +1810,71 @@ export const MessageList: React.FC<Props> = ({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
 
+  // 智能防抢焦滚动：用户是否处于底部偏差范围内
+  const [isPinnedToBottom, setIsPinnedToBottom] = useState(true);
+  const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
+  const [activeNavMsgId, setActiveNavMsgId] = useState<string | null>(null);
+
+  // 监听滚动位置：判定是否吸底，并计算当前视口展示的消息节点
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = distanceToBottom <= 70;
+    setIsPinnedToBottom(atBottom);
+    setShowScrollBottomBtn(!atBottom && el.scrollHeight > el.clientHeight + 120);
+
+    // 动态计算视口顶部的消息 ID
+    const containerTop = el.getBoundingClientRect().top;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      const bubbleEl = document.getElementById(`msg-bubble-${msg.id}`);
+      if (bubbleEl) {
+        const rect = bubbleEl.getBoundingClientRect();
+        if (rect.top <= containerTop + 240) {
+          setActiveNavMsgId(msg.id);
+          break;
+        }
+      }
+    }
+  }, [messages]);
+
+  // 监听用户向上滚轮：明确意图向上阅读，立即解除吸底锁定！
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY < 0) {
+      setIsPinnedToBottom(false);
+    }
+  }, []);
+
+  // 仅在粘底状态下，模型吐字或工具执行才跟随滚动到最后；用户向上翻阅时绝对不自动滚到底部！
   useEffect(() => {
-    if (scrollRef.current) {
+    if (isPinnedToBottom && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, isGenerating, activeToolCalls]);
+  }, [messages, isGenerating, activeToolCalls, isPinnedToBottom]);
+
+  // 点击回到底部
+  const handleScrollToBottom = () => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior: 'smooth',
+      });
+      setIsPinnedToBottom(true);
+      setShowScrollBottomBtn(false);
+    }
+  };
+
+  // 左侧点位导航点击跳转
+  const handleNavigateToMessage = (id: string) => {
+    const el = document.getElementById(`msg-bubble-${id}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setActiveNavMsgId(id);
+      setIsPinnedToBottom(false);
+    }
+  };
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -1766,31 +1893,59 @@ export const MessageList: React.FC<Props> = ({
   );
 
   return (
-    <div
-      ref={scrollRef}
-      className='flex-1 overflow-y-auto px-5 py-5 flex flex-col gap-5 custom-scrollbar min-h-0 relative'
-    >
-      {messages.map((msg, idx) => (
-        <MessageBubble
-          key={msg.id}
-          msg={msg}
-          isLast={idx === messages.length - 1}
-          activeToolCalls={idx === messages.length - 1 ? activeToolCalls : []}
-          activeTodos={idx === messages.length - 1 ? activeTodos : []}
-          containerWidth={containerWidth}
-          onCopy={onCopy}
-          onRetry={onRetry}
-          isGenerating={isGenerating}
-        />
-      ))}
+    <div className='flex-1 min-h-0 relative flex flex-col overflow-hidden'>
+      {/* 1. 左侧垂直消息定位轨 (对标截图快速点位) */}
+      <MessageNavigator
+        messages={messages}
+        activeId={activeNavMsgId}
+        onNavigate={handleNavigateToMessage}
+      />
 
-      {/* 会话最下方：OpenCode / Claude Code 风格实时任务执行状态条 */}
-      {isGenerating && (
-        <AgentLiveStatusBar
-          activeToolCalls={activeToolCalls}
-          activeTodos={activeTodos}
-          hasStreamingText={hasStreamingText}
-        />
+      {/* 2. 聊天正文主滚动容器 (左侧预留 pl-10 空间供快速点位轨悬浮，视觉不遮挡文字) */}
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        onWheel={handleWheel}
+        className='flex-1 overflow-y-auto pl-10 pr-5 py-5 flex flex-col gap-5 custom-scrollbar min-h-0 relative'
+      >
+        {messages.map((msg, idx) => (
+          <MessageBubble
+            key={msg.id}
+            msg={msg}
+            isLast={idx === messages.length - 1}
+            activeToolCalls={idx === messages.length - 1 ? activeToolCalls : []}
+            activeTodos={idx === messages.length - 1 ? activeTodos : []}
+            containerWidth={containerWidth}
+            onCopy={onCopy}
+            onRetry={onRetry}
+            isGenerating={isGenerating}
+          />
+        ))}
+
+        {/* 会话最下方：实时任务执行状态条 */}
+        {isGenerating && (
+          <AgentLiveStatusBar
+            activeToolCalls={activeToolCalls}
+            activeTodos={activeTodos}
+            hasStreamingText={hasStreamingText}
+          />
+        )}
+      </div>
+
+      {/* 3. 智能平滑回到底部悬浮小按钮 (当用户向上查看且离开底部时浮现) */}
+      {showScrollBottomBtn && (
+        <button
+          type='button'
+          onClick={handleScrollToBottom}
+          className='absolute right-6 bottom-5 z-20 px-3 py-1.5 rounded-full bg-[var(--ui-panel-bg,#1c1c1c)]/90 hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-subtle)] shadow-xl backdrop-blur-md flex items-center gap-1.5 text-xs font-medium cursor-pointer transition-all active:scale-95 animate-in fade-in zoom-in-95 duration-150 select-none'
+          title='回到底部'
+        >
+          <ArrowDown size={13} className='text-[var(--ui-accent-blue,#3b82f6)]' />
+          <span>回到底部</span>
+          {isGenerating && (
+            <span className='w-1.5 h-1.5 rounded-full bg-blue-400 animate-ping' />
+          )}
+        </button>
       )}
     </div>
   );
