@@ -1396,6 +1396,11 @@ const AgentLiveStatusBar: React.FC<{
   hasStreamingText: boolean;
 }> = ({ activeToolCalls, activeTodos, hasStreamingText }) => {
   const [elapsedSec, setElapsedSec] = useState(0);
+  const barRef = useRef<HTMLDivElement>(null);
+  const [barDimensions, setBarDimensions] = useState<{ width: number; height: number }>({
+    width: 0,
+    height: 0,
+  });
 
   useEffect(() => {
     setElapsedSec(0);
@@ -1403,6 +1408,23 @@ const AgentLiveStatusBar: React.FC<{
       setElapsedSec((s) => s + 1);
     }, 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  // 动态测量物理像素宽高，让 SVG 边框光晕 100% 贴合卡片四边与圆角，自适应任何卡片伸缩
+  useEffect(() => {
+    if (!barRef.current) return;
+    const updateSize = () => {
+      if (barRef.current) {
+        setBarDimensions({
+          width: Math.max(0, barRef.current.offsetWidth - 2),
+          height: Math.max(0, barRef.current.offsetHeight - 2),
+        });
+      }
+    };
+    updateSize();
+    const observer = new ResizeObserver(() => updateSize());
+    observer.observe(barRef.current);
+    return () => observer.disconnect();
   }, []);
 
   const visibleSteps = activeToolCalls.filter((t) => t.tool !== 'todo_write');
@@ -1429,41 +1451,52 @@ const AgentLiveStatusBar: React.FC<{
 
   return (
     <div className='sticky bottom-0 z-10 pt-1 pb-0.5 w-full pointer-events-none'>
-      <div className='relative w-full px-3.5 py-2 rounded-xl backdrop-blur-md shadow-sm border border-[color:var(--ui-border-hairline)] bg-[var(--ui-livebar-bg)] flex items-center justify-between gap-3 text-xs select-none overflow-hidden'>
-        {/* 一圈光晕紧贴 border 边框顺时针匀速巡航流光 (Border Beam) */}
-        <svg
-          className='absolute inset-0 w-full h-full pointer-events-none overflow-visible'
-          xmlns='http://www.w3.org/2000/svg'
-        >
-          <defs>
-            <linearGradient id='livebar-beam-grad' x1='0%' y1='0%' x2='100%' y2='100%'>
-              <stop offset='0%' stopColor='#38bdf8' stopOpacity='0' />
-              <stop offset='25%' stopColor='#60a5fa' stopOpacity='0.4' />
-              <stop offset='70%' stopColor='#93c5fd' stopOpacity='1' />
-              <stop offset='100%' stopColor='#38bdf8' stopOpacity='0' />
-            </linearGradient>
-          </defs>
-          {/* 底层高斯光晕 (沿边框发散) */}
-          <rect
-            rx='12'
-            fill='none'
-            stroke='url(#livebar-beam-grad)'
-            strokeWidth='3'
-            pathLength='100'
-            className='omcx-border-beam-glow'
-            style={{ width: 'calc(100% - 2px)', height: 'calc(100% - 2px)', x: 1, y: 1 }}
-          />
-          {/* 顶层高亮细线光核 (精准贴边顺时针流转) */}
-          <rect
-            rx='12'
-            fill='none'
-            stroke='url(#livebar-beam-grad)'
-            strokeWidth='1.5'
-            pathLength='100'
-            className='omcx-border-beam-core'
-            style={{ width: 'calc(100% - 2px)', height: 'calc(100% - 2px)', x: 1, y: 1 }}
-          />
-        </svg>
+      <div
+        ref={barRef}
+        className='relative w-full px-3.5 py-2 rounded-xl backdrop-blur-md shadow-sm border border-[color:var(--ui-border-hairline)] bg-[var(--ui-livebar-bg)] flex items-center justify-between gap-3 text-xs select-none overflow-hidden'
+      >
+        {/* 一圈光晕紧贴 border 边框顺时针匀速巡航流光 (自适应物理像素贴边) */}
+        {barDimensions.width > 0 && barDimensions.height > 0 && (
+          <svg
+            className='absolute inset-0 w-full h-full pointer-events-none overflow-visible'
+            xmlns='http://www.w3.org/2000/svg'
+          >
+            <defs>
+              <linearGradient id='livebar-beam-grad' x1='0%' y1='0%' x2='100%' y2='100%'>
+                <stop offset='0%' stopColor='#38bdf8' stopOpacity='0' />
+                <stop offset='25%' stopColor='#60a5fa' stopOpacity='0.4' />
+                <stop offset='70%' stopColor='#93c5fd' stopOpacity='1' />
+                <stop offset='100%' stopColor='#38bdf8' stopOpacity='0' />
+              </linearGradient>
+            </defs>
+            {/* 底层高斯光晕 (沿边框发散) */}
+            <rect
+              x='1'
+              y='1'
+              width={barDimensions.width}
+              height={barDimensions.height}
+              rx='12'
+              fill='none'
+              stroke='url(#livebar-beam-grad)'
+              strokeWidth='3'
+              pathLength='100'
+              className='omcx-border-beam-glow'
+            />
+            {/* 顶层高亮细线光核 (精准贴边顺时针流转) */}
+            <rect
+              x='1'
+              y='1'
+              width={barDimensions.width}
+              height={barDimensions.height}
+              rx='12'
+              fill='none'
+              stroke='url(#livebar-beam-grad)'
+              strokeWidth='1.5'
+              pathLength='100'
+              className='omcx-border-beam-core'
+            />
+          </svg>
+        )}
 
         {/* 左侧：微光呼吸图标 + 当前实时动作语义 (已移除雷达同心圆扩散) */}
         <div className='flex items-center gap-2.5 min-w-0 relative z-10'>
