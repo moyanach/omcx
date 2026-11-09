@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ListTodo,
   CheckCircle2,
@@ -26,12 +26,31 @@ interface TodoListCardProps {
 export const TodoListCard: React.FC<TodoListCardProps> = ({ todos, isActive = false }) => {
   const [isExpanded, setIsExpanded] = useState(true);
 
-  if (!todos || todos.length === 0) return null;
+  // 历史持久化数据可能包含 null / 非字符串字段，统一做安全归一化，杜绝渲染期 TypeError 击穿整棵 React 树
+  const safeTodos: TodoItem[] = useMemo(() => {
+    if (!Array.isArray(todos)) return [];
+    return todos
+      .filter((item) => item && typeof item === 'object')
+      .map((item: any, index) => ({
+        id: item.id ? String(item.id) : `td_fallback_${index + 1}`,
+        text:
+          typeof item.text === 'string'
+            ? item.text
+            : String(item.text ?? item.content ?? ''),
+        status:
+          item.status === 'completed' || item.status === 'in_progress'
+            ? item.status
+            : 'pending',
+      }))
+      .filter((item) => item.text.trim().length > 0);
+  }, [todos]);
 
-  const completedCount = todos.filter((t) => t.status === 'completed').length;
-  const totalCount = todos.length;
-  const progressPercent = Math.round((completedCount / totalCount) * 100);
-  const activeTodo = todos.find((t) => t.status === 'in_progress');
+  if (safeTodos.length === 0) return null;
+
+  const completedCount = safeTodos.filter((t) => t.status === 'completed').length;
+  const totalCount = safeTodos.length;
+  const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+  const activeTodo = safeTodos.find((t) => t.status === 'in_progress');
   const allCompleted = completedCount === totalCount;
 
   return (
@@ -92,7 +111,7 @@ export const TodoListCard: React.FC<TodoListCardProps> = ({ todos, isActive = fa
       {/* 展开后的详细清单 */}
       {isExpanded && (
         <div className='px-3 py-2 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] flex flex-col gap-1'>
-          {todos.map((item, idx) => {
+          {safeTodos.map((item, idx) => {
             const isDone = item.status === 'completed';
             const isRunning = item.status === 'in_progress';
 

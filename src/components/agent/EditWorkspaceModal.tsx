@@ -28,11 +28,20 @@ export const EditWorkspaceModal: React.FC<EditWorkspaceModalProps> = ({
   onSave,
   onDelete,
 }) => {
-  if (!isOpen || !workspace) return null;
-
-  const [name, setName] = useState(workspace.name);
-  const [folders, setFolders] = useState<WorkspaceFolder[]>(workspace.folders || []);
+  const [name, setName] = useState(workspace?.name || '');
+  const [folders, setFolders] = useState<WorkspaceFolder[]>(workspace?.folders || []);
   const [isSaving, setIsSaving] = useState(false);
+
+  // 弹窗打开或切换目标工作空间时同步表单初始值
+  React.useEffect(() => {
+    if (!isOpen || !workspace) return;
+    setName(workspace.name || '');
+    setFolders(workspace.folders || []);
+    setIsSaving(false);
+  }, [isOpen, workspace?.id, workspace?.name]);
+
+  // ⚠️ 守卫必须置于所有 Hook 之后，保证 Hook 调用数量恒定（杜绝打开弹窗时 Hook 顺序变化白屏）
+  if (!isOpen || !workspace) return null;
 
   // 添加文件夹 (调用系统原生选择目录对话框)
   const handleAddFolder = async () => {

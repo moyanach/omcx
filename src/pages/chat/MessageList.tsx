@@ -628,11 +628,9 @@ const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) => {
     [events]
   );
 
-  // 默认收起全量列表，彻底告别“工具瀑布流”刷屏
-  const [isExpanded, setIsExpanded] = useState(false);
+  // 默认展开全量执行步骤，便于直观查看 Agent 的实时工具推进链路
+  const [isExpanded, setIsExpanded] = useState(true);
   const [selectedStepIdx, setSelectedStepIdx] = useState<number | null>(null);
-
-  if (filteredEvents.length === 0) return null;
 
   const runningEvents = filteredEvents.filter((e) => e.status === 'running');
   const isAnyRunning = runningEvents.length > 0;
@@ -674,6 +672,9 @@ const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) => {
 
   // 执行中未手动展开时，仅取最后 2 条步骤作为紧凑实时视窗
   const liveWindowEvents = isAnyRunning && !isExpanded ? filteredEvents.slice(-2) : [];
+
+  // ⚠️ 必须置于所有 Hook 之后，保证任意渲染路径下 Hook 调用数量恒定（杜绝 Hook 顺序违规导致白屏）
+  if (filteredEvents.length === 0) return null;
 
   const toggleSelectStep = (idx: number) => {
     setSelectedStepIdx((prev) => (prev === idx ? null : idx));

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import Layout from './components/layout/Layout';
+import ErrorBoundary from './components/common/ErrorBoundary';
 import { Sparkles, RefreshCw, X } from 'lucide-react';
 import {
   loadTheme,
@@ -95,7 +96,9 @@ function App() {
 
       {/* 主应用布局层 */}
       <div className='relative z-10 w-full h-full'>
-        <Layout />
+        <ErrorBoundary>
+          <Layout />
+        </ErrorBoundary>
       </div>
 
       {/* 全局新版本就绪通知浮条 (右下角优雅弹出) */}
