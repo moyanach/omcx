@@ -17,6 +17,7 @@ const crypto = require("crypto");
 
 // 引入核心业务服务
 const storageService = require("./services/storageService");
+const { initAutoUpdater } = require("./services/updaterService");
 const {
   getWorkspaceGitStatus,
   getWorkspaceFileDiff,
@@ -2662,6 +2663,7 @@ app.whenReady().then(() => {
   );
 
   createWindow();
+  initAutoUpdater(mainWindow);
 });
 
 app.on("before-quit", () => {

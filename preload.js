@@ -195,4 +195,42 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("session-permission-mode-updated", handler);
     return () => ipcRenderer.removeListener("session-permission-mode-updated", handler);
   },
+
+  // ─── 软件自动更新管理 ─────────────────────────────
+  getAppVersion: () => ipcRenderer.invoke("get-app-version"),
+  checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
+  startDownloadUpdate: () => ipcRenderer.invoke("start-download-update"),
+  quitAndInstallUpdate: () => ipcRenderer.invoke("quit-and-install-update"),
+  openReleasePage: (url) => ipcRenderer.invoke("open-release-page", url),
+
+  onUpdateChecking: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on("update-checking", handler);
+    return () => ipcRenderer.removeListener("update-checking", handler);
+  },
+  onUpdateAvailable: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-available", handler);
+    return () => ipcRenderer.removeListener("update-available", handler);
+  },
+  onUpdateNotAvailable: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-not-available", handler);
+    return () => ipcRenderer.removeListener("update-not-available", handler);
+  },
+  onUpdateDownloadProgress: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-download-progress", handler);
+    return () => ipcRenderer.removeListener("update-download-progress", handler);
+  },
+  onUpdateDownloaded: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-downloaded", handler);
+    return () => ipcRenderer.removeListener("update-downloaded", handler);
+  },
+  onUpdateError: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-error", handler);
+    return () => ipcRenderer.removeListener("update-error", handler);
+  },
 });
