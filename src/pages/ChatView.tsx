@@ -274,8 +274,8 @@ const ChatView: React.FC = () => {
           </div>
         ) : (
           <div className='flex-1 min-h-0 flex overflow-hidden bg-[var(--ui-stage-wrap-bg)]'>
-            {/* 左侧：外层舞台增加 p-3 内边距，中央包裹为一个带圆角与微弱边界的舞台 Card */}
-            <div className='flex-1 min-h-0 p-3 flex flex-col overflow-hidden'>
+            {/* 左侧：外层舞台槽紧凑化 (px-2 py-1)，消除过宽留白 */}
+            <div className='flex-1 min-h-0 px-2 py-1 flex flex-col overflow-hidden'>
               <div className='flex-1 min-h-0 flex flex-col overflow-hidden bg-[var(--ui-stage-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl shadow-[var(--ui-stage-shadow)] relative'>
                 <MessageList
                   messages={activeMessages}
@@ -289,7 +289,7 @@ const ChatView: React.FC = () => {
 
                 {/* 多场景沙箱与人机协同权限审批卡片 */}
                 {pendingPermission && (
-                  <div className='px-5 mb-2 w-full flex-shrink-0'>
+                  <div className='px-3 mb-1.5 w-full flex-shrink-0'>
                     <div className='w-full p-3 rounded-xl bg-[var(--ui-accent-amber-soft)] border border-[color:var(--ui-accent-amber-border)] text-xs flex items-center justify-between gap-3 shadow-sm select-none'>
                       <div className='flex items-center gap-2.5 min-w-0 pr-2'>
                         <div className='w-7 h-7 rounded-lg bg-[var(--ui-accent-amber-soft)] text-[var(--ui-accent-amber)] flex items-center justify-center flex-shrink-0'>

@@ -610,7 +610,7 @@ const MessageInput: React.FC<Props> = ({
   }, [value]);
 
   return (
-    <div className="w-full px-5 pb-4 pt-1.5 bg-transparent flex-shrink-0">
+    <div className="w-full px-3 pb-1.5 pt-0.5 bg-transparent flex-shrink-0">
       {/* 现代化输入卡片 (全宽 100% 铺满大 Card 底部，与上方消息区边缘保持垂直对齐线) */}
       <div
         onDragOver={handleDragOver}

@@ -1761,7 +1761,7 @@ const MessageNavigator: React.FC<MessageNavProps> = ({ messages, activeId, onNav
   if (navNodes.length < 2) return null;
 
   return (
-    <div className='absolute left-3 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-2 p-1.5 rounded-full bg-[var(--ui-panel-bg,#161616)]/80 backdrop-blur-md border border-[color:var(--ui-border-hairline)] shadow-lg select-none transition-all'>
+    <div className='absolute left-1.5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-1 px-0.5 py-1.5 rounded-full bg-[var(--ui-panel-bg,#161616)]/75 backdrop-blur-md border border-[color:var(--ui-border-hairline)] shadow-lg select-none transition-all'>
       {navNodes.map((msg, idx) => {
         const isActive = activeId === msg.id || (idx === navNodes.length - 1 && !activeId);
         const snippet =
@@ -1775,20 +1775,20 @@ const MessageNavigator: React.FC<MessageNavProps> = ({ messages, activeId, onNav
               e.stopPropagation();
               onNavigate(msg.id);
             }}
-            className='group/navdot relative flex items-center justify-center p-1 cursor-pointer'
+            className='group/navdot relative flex items-center justify-center p-0.5 cursor-pointer'
             title={snippet}
           >
-            {/* 刻度小横杠 (严格还原参考图红框 9px-15px 矩形横线) */}
+            {/* 极简超窄刻度小横杠 (7px-11px，宽度收缩更加克制紧凑) */}
             <div
               className={`h-[2px] rounded-full transition-all duration-200 ${
                 isActive
-                  ? 'w-[15px] bg-[var(--ui-accent-blue,#3b82f6)] shadow-[0_0_8px_rgba(59,130,246,0.7)]'
-                  : 'w-[9px] bg-neutral-400/40 group-hover/navdot:w-[13px] group-hover/navdot:bg-neutral-300'
+                  ? 'w-[11px] bg-[var(--ui-accent-blue,#3b82f6)] shadow-[0_0_6px_rgba(59,130,246,0.7)]'
+                  : 'w-[7px] bg-neutral-400/40 group-hover/navdot:w-[10px] group-hover/navdot:bg-neutral-300'
               }`}
             />
 
             {/* Hover 浮出摘要 Tooltip */}
-            <div className='absolute left-full ml-2.5 px-2.5 py-1 rounded-lg bg-[var(--ui-popover-bg,#1c1c1c)] border border-[color:var(--ui-border-subtle)] text-[11px] text-[var(--ui-text-primary)] whitespace-nowrap shadow-xl pointer-events-none opacity-0 translate-x-[-4px] group-hover/navdot:opacity-100 group-hover/navdot:translate-x-0 transition-all z-30 flex items-center gap-1.5'>
+            <div className='absolute left-full ml-2 px-2.5 py-1 rounded-lg bg-[var(--ui-popover-bg,#1c1c1c)] border border-[color:var(--ui-border-subtle)] text-[11px] text-[var(--ui-text-primary)] whitespace-nowrap shadow-xl pointer-events-none opacity-0 translate-x-[-4px] group-hover/navdot:opacity-100 group-hover/navdot:translate-x-0 transition-all z-30 flex items-center gap-1.5'>
               <span className='w-1.5 h-1.5 rounded-full bg-[var(--ui-accent-blue,#3b82f6)] flex-shrink-0' />
               <span className='max-w-[220px] truncate'>{snippet}</span>
             </div>
@@ -1901,12 +1901,12 @@ export const MessageList: React.FC<Props> = ({
         onNavigate={handleNavigateToMessage}
       />
 
-      {/* 2. 聊天正文主滚动容器 (左侧预留 pl-10 空间供快速点位轨悬浮，视觉不遮挡文字) */}
+      {/* 2. 聊天正文主滚动容器 (边距收紧优化，左侧留出 24px 供超窄胶囊悬浮) */}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
         onWheel={handleWheel}
-        className='flex-1 overflow-y-auto pl-10 pr-5 py-5 flex flex-col gap-5 custom-scrollbar min-h-0 relative'
+        className='flex-1 overflow-y-auto pl-6 pr-3 pt-2 pb-2.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
       >
         {messages.map((msg, idx) => (
           <MessageBubble
