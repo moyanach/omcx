@@ -345,14 +345,28 @@ const SettingsView: React.FC = () => {
   const handleManualCheckUpdates = async () => {
     setUpdateStatus("checking");
     setUpdateErrorMsg(null);
-    if (window.electronAPI?.checkForUpdates) {
-      const res = await window.electronAPI.checkForUpdates();
-      if (!res?.success) {
-        setUpdateStatus("error");
-        setUpdateErrorMsg(res?.error || "检查更新失败，请检查网络或代理连接");
+
+    // 5 秒安全超时保护：杜绝任何网络无响应导致一直 loading
+    const timer = setTimeout(() => {
+      setUpdateStatus((prev) => (prev === "checking" ? "not-available" : prev));
+    }, 5000);
+
+    try {
+      if (window.electronAPI?.checkForUpdates) {
+        const res = await window.electronAPI.checkForUpdates();
+        clearTimeout(timer);
+        if (!res?.success) {
+          setUpdateStatus("error");
+          setUpdateErrorMsg(res?.error || "检查更新失败，请检查网络或代理连接");
+        }
+      } else {
+        clearTimeout(timer);
+        setTimeout(() => setUpdateStatus("not-available"), 800);
       }
-    } else {
-      setTimeout(() => setUpdateStatus("not-available"), 800);
+    } catch (err: any) {
+      clearTimeout(timer);
+      setUpdateStatus("error");
+      setUpdateErrorMsg(err?.message || "检查更新异常");
     }
   };
 
