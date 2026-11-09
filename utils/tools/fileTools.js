@@ -137,10 +137,28 @@ class ReadFileTool extends StructuredTool {
     });
   }
 
-  async _call({ path: filePath, maxLines = 200, offset = 0, __workDir, __allowedFolders, __checkPermission, __toolContext }) {
+  async _call(rawArgs) {
+    const {
+      path: filePath,
+      maxLines = 200,
+      offset = 0,
+      __workDir,
+      __allowedFolders,
+      __checkPermission,
+      __toolContext,
+    } = rawArgs || {};
+
+    const targetFilePath = filePath ?? rawArgs?.filepath ?? rawArgs?.file_path ?? rawArgs?.file;
+    if (!targetFilePath || typeof targetFilePath !== "string" || !targetFilePath.trim()) {
+      return JSON.stringify({
+        success: false,
+        error: `read_file 调用失败: 缺少有效的文件路径 path 参数。`,
+      });
+    }
+
     let targetPath;
     try {
-      targetPath = await checkSafePath(filePath, __workDir, __allowedFolders, __checkPermission, "读取", {
+      targetPath = await checkSafePath(targetFilePath, __workDir, __allowedFolders, __checkPermission, "读取", {
         mode: "read",
         toolContext: __toolContext,
       });
@@ -149,11 +167,11 @@ class ReadFileTool extends StructuredTool {
     }
 
     if (!fs.existsSync(targetPath)) {
-      return JSON.stringify({ success: false, error: `文件不存在: ${filePath}` });
+      return JSON.stringify({ success: false, error: `文件不存在: ${targetFilePath}` });
     }
     const stat = fs.statSync(targetPath);
     if (!stat.isFile()) {
-      return JSON.stringify({ success: false, error: `路径不是文件: ${filePath}` });
+      return JSON.stringify({ success: false, error: `路径不是文件: ${targetFilePath}` });
     }
 
     const content = fs.readFileSync(targetPath, "utf-8");
@@ -206,10 +224,61 @@ class WriteFileTool extends StructuredTool {
     });
   }
 
-  async _call({ path: filePath, content, description, __workDir, __allowedFolders, __checkPermission, __toolContext }) {
+  async _call(rawArgs) {
+    const {
+      path: filePath,
+      content,
+      description,
+      __workDir,
+      __allowedFolders,
+      __checkPermission,
+      __toolContext,
+    } = rawArgs || {};
+
+    // 1. 兼容文件路径别名
+    const targetFilePath = filePath ?? rawArgs?.filepath ?? rawArgs?.file_path ?? rawArgs?.file;
+    if (!targetFilePath || typeof targetFilePath !== "string" || !targetFilePath.trim()) {
+      return JSON.stringify({
+        success: false,
+        error: `write_file 调用失败: 缺少有效的文件路径 path 参数。`,
+      });
+    }
+
+    // 2. 参数防御与常见大模型别名吸收 (text / data / code / file_content 等)
+    let finalContent = content;
+    if (finalContent === undefined || finalContent === null) {
+      finalContent =
+        rawArgs?.text ??
+        rawArgs?.data ??
+        rawArgs?.code ??
+        rawArgs?.file_content ??
+        rawArgs?.fileContent ??
+        rawArgs?.body;
+    }
+
+    if (finalContent === undefined || finalContent === null) {
+      return JSON.stringify({
+        success: false,
+        error: `write_file 调用失败: 缺少必需参数 content (接收到的内容为 undefined)。请在 content 参数中提供要写入的完整文件内容（字符串形式）后重试。`,
+      });
+    }
+
+    // 3. 自动转换非字符串形式的内容 (如大模型把 JSON 对象直接塞入参数)
+    if (typeof finalContent !== "string") {
+      if (typeof finalContent === "object") {
+        try {
+          finalContent = JSON.stringify(finalContent, null, 2);
+        } catch {
+          finalContent = String(finalContent);
+        }
+      } else {
+        finalContent = String(finalContent);
+      }
+    }
+
     let targetPath;
     try {
-      targetPath = await checkSafePath(filePath, __workDir, __allowedFolders, __checkPermission, "写入/创建", {
+      targetPath = await checkSafePath(targetFilePath, __workDir, __allowedFolders, __checkPermission, "写入/创建", {
         mode: "write",
         toolContext: __toolContext,
       });
@@ -229,7 +298,7 @@ class WriteFileTool extends StructuredTool {
       originalContent = fs.readFileSync(targetPath, "utf-8");
     }
 
-    fs.writeFileSync(targetPath, content, "utf-8");
+    fs.writeFileSync(targetPath, finalContent, "utf-8");
 
     const MAX_SNAPSHOT_CHARS = 30000;
     const originalTruncated = originalContent.length > MAX_SNAPSHOT_CHARS;
@@ -241,10 +310,10 @@ class WriteFileTool extends StructuredTool {
 
     return JSON.stringify({
       success: true,
-      path: filePath,
+      path: targetFilePath,
       action: isNew ? "created" : "modified",
       description: description || (isNew ? "创建新文件" : "修改已有文件"),
-      size: Buffer.byteLength(content, "utf-8"),
+      size: Buffer.byteLength(finalContent, "utf-8"),
       originalSize: originalContent ? Buffer.byteLength(originalContent, "utf-8") : 0,
       diffHint: isNew ? null : "(文件已修改，建议使用 git diff 查看具体变更)",
       ...(originalSnapshot !== undefined ? { originalContent: originalSnapshot } : {}),

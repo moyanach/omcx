@@ -26,20 +26,64 @@ class EditFileTool extends StructuredTool {
     });
   }
 
-  async _call({
-    path: filePath,
-    old_string,
-    new_string,
-    replace_all = false,
-    __workDir,
-    __allowedFolders,
-    __checkPermission,
-    __toolContext,
-  }) {
+  async _call(rawArgs = {}) {
+    const {
+      path: filePath,
+      old_string,
+      new_string,
+      replace_all = false,
+      __workDir,
+      __allowedFolders,
+      __checkPermission,
+      __toolContext,
+    } = rawArgs;
+
+    // 1. 路径别名兼容与校验
+    const targetFilePath = filePath ?? rawArgs?.filepath ?? rawArgs?.file_path ?? rawArgs?.file;
+    if (!targetFilePath || typeof targetFilePath !== "string" || !targetFilePath.trim()) {
+      return JSON.stringify({
+        success: false,
+        error: `edit_file 调用失败: 缺少有效的文件路径 path 参数。`,
+      });
+    }
+
+    // 2. old_string 别名兼容与严格类型校验
+    let finalOldString = old_string;
+    if (finalOldString === undefined || finalOldString === null) {
+      finalOldString =
+        rawArgs?.old_text ??
+        rawArgs?.oldText ??
+        rawArgs?.search ??
+        rawArgs?.target ??
+        rawArgs?.find;
+    }
+    if (typeof finalOldString !== "string") {
+      return JSON.stringify({
+        success: false,
+        error: `edit_file 调用失败: 缺少必需参数 old_string（要在文件中精确匹配并替换的原始内容）。`,
+      });
+    }
+
+    // 3. new_string 别名兼容与严格类型校验
+    let finalNewString = new_string;
+    if (finalNewString === undefined || finalNewString === null) {
+      finalNewString =
+        rawArgs?.new_text ??
+        rawArgs?.newText ??
+        rawArgs?.replacement ??
+        rawArgs?.replace;
+    }
+    if (typeof finalNewString !== "string") {
+      return JSON.stringify({
+        success: false,
+        error: `edit_file 调用失败: 缺少必需参数 new_string（要替换进的新内容，若删除请传入空字符串 ""）。`,
+      });
+    }
+
     let targetPath;
     try {
       targetPath = await checkSafePath(
-        filePath,
+        targetFilePath,
         __workDir,
         __allowedFolders,
         __checkPermission,
@@ -59,7 +103,7 @@ class EditFileTool extends StructuredTool {
     if (!fs.existsSync(targetPath)) {
       return JSON.stringify({
         success: false,
-        error: `目标文件不存在: ${filePath}。如果是新建文件，请改用 write_file 工具。`,
+        error: `目标文件不存在: ${targetFilePath}。如果是新建文件，请改用 write_file 工具。`,
       });
     }
 
@@ -67,17 +111,17 @@ class EditFileTool extends StructuredTool {
     if (!stat.isFile()) {
       return JSON.stringify({
         success: false,
-        error: `目标路径不是文件: ${filePath}`,
+        error: `目标路径不是文件: ${targetFilePath}`,
       });
     }
 
     const content = fs.readFileSync(targetPath, "utf-8");
 
     // 检查 old_string 是否存在
-    if (!content.includes(old_string)) {
+    if (!content.includes(finalOldString)) {
       // 容错诊断：尝试寻找部分匹配或行匹配
       const lines = content.split("\n");
-      const oldFirstLine = old_string.split("\n")[0].trim();
+      const oldFirstLine = finalOldString.split("\n")[0].trim();
       let matchedLineIdx = -1;
       if (oldFirstLine) {
         matchedLineIdx = lines.findIndex((l) => l.includes(oldFirstLine));
@@ -92,39 +136,39 @@ class EditFileTool extends StructuredTool {
 
       return JSON.stringify({
         success: false,
-        error: `在 ${filePath} 中未找到指定的 old_string。\n${hint}`,
+        error: `在 ${targetFilePath} 中未找到指定的 old_string。\n${hint}`,
       });
     }
 
     // 检查唯一性
-    const occurrences = content.split(old_string).length - 1;
+    const occurrences = content.split(finalOldString).length - 1;
     if (occurrences > 1 && !replace_all) {
       return JSON.stringify({
         success: false,
-        error: `old_string 在文件 ${filePath} 中出现了 ${occurrences} 次。为了防止误修改，请在 old_string 中包含更多前后上下文行以确保匹配的唯一性，或显式设置 replace_all: true。`,
+        error: `old_string 在文件 ${targetFilePath} 中出现了 ${occurrences} 次。为了防止误修改，请在 old_string 中包含更多前后上下文行以确保匹配的唯一性，或显式设置 replace_all: true。`,
       });
     }
 
     // 执行精确替换
     let newContent = "";
     if (replace_all) {
-      newContent = content.replaceAll(old_string, new_string);
+      newContent = content.replaceAll(finalOldString, finalNewString);
     } else {
-      newContent = content.replace(old_string, new_string);
+      newContent = content.replace(finalOldString, finalNewString);
     }
 
     fs.writeFileSync(targetPath, newContent, "utf-8");
 
-    const oldLinesCount = old_string.split("\n").length;
-    const newLinesCount = new_string.split("\n").length;
+    const oldLinesCount = finalOldString.split("\n").length;
+    const newLinesCount = finalNewString.split("\n").length;
     const lineDelta = newLinesCount - oldLinesCount;
 
     return JSON.stringify({
       success: true,
-      path: filePath,
+      path: targetFilePath,
       replacedOccurrences: replace_all ? occurrences : 1,
       lineDelta: lineDelta >= 0 ? `+${lineDelta}` : `${lineDelta}`,
-      message: `成功更新 ${filePath} (替换 ${replace_all ? occurrences : 1} 处代码片段)`,
+      message: `成功更新 ${targetFilePath} (替换 ${replace_all ? occurrences : 1} 处代码片段)`,
     });
   }
 }
