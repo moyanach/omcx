@@ -1486,18 +1486,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ]);
       set({ mcpServers: mcps || [], skills: skills || [], subagents: subagents || [] });
 
-      // 联动重算 ContextMetrics
+      // 联动重算 ContextMetrics (由主进程基于真实环境构建计算)
       const activeSessionId = get().activeSessionId;
       const currentMsgs = activeSessionId ? get().messages[activeSessionId] || [] : [];
-      if (window.electronAPI.getContextMetrics) {
+      if (window.electronAPI.getContextMetrics && activeSessionId) {
         const metrics = await window.electronAPI.getContextMetrics({
+          sessionId: activeSessionId,
+          workDir: workDir || null,
           messages: currentMsgs,
-          tools: tools || [],
-          systemPrompt: "You are a professional AI developer agent.",
-          activeSkills: skills || [],
         });
         if (metrics) {
-          set({ contextMetrics: metrics });
+          get().setContextMetrics(metrics, activeSessionId);
         }
       }
     } catch (err) {

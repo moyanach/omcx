@@ -52,7 +52,16 @@ function initAutoUpdater(mainWindow) {
   autoUpdater.allowPrerelease = false;
   autoUpdater.forceDevUpdateConfig = true; // 允许开发调试阶段正常读取 dev-app-update.yml 检查更新
 
-  autoUpdater.logger = console;
+  autoUpdater.logger = {
+    info: (msg) => console.log(`[updater] ${String(msg || "").split("\n")[0].slice(0, 100)}`),
+    warn: (msg) => console.warn(`[updater] ${String(msg || "").split("\n")[0].slice(0, 100)}`),
+    error: (msg) => {
+      const clean = String(msg || "").includes("504")
+        ? "远端网关响应超时 (504)，稍后重试"
+        : String(msg || "").split("\n")[0].slice(0, 100);
+      console.warn(`[updater] ${clean}`);
+    },
+  };
 
   let eventHandled = false;
 
@@ -116,10 +125,15 @@ function initAutoUpdater(mainWindow) {
     }
   });
 
-  // 6. 异常捕获
+  // 6. 异常捕获 (轻量化清洗输出，避免打印大段 HTML 504 错误页堆栈)
   autoUpdater.on("error", (err) => {
-    console.error("[updater] autoUpdater 报错:", err.message);
-    // 这里不直接向前端抛出，留给 performUnifiedCheck 处理双通道降级
+    const rawMsg = String(err?.message || "");
+    const cleanMsg = rawMsg.includes("504")
+      ? "远端网络连接超时 (504 Gateway Timeout)"
+      : rawMsg.includes("403")
+      ? "GitHub 访问频次限制 (403 Rate Limit)"
+      : rawMsg.split("\n")[0].slice(0, 100);
+    console.warn(`[updater] 检测更新遇网络波动: ${cleanMsg}`);
   });
 
   /**

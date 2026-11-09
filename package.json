@@ -1,6 +1,6 @@
 {
   "name": "omcx-desktop",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "OMCX - Professional AI Coding Agent Desktop Client",
   "main": "main.js",
   "scripts": {

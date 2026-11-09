@@ -1152,7 +1152,88 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "get-context-metrics",
-    safeHandler((event, params) => calculateContextMetrics(params))
+    safeHandler(async (event, params = {}) => {
+      // 若提供了 sessionId 或指定了工作目录，则根据当前真实工程上下文进行精准计算
+      if (params.sessionId || params.workDir) {
+        const session = params.sessionId
+          ? storageService.getSessions().find((s) => s.id === params.sessionId)
+          : null;
+        const targetWorkDir =
+          (params.workDir && String(params.workDir).trim()) ||
+          session?.workDir ||
+          session?.work_dir ||
+          null;
+        const sessionPermissionMode =
+          params.permissionMode || session?.permissionMode || "auto-sandbox";
+
+        const rawMessages =
+          Array.isArray(params.messages) && params.messages.length > 0
+            ? params.messages
+            : params.sessionId
+            ? storageService.getMessages(params.sessionId)
+            : [];
+
+        const { matchedWorkspace } = getWorkspaceFolders(targetWorkDir);
+        const availableSkills = storageService.getSkills(targetWorkDir);
+        const mcpTools = await mcpClientService.getActiveMcpTools(targetWorkDir);
+
+        const tools = toolRegistry.getToolDefinitions(mcpTools, null, {
+          permissionMode: sessionPermissionMode,
+        });
+
+        const toolDocs = toolRegistry.getToolPromptDocs(mcpTools, {
+          permissionMode: sessionPermissionMode,
+        });
+
+        const memories = storageService.getMemories(targetWorkDir);
+        const memoryIndex = storageService.getMemoryIndex(targetWorkDir);
+        const projectRules = storageService.getProjectInstructions(targetWorkDir);
+        const customSystemPrompt = storageService.getConfig("custom_system_prompt") || "";
+        const gitInfo = await getGitSnapshotAsync(targetWorkDir);
+        const initialTodos = session?.todos || [];
+
+        const modelId =
+          params.model ||
+          session?.model ||
+          storageService.getConfig("active_model") ||
+          "";
+        const models = storageService.getModels();
+        const matchedModel = models.find((m) => m.id === modelId);
+        const contextLimit =
+          Number(params.maxTokensLimit) ||
+          Number(matchedModel?.contextLimit) ||
+          1000000;
+
+        const builtContext = buildSystemContext({
+          workDir: targetWorkDir,
+          matchedWorkspace,
+          skills: availableSkills,
+          memories,
+          memoryIndex,
+          projectRules,
+          todos: initialTodos,
+          toolDocs,
+          model: modelId,
+          enableTools: true,
+          permissionMode: sessionPermissionMode,
+          customSystemPrompt,
+          gitInfo,
+        });
+
+        const skillsTokens =
+          builtContext.sections.find((s) => s.name === "skills")?.tokens || 0;
+
+        return calculateContextMetrics({
+          messages: rawMessages,
+          tools,
+          systemPrompt: builtContext.text,
+          skillsTokens,
+          maxTokensLimit: contextLimit,
+        });
+      }
+
+      return calculateContextMetrics(params);
+    })
   );
 
   ipcMain.handle(
