@@ -277,6 +277,9 @@ const SettingsView: React.FC = () => {
     createEmptyRow(PROVIDER_PRESETS.deepseek.defaultContext),
   ]);
 
+  // 全局自定义系统提示词
+  const [customSystemPrompt, setCustomSystemPrompt] = useState("");
+
   // ─── 软件自动更新状态 ───
   const [currentAppVersion, setCurrentAppVersion] = useState("v2.1.0");
   const [updateStatus, setUpdateStatus] = useState<
@@ -693,6 +696,9 @@ const SettingsView: React.FC = () => {
       const savedKeepTokens = await window.electronAPI.getConfig("context_compact_keep_tokens");
       if (savedKeepTokens) setCompactKeepTokens(Number(savedKeepTokens) || 20000);
 
+      const savedPrompt = await window.electronAPI.getConfig("custom_system_prompt");
+      if (savedPrompt) setCustomSystemPrompt(savedPrompt);
+
       const savedTheme = await loadTheme();
       setCurrentTheme(savedTheme);
       setStoreTheme(savedTheme);
@@ -735,6 +741,16 @@ const SettingsView: React.FC = () => {
       showToast("上下文压缩配置已保存");
     } catch {
       showToast("保存失败");
+    }
+  };
+
+  const handleSaveCustomSystemPrompt = async () => {
+    if (!window.electronAPI) return;
+    try {
+      await window.electronAPI.setConfig("custom_system_prompt", customSystemPrompt.trim());
+      showToast("全局自定义系统提示词已保存，将自动注入每个会话！");
+    } catch (err: any) {
+      showToast(`保存失败: ${err.message}`);
     }
   };
 
@@ -1577,6 +1593,58 @@ const SettingsView: React.FC = () => {
                       <Save size={13} />
                       <span>保存压缩配置</span>
                     </button>
+                  </div>
+                </div>
+
+                {/* 全局自定义系统提示词 (Custom System Prompt) */}
+                <div className="bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl p-6 shadow-sm space-y-4">
+                  <div className="border-b border-[#282828] pb-3 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-xs font-bold text-neutral-100 tracking-wide flex items-center gap-2">
+                        <span>全局自定义系统提示词 (Custom System Prompt)</span>
+                        {customSystemPrompt.trim().length > 0 && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            已注入全局 ({customSystemPrompt.trim().length} 字符)
+                          </span>
+                        )}
+                      </h3>
+                      <p className="text-[11px] text-neutral-500 mt-0.5">
+                        作为内置系统提示词与行为准则的补充，在每次对话时一并注入大模型，对当前及后续所有会话全局生效
+                      </p>
+                    </div>
+
+                    {customSystemPrompt && (
+                      <button
+                        type="button"
+                        onClick={() => setCustomSystemPrompt("")}
+                        className="px-2.5 py-1 text-xs text-neutral-400 hover:text-rose-400 transition-colors cursor-pointer"
+                      >
+                        清空内容
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <textarea
+                      rows={5}
+                      value={customSystemPrompt}
+                      onChange={(e) => setCustomSystemPrompt(e.target.value)}
+                      placeholder="输入您的全局专属指令或研发偏好。例如：&#10;1. 默认使用纯中文回答，代码注释保持详尽且规范&#10;2. 优先采用 TypeScript 严格类型与函数式编程模式&#10;3. 所有重构均优先保证向前兼容性，并在修改前分析影响面"
+                      className="w-full bg-[#171717] border border-[#2e2e2e] focus:border-blue-500 rounded-xl p-3.5 text-xs text-neutral-200 placeholder-neutral-600 font-mono leading-relaxed outline-none resize-y custom-scrollbar"
+                    />
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] text-neutral-500 font-mono">
+                        已输入 {customSystemPrompt.length} 个字符
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleSaveCustomSystemPrompt}
+                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Save size={13} />
+                        <span>保存自定义提示词</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
 

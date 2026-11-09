@@ -274,9 +274,9 @@ const ChatView: React.FC = () => {
           </div>
         ) : (
           <div className='flex-1 min-h-0 flex overflow-hidden bg-[var(--ui-stage-wrap-bg)]'>
-            {/* 左侧：外层舞台槽紧凑化 (px-2 py-1)，消除过宽留白 */}
-            <div className='flex-1 min-h-0 px-2 py-1 flex flex-col overflow-hidden'>
-              <div className='flex-1 min-h-0 flex flex-col overflow-hidden bg-[var(--ui-stage-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl shadow-[var(--ui-stage-shadow)] relative'>
+            {/* 左侧：外层舞台槽紧凑化 (p-1)，横向纵向均精简至 4px */}
+            <div className='flex-1 min-h-0 p-1 flex flex-col overflow-hidden'>
+              <div className='flex-1 min-h-0 flex flex-col overflow-hidden bg-[var(--ui-stage-bg)] border border-[color:var(--ui-border-hairline)] rounded-xl shadow-[var(--ui-stage-shadow)] relative'>
                 <MessageList
                   messages={activeMessages}
                   isGenerating={isGenerating}

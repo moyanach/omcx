@@ -403,6 +403,15 @@ function buildGitSection(gitInfo) {
   return parts.join("\n");
 }
 
+function buildCustomSystemPromptSection(customPrompt) {
+  if (!customPrompt || !String(customPrompt).trim()) return "";
+  return [
+    "【用户全局自定义系统指示 (User Custom Instructions)】",
+    "用户在全局设置中指定了以下专属行为偏好与研发要求，请与内置准则共同严格遵循：",
+    String(customPrompt).trim(),
+  ].join("\n");
+}
+
 function buildSystemContext({
   workDir = null,
   matchedWorkspace = null,
@@ -415,6 +424,7 @@ function buildSystemContext({
   model = "",
   enableTools = true,
   permissionMode = "auto-sandbox",
+  customSystemPrompt = "",
   gitInfo: providedGitInfo = undefined,
 } = {}) {
   const gitInfo = providedGitInfo !== undefined ? providedGitInfo : getGitSnapshot(workDir);
@@ -428,6 +438,7 @@ function buildSystemContext({
 
   push("behavior", buildBehaviorSection());
   push("sandbox", buildPermissionSandboxSection(permissionMode));
+  push("custom_prompt", buildCustomSystemPromptSection(customSystemPrompt));
   push("rules", buildRulesSection(projectRules));
   push("skills", buildSkillsSection(skills));
   push("memory", buildMemorySection(memories, memoryIndex));

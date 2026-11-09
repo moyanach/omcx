@@ -512,6 +512,7 @@ function buildReasoningPayload(apiModelId, provider, reasoningEffort) {
 
 /**
  * 异步旁路会话标题生成器 (Fire-and-forget Asynchronous Sidecar)
+ * 支持 AI 智能提炼 + 本地关键词提纯双重保底，彻底杜绝会话一直名为“新的 Agent 会话”
  */
 async function generateSessionTitleSidecar(sessionId, userPrompt, currentModelId, webContents) {
   try {
@@ -520,13 +521,45 @@ async function generateSessionTitleSidecar(sessionId, userPrompt, currentModelId
       return; // 用户已自定义过标题，绝不覆盖
     }
 
-    const cleanPrompt = String(userPrompt || "").trim();
+    let cleanPrompt = String(userPrompt || "").trim();
+    // 过滤掉 [image #1] 占位符与 @ 提及标签，提取真正的用户意图文字
+    cleanPrompt = cleanPrompt
+      .replace(/\[image\s*#?\d+\]/gi, "")
+      .replace(/@\S+/g, "")
+      .trim();
     if (!cleanPrompt || cleanPrompt.length < 2) return;
 
-    const liteModelChoice = pickLiteModel(currentModelId);
-    const { modelBaseUrl, modelApiKey, apiModelId } = getModelConfig(liteModelChoice, "gpt-4o");
-    if (!modelBaseUrl || (!modelApiKey && liteModelChoice !== "ollama")) {
-      return;
+    // 本地规则提炼保底函数
+    const applyLocalFallbackTitle = () => {
+      let snippet = cleanPrompt
+        .replace(/^(请问|帮我|请帮我|如何|怎么|麻烦|想问下|我想|分析一下|看一下|看看)[：:，,\s]*/i, "")
+        .replace(/[\r\n\t]+/g, " ")
+        .trim();
+      if (snippet.length > 15) {
+        snippet = snippet.slice(0, 15);
+      }
+      if (snippet.length >= 2) {
+        const updated = storageService.updateSessionGeneratedTitle(sessionId, snippet);
+        if (updated && webContents && !webContents.isDestroyed()) {
+          webContents.send("session-title-updated", { sessionId, title: snippet });
+          console.log(`[title-sidecar:fallback] applied local fallback title for ${sessionId}: "${snippet}"`);
+        }
+      }
+    };
+
+    // 优先使用当前正在调用的会话模型配置 (既然用户刚成功发送，说明该模型 100% 可用且密钥有效)
+    let { modelBaseUrl, modelApiKey, apiModelId } = getModelConfig(currentModelId, "gpt-4o");
+    if (!modelBaseUrl || (!modelApiKey && currentModelId !== "ollama")) {
+      const liteChoice = pickLiteModel(currentModelId);
+      const liteCfg = getModelConfig(liteChoice, "gpt-4o");
+      if (liteCfg.modelBaseUrl && (liteCfg.modelApiKey || liteChoice === "ollama")) {
+        modelBaseUrl = liteCfg.modelBaseUrl;
+        modelApiKey = liteCfg.modelApiKey;
+        apiModelId = liteCfg.apiModelId;
+      } else {
+        applyLocalFallbackTitle();
+        return;
+      }
     }
 
     const controller = new AbortController();
@@ -540,6 +573,7 @@ async function generateSessionTitleSidecar(sessionId, userPrompt, currentModelId
       headers["Authorization"] = `Bearer ${modelApiKey}`;
     }
 
+    // 纯净标准的命名请求体，严禁附带非法的 reasoning_effort 避免 400 阻断
     const response = await fetch(`${modelBaseUrl}/chat/completions`, {
       method: "POST",
       headers,
@@ -560,17 +594,23 @@ async function generateSessionTitleSidecar(sessionId, userPrompt, currentModelId
         max_tokens: 30,
         temperature: 0.2,
         stream: false,
-        reasoning_effort: "none",
       }),
     });
 
     clearTimeout(timeoutTimer);
 
-    if (!response.ok) return;
+    if (!response.ok) {
+      console.warn(`[title-sidecar] AI 标题接口返回 HTTP ${response.status}，切换本地规则提纯命名`);
+      applyLocalFallbackTitle();
+      return;
+    }
 
     const data = await response.json();
     let rawTitle = data?.choices?.[0]?.message?.content?.trim();
-    if (!rawTitle) return;
+    if (!rawTitle) {
+      applyLocalFallbackTitle();
+      return;
+    }
 
     // 输出清洗
     let title = rawTitle
@@ -584,11 +624,28 @@ async function generateSessionTitleSidecar(sessionId, userPrompt, currentModelId
       const updated = storageService.updateSessionGeneratedTitle(sessionId, title);
       if (updated && webContents && !webContents.isDestroyed()) {
         webContents.send("session-title-updated", { sessionId, title });
-        console.log(`[title-sidecar] generated title for ${sessionId}: "${title}"`);
+        console.log(`[title-sidecar] generated AI title for ${sessionId}: "${title}"`);
       }
+    } else {
+      applyLocalFallbackTitle();
     }
   } catch (err) {
-    // 旁路任务静默失败，绝不打扰主流程
+    console.warn(`[title-sidecar] 异常 (${err.message})，使用本地规则提纯命名`);
+    try {
+      let snippet = String(userPrompt || "")
+        .replace(/\[image\s*#?\d+\]/gi, "")
+        .replace(/@\S+/g, "")
+        .replace(/^(请问|帮我|请帮我|如何|怎么|麻烦|想问下|我想|分析一下|看一下|看看)[：:，,\s]*/i, "")
+        .replace(/[\r\n\t]+/g, " ")
+        .trim();
+      if (snippet.length > 15) snippet = snippet.slice(0, 15);
+      if (snippet.length >= 2) {
+        const updated = storageService.updateSessionGeneratedTitle(sessionId, snippet);
+        if (updated && webContents && !webContents.isDestroyed()) {
+          webContents.send("session-title-updated", { sessionId, title: snippet });
+        }
+      }
+    } catch {}
   }
 }
 
@@ -1876,6 +1933,8 @@ app.whenReady().then(() => {
               })
             : [];
 
+        const globalCustomSystemPrompt = storageService.getConfig("custom_system_prompt") || "";
+
         const buildInstruction = () =>
           buildSystemContext({
             workDir: sessionWorkDir,
@@ -1889,6 +1948,7 @@ app.whenReady().then(() => {
             model: `${provider}/${apiModelId}`,
             enableTools,
             permissionMode: sessionToolContext.permissionMode,
+            customSystemPrompt: globalCustomSystemPrompt,
             gitInfo,
           });
 
