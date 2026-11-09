@@ -24,8 +24,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
   dbDeleteSession: (id) => ipcRenderer.invoke("db-delete-session", id),
   dbGetSessionWorkDir: (id) => ipcRenderer.invoke("db-get-session-work-dir", id),
   dbUpdateSessionWorkDir: (id, workDir) => ipcRenderer.invoke("db-update-session-work-dir", id, workDir),
+  dbUpdateSessionWorkspace: (id, workspaceId, workDir) =>
+    ipcRenderer.invoke("db-update-session-workspace", { id, workspaceId, workDir }),
   dbUpdateSessionPermissionMode: (id, permissionMode) =>
     ipcRenderer.invoke("db-update-session-permission-mode", { id, permissionMode }),
+  dbUpdateSessionReasoningEffort: (id, reasoningEffort) =>
+    ipcRenderer.invoke("db-update-session-reasoning-effort", { id, reasoningEffort }),
   dbGetMessages: (sessionId) => ipcRenderer.invoke("db-get-messages", sessionId),
   dbAddMessage: (message) => ipcRenderer.invoke("db-add-message", message),
   dbDeleteMessagesAfter: (sessionId, timestamp) =>
@@ -99,7 +103,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     onPermissionRequest,
     onTodosUpdate,
     onCompaction,
-    permissionMode
+    permissionMode,
+    reasoningEffort
   ) => {
     const dataChannel = `chat-stream-data-${sessionId}`;
     const endChannel = `chat-stream-end-${sessionId}`;
@@ -165,7 +170,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.once(endChannel, endHandler);
     ipcRenderer.once(errorChannel, errorHandler);
 
-    // 触发主进程的流式 Agent 请求 (显式透传当前绑定的工作空间目录与权限模式)
+    // 触发主进程的流式 Agent 请求 (显式透传当前绑定的工作空间目录、权限模式与推理强度)
     ipcRenderer.send("chat-request", {
       sessionId,
       messages,
@@ -173,6 +178,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       enableTools,
       workDir,
       permissionMode,
+      reasoningEffort,
     });
   },
 
@@ -188,5 +194,43 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (event, data) => callback(data);
     ipcRenderer.on("session-permission-mode-updated", handler);
     return () => ipcRenderer.removeListener("session-permission-mode-updated", handler);
+  },
+
+  // ─── 软件自动更新管理 ─────────────────────────────
+  getAppVersion: () => ipcRenderer.invoke("get-app-version"),
+  checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
+  startDownloadUpdate: () => ipcRenderer.invoke("start-download-update"),
+  quitAndInstallUpdate: () => ipcRenderer.invoke("quit-and-install-update"),
+  openReleasePage: (url) => ipcRenderer.invoke("open-release-page", url),
+
+  onUpdateChecking: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on("update-checking", handler);
+    return () => ipcRenderer.removeListener("update-checking", handler);
+  },
+  onUpdateAvailable: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-available", handler);
+    return () => ipcRenderer.removeListener("update-available", handler);
+  },
+  onUpdateNotAvailable: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-not-available", handler);
+    return () => ipcRenderer.removeListener("update-not-available", handler);
+  },
+  onUpdateDownloadProgress: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-download-progress", handler);
+    return () => ipcRenderer.removeListener("update-download-progress", handler);
+  },
+  onUpdateDownloaded: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-downloaded", handler);
+    return () => ipcRenderer.removeListener("update-downloaded", handler);
+  },
+  onUpdateError: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("update-error", handler);
+    return () => ipcRenderer.removeListener("update-error", handler);
   },
 });

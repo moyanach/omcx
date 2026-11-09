@@ -17,6 +17,7 @@ const crypto = require("crypto");
 
 // 引入核心业务服务
 const storageService = require("./services/storageService");
+const { initAutoUpdater } = require("./services/updaterService");
 const {
   getWorkspaceGitStatus,
   getWorkspaceFileDiff,
@@ -387,6 +388,126 @@ function pickLiteModel(currentModelId) {
     return LITE_MODEL_HINTS.some((hint) => id.includes(hint));
   });
   return found?.id || currentModelId;
+}
+
+/**
+ * 根据大模型厂商与模型特征指纹，安全注入 5 档推理强度参数
+ * 档位: "off" | "low" | "medium" | "high" | "max"
+ */
+function buildReasoningPayload(apiModelId, provider, reasoningEffort) {
+  if (!reasoningEffort || reasoningEffort === "off") {
+    return { payload: {}, isThinkingModel: false };
+  }
+
+  const modelLower = String(apiModelId || "").toLowerCase();
+  const providerLower = String(provider || "").toLowerCase();
+
+  // 1. OpenAI o系列与原生支持 reasoning_effort 的推理模型 (o1, o3, o3-mini, o4 等)
+  const isOpenAIReasoning =
+    /\b(o1|o3|o4)\b/i.test(modelLower) ||
+    modelLower.includes("o1-") ||
+    modelLower.includes("o3-") ||
+    modelLower.includes("o4-") ||
+    modelLower.includes("reasoning");
+
+  if (isOpenAIReasoning) {
+    const effortMap = {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      max: "high",
+    };
+    const mapped = effortMap[reasoningEffort] || "medium";
+    const payload = { reasoning_effort: mapped };
+    if (reasoningEffort === "max") {
+      payload.max_completion_tokens = 25000;
+    }
+    return { payload, isThinkingModel: true };
+  }
+
+  // 2. Anthropic Claude 3.7+ 思考模型规范 (claude-3-7-sonnet, claude-4 等)
+  const isClaudeThinking =
+    (providerLower === "anthropic" || modelLower.includes("claude")) &&
+    (modelLower.includes("3-7") || modelLower.includes("3.7") || modelLower.includes("claude-4") || modelLower.includes("thinking"));
+
+  if (isClaudeThinking) {
+    const budgetMap = {
+      low: 2048,
+      medium: 4096,
+      high: 8192,
+      max: 16384,
+    };
+    const budget = budgetMap[reasoningEffort] || 4096;
+    return {
+      payload: {
+        thinking: {
+          type: "enabled",
+          budget_tokens: budget,
+        },
+        temperature: 1.0,
+      },
+      isThinkingModel: true,
+    };
+  }
+
+  // 3. Google Gemini 思考模型 (gemini-2.0-flash-thinking, gemini-3.8-flash-high 等)
+  const isGeminiThinking =
+    modelLower.includes("gemini") &&
+    (modelLower.includes("thinking") || modelLower.includes("flash") || modelLower.includes("high") || modelLower.includes("pro"));
+
+  if (isGeminiThinking) {
+    const geminiEffortMap = {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      max: "high",
+    };
+    const geminiBudgetMap = {
+      low: 2048,
+      medium: 4096,
+      high: 8192,
+      max: 16384,
+    };
+    return {
+      payload: {
+        reasoning_effort: geminiEffortMap[reasoningEffort] || "medium",
+        thinking_budget: geminiBudgetMap[reasoningEffort] || 4096,
+      },
+      isThinkingModel: true,
+    };
+  }
+
+  // 4. 显式开源推理模型 (DeepSeek-R1 / QwQ 等)
+  const isGenericReasoning =
+    modelLower.includes("r1") ||
+    modelLower.includes("reasoner") ||
+    modelLower.includes("qwq") ||
+    modelLower.includes("deepseek-r1");
+
+  if (isGenericReasoning) {
+    return {
+      payload: {
+        reasoning_effort: reasoningEffort === "max" ? "high" : reasoningEffort,
+        reasoning: {
+          effort: reasoningEffort === "max" ? "high" : reasoningEffort,
+        },
+      },
+      isThinkingModel: true,
+    };
+  }
+
+  // 5. 其它明确带 thinking / reason 的模型
+  if (modelLower.includes("thinking") || modelLower.includes("reason")) {
+    return {
+      payload: {
+        reasoning_effort: reasoningEffort === "max" ? "high" : reasoningEffort,
+      },
+      isThinkingModel: true,
+    };
+  }
+
+  // 6. 普通纯聊天模型 (gpt-4o, claude-3-5, qwen2.5 等)：坚决不注入未知的 reasoning_effort 字段
+  return { payload: {}, isThinkingModel: false };
 }
 
 /**
@@ -784,6 +905,26 @@ app.whenReady().then(() => {
       const session = storageService.getSessions().find((s) => s.id === id);
       if (session) {
         session.work_dir = workDir || null;
+        storageService.saveSession(session);
+        return true;
+      }
+      return false;
+    })
+  );
+
+  ipcMain.handle(
+    "db-update-session-workspace",
+    safeHandler((event, { id, workspaceId, workDir }) => {
+      return storageService.updateSessionWorkspace(id, workspaceId, workDir);
+    })
+  );
+
+  ipcMain.handle(
+    "db-update-session-reasoning-effort",
+    safeHandler((event, { id, reasoningEffort }) => {
+      const session = storageService.getSessions().find((s) => s.id === id);
+      if (session) {
+        session.reasoning_effort = reasoningEffort || "off";
         storageService.saveSession(session);
         return true;
       }
@@ -1458,7 +1599,7 @@ app.whenReady().then(() => {
   // --- 流式聊天与 Agent 执行循环 ---
   ipcMain.on(
     "chat-request",
-    async (event, { sessionId, messages, model, enableTools, workDir, permissionMode }) => {
+    async (event, { sessionId, messages, model, enableTools, workDir, permissionMode, reasoningEffort }) => {
       const { modelBaseUrl, modelApiKey, provider, apiModelId, contextLimit, supportsVision } =
         getModelConfig(model, "gpt-4o");
 
@@ -1477,6 +1618,12 @@ app.whenReady().then(() => {
         sessionWorkDir = session?.work_dir || null;
       }
 
+      const sessionReasoningEffort =
+        reasoningEffort ||
+        session?.reasoning_effort ||
+        session?.reasoningEffort ||
+        "medium";
+
       const resolvedPermissionMode = normalizePermissionMode(
         permissionMode ||
           session?.permission_mode ||
@@ -1487,10 +1634,15 @@ app.whenReady().then(() => {
 
       if (
         session &&
-        (session.work_dir !== sessionWorkDir || session.permission_mode !== resolvedPermissionMode)
+        (session.work_dir !== sessionWorkDir ||
+          session.permission_mode !== resolvedPermissionMode ||
+          (reasoningEffort && session.reasoning_effort !== reasoningEffort))
       ) {
         session.work_dir = sessionWorkDir;
         session.permission_mode = resolvedPermissionMode;
+        if (reasoningEffort) {
+          session.reasoning_effort = reasoningEffort;
+        }
         storageService.saveSession(session);
       }
 
@@ -1925,20 +2077,56 @@ app.whenReady().then(() => {
         }
 
         async function doStreamRequestOnce(requestMessages, requestBody) {
-          const requestBodyFinal = {
+          const reasoningSpec = buildReasoningPayload(apiModelId, provider, sessionReasoningEffort);
+          let requestBodyFinal = {
             model: apiModelId,
             messages: requestMessages,
             stream: true,
             temperature: 0.2,
+            ...reasoningSpec.payload,
             ...requestBody,
           };
 
-          const resp = await fetch(`${modelBaseUrl}/chat/completions`, {
+          let resp = await fetch(`${modelBaseUrl}/chat/completions`, {
             method: "POST",
             headers,
             signal: sessionAbort.abortController.signal,
             body: JSON.stringify(requestBodyFinal),
           });
+
+          // 核心容错安全退避：若远端网关对未知思考参数返回 400，自动剥离推理参数并无缝降级重试
+          if (!resp.ok && resp.status === 400 && Object.keys(reasoningSpec.payload).length > 0) {
+            try {
+              const errClone = resp.clone();
+              const errText = await errClone.text();
+              const lowerErr = errText.toLowerCase();
+              if (
+                lowerErr.includes("reasoning") ||
+                lowerErr.includes("thinking") ||
+                lowerErr.includes("unrecognized") ||
+                lowerErr.includes("unknown parameter") ||
+                lowerErr.includes("extra fields not permitted") ||
+                lowerErr.includes("not supported")
+              ) {
+                console.warn(`[chat-stream] 远端端点不支持思考参数 (${errText.slice(0, 150)})，已自动剥离重试...`);
+                delete requestBodyFinal.reasoning_effort;
+                delete requestBodyFinal.thinking;
+                delete requestBodyFinal.thinking_budget;
+                delete requestBodyFinal.reasoning;
+                delete requestBodyFinal.max_completion_tokens;
+                requestBodyFinal.temperature = 0.2;
+
+                resp = await fetch(`${modelBaseUrl}/chat/completions`, {
+                  method: "POST",
+                  headers,
+                  signal: sessionAbort.abortController.signal,
+                  body: JSON.stringify(requestBodyFinal),
+                });
+              }
+            } catch (fallbackErr) {
+              console.warn("[chat-stream] 自动退避重试执行失败:", fallbackErr.message);
+            }
+          }
 
           if (!resp.ok) {
             const errText = await resp.text();
@@ -2475,6 +2663,7 @@ app.whenReady().then(() => {
   );
 
   createWindow();
+  initAutoUpdater(mainWindow);
 });
 
 app.on("before-quit", () => {

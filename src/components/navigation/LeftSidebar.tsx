@@ -32,6 +32,7 @@ const LeftSidebar: React.FC = () => {
   const {
     sessions,
     activeSessionId,
+    activeWorkspaceId,
     generatingBySession,
     workspaces,
     setActiveSession,
@@ -93,19 +94,24 @@ const LeftSidebar: React.FC = () => {
   );
 
   const { workspaceGroups, standaloneGroups, unassigned } = useMemo(() => {
-    const coveredPaths = new Set<string>();
-    workspaces.forEach((workspace) => {
-      workspace.folders.forEach((folder) => coveredPaths.add(folder.path));
-    });
+    const assignedSessionIds = new Set<string>();
 
     const groups: ProjectGroup[] = workspaces.map((workspace) => {
       const groupSessions = visibleSessions
-        .filter(
-          (session) =>
+        .filter((session) => {
+          if (session.workspaceId) {
+            return session.workspaceId === workspace.id;
+          }
+          // 向后兼容历史未保存 workspaceId 但目录属于该空间的数据
+          return (
             session.workDir &&
             workspace.folders.some((folder) => folder.path === session.workDir)
-        )
+          );
+        })
         .sort(byUpdated);
+
+      groupSessions.forEach((s) => assignedSessionIds.add(s.id));
+
       return {
         key: `ws:${workspace.id}`,
         workspaceId: workspace.id,
@@ -120,9 +126,11 @@ const LeftSidebar: React.FC = () => {
       return group.sessions.length > 0 || group.name.toLowerCase().includes(normalizedQuery);
     });
 
+    const remainingSessions = visibleSessions.filter((s) => !assignedSessionIds.has(s.id));
+
     const pseudoMap = new Map<string, Session[]>();
-    visibleSessions.forEach((session) => {
-      if (!session.workDir || coveredPaths.has(session.workDir)) return;
+    remainingSessions.forEach((session) => {
+      if (!session.workDir) return;
       const list = pseudoMap.get(session.workDir) || [];
       list.push(session);
       pseudoMap.set(session.workDir, list);
@@ -138,7 +146,7 @@ const LeftSidebar: React.FC = () => {
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
-    const unassignedSessions = visibleSessions
+    const unassignedSessions = remainingSessions
       .filter((session) => !session.workDir)
       .sort(byUpdated);
 
@@ -155,7 +163,11 @@ const LeftSidebar: React.FC = () => {
 
   const handleNewTask = async () => {
     const activeSession = sessions.find((session) => session.id === activeSessionId);
-    await addSession({ workDir: activeSession?.workDir, model: activeSession?.model });
+    await addSession({
+      workspaceId: activeWorkspaceId || activeSession?.workspaceId,
+      workDir: activeSession?.workDir,
+      model: activeSession?.model,
+    });
     setActiveNavTab("sessions");
   };
 
@@ -277,20 +289,28 @@ const LeftSidebar: React.FC = () => {
 
   const renderGroup = (group: ProjectGroup) => {
     const isExpanded = !collapsed[group.key];
+    const isCurrentActive = Boolean(group.workspaceId && group.workspaceId === activeWorkspaceId);
 
     return (
       <div key={group.key} className="mb-0.5">
         <div
           onClick={() => toggleGroup(group.key)}
-          className="group/ws mx-1.5 flex items-center gap-1.5 pl-1.5 pr-1 py-1.5 rounded-lg cursor-pointer text-[var(--ui-text-secondary)] hover:bg-[var(--ui-chip-bg)] transition-colors"
+          className={`group/ws mx-1.5 flex items-center gap-1.5 pl-1.5 pr-1 py-1.5 rounded-lg cursor-pointer transition-colors ${
+            isCurrentActive
+              ? "text-[var(--ui-text-primary)] bg-[var(--ui-accent-blue-soft)]/40 font-medium"
+              : "text-[var(--ui-text-secondary)] hover:bg-[var(--ui-chip-bg)]"
+          }`}
         >
           {isExpanded ? (
             <ChevronDown size={12} className="text-[var(--ui-text-faint)] flex-shrink-0" />
           ) : (
             <ChevronRight size={12} className="text-[var(--ui-text-faint)] flex-shrink-0" />
           )}
-          <FolderGit2 size={14} className="text-[var(--ui-accent-blue)] flex-shrink-0" />
-          <span className="flex-1 min-w-0 text-xs font-medium truncate">{group.name}</span>
+          <FolderGit2 size={14} className={isCurrentActive ? "text-blue-400 flex-shrink-0" : "text-[var(--ui-accent-blue)] flex-shrink-0"} />
+          <span className="flex-1 min-w-0 text-xs truncate">{group.name}</span>
+          {isCurrentActive && (
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" title="当前活跃工作空间" />
+          )}
           {group.workspaceId && group.canCreate && (
             <button
               onClick={(e) => {

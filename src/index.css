@@ -474,54 +474,53 @@ html[data-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #64748b !important;
 }
 
-/* ─── 实时状态条：会话进行中顺时针环绕边框光线特效 ─── */
-@property --omcx-border-angle {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: false;
-}
-
-@keyframes omcx-border-spin {
-  to {
-    --omcx-border-angle: 360deg;
+/* ─── 实时状态条：会话进行中顺时针周长环绕边框流光特效 (Border Beam) ─── */
+@keyframes omcx-border-beam-flow {
+  0% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: -100;
   }
 }
 
-.omcx-livebar-glow {
-  border: 1px solid transparent;
-  background:
-    linear-gradient(var(--ui-livebar-bg), var(--ui-livebar-bg)) padding-box,
-    conic-gradient(
-      from var(--omcx-border-angle),
-      rgba(96, 165, 250, 0.10) 0deg,
-      rgba(96, 165, 250, 0.95) 45deg,
-      rgba(147, 197, 253, 1) 60deg,
-      rgba(96, 165, 250, 0.95) 75deg,
-      rgba(96, 165, 250, 0.10) 120deg,
-      rgba(96, 165, 250, 0.10) 360deg
-    ) border-box;
-  animation: omcx-border-spin 2.6s linear infinite;
+.omcx-border-beam-core {
+  stroke-dasharray: 20 80;
+  animation: omcx-border-beam-flow 3.2s linear infinite;
 }
 
-/* 亮色主题下光线略加深以保证可见 */
-html[data-theme="light"] .omcx-livebar-glow {
-  background:
-    linear-gradient(var(--ui-livebar-bg), var(--ui-livebar-bg)) padding-box,
-    conic-gradient(
-      from var(--omcx-border-angle),
-      rgba(37, 99, 235, 0.12) 0deg,
-      rgba(37, 99, 235, 0.9) 45deg,
-      rgba(59, 130, 246, 1) 60deg,
-      rgba(37, 99, 235, 0.9) 75deg,
-      rgba(37, 99, 235, 0.12) 120deg,
-      rgba(37, 99, 235, 0.12) 360deg
-    ) border-box;
+.omcx-border-beam-glow {
+  stroke-dasharray: 22 78;
+  animation: omcx-border-beam-flow 3.2s linear infinite;
+  filter: drop-shadow(0 0 6px rgba(96, 165, 250, 0.8)) drop-shadow(0 0 12px rgba(59, 130, 246, 0.5));
+}
+
+html[data-theme="light"] .omcx-border-beam-glow {
+  filter: drop-shadow(0 0 5px rgba(37, 99, 235, 0.65)) drop-shadow(0 0 10px rgba(59, 130, 246, 0.4));
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .omcx-livebar-glow {
+  .omcx-border-beam-core,
+  .omcx-border-beam-glow {
     animation: none;
-    border-color: var(--ui-accent-blue-border);
+    stroke-dasharray: none;
   }
+}
+
+/* 呼吸微光图标特效 (替代雷达式扩散) */
+@keyframes omcx-pulse-glow {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+    filter: drop-shadow(0 0 6px rgba(96, 165, 250, 0.85));
+  }
+}
+
+.omcx-icon-pulse-glow {
+  animation: omcx-pulse-glow 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 

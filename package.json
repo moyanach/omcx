@@ -16,6 +16,7 @@
     "anser": "^2.3.5",
     "cheerio": "^1.2.0",
     "diff": "^9.0.0",
+    "electron-updater": "^6.8.11",
     "katex": "^0.19.1",
     "langchain": "^1.4.4",
     "lucide-react": "^0.344.0",
@@ -66,6 +67,13 @@
         "dmg",
         "zip"
       ]
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "moyanach",
+        "repo": "omcx"
+      }
+    ]
   }
 }

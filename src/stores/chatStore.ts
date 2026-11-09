@@ -21,6 +21,7 @@ export interface Message {
 }
 
 export type PermissionMode = "plan" | "auto-sandbox" | "ask" | "full-access";
+export type ReasoningEffort = "off" | "low" | "medium" | "high" | "max";
 
 export interface Session {
   id: string;
@@ -28,8 +29,10 @@ export interface Session {
   title_source?: string;
   updatedAt: number;
   model?: string;
+  workspaceId?: string;
   workDir?: string;
   permissionMode?: PermissionMode;
+  reasoningEffort?: ReasoningEffort;
   archived?: boolean;
 }
 
@@ -161,6 +164,7 @@ interface ChatState {
   subagents: SubagentItem[];
   workspaces: WorkspaceItem[];
   models: LlmModelItem[];
+  activeWorkspaceId: string | null;
   isWorkspaceModalOpen: boolean;
   activeEditingWorkspace: WorkspaceItem | null;
   defaultPermissionMode: PermissionMode;
@@ -198,14 +202,17 @@ interface ChatState {
   deleteWorkspace: (id: string) => Promise<void>;
   openWorkspaceModal: (ws?: WorkspaceItem | null) => void;
   closeWorkspaceModal: () => void;
+  setActiveWorkspace: (workspaceId: string | null) => Promise<void>;
+  setSessionWorkspace: (sessionId: string, workspaceId: string | null, workDir?: string | null) => Promise<void>;
   addSessionWithWorkspacePrompt: () => Promise<void>;
-  addSession: (options?: { workDir?: string | null; model?: string }) => Promise<void>;
+  addSession: (options?: { workDir?: string | null; workspaceId?: string | null; model?: string }) => Promise<string | null>;
   addSessionInWorkspace: (workspaceId: string) => Promise<string | null>;
   setActiveSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
   archiveSession: (id: string, isArchived: boolean) => Promise<void>;
   updateSessionTitle: (id: string, title: string) => Promise<void>;
   setSessionWorkDir: (id: string, workDir: string | null) => Promise<void>;
+  setSessionReasoningEffort: (id: string, effort: ReasoningEffort) => Promise<void>;
   addMessage: (sessionId: string, message: Message, skipDb?: boolean) => Promise<void>;
   appendMessageDelta: (
     sessionId: string,
@@ -248,6 +255,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   subagents: [],
   workspaces: [],
   models: [],
+  activeWorkspaceId: null,
   defaultPermissionMode: 'auto-sandbox',
   workbenchOpen: false,
   workbenchWidth: 560,
@@ -693,6 +701,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   closeWorkspaceModal: () => set({ isWorkspaceModalOpen: false, activeEditingWorkspace: null }),
 
+  setActiveWorkspace: async (workspaceId) => {
+    if (!workspaceId) {
+      set({ activeWorkspaceId: null });
+      return;
+    }
+    const targetWs = get().workspaces.find((w) => w.id === workspaceId);
+    if (!targetWs) return;
+
+    set({ activeWorkspaceId: workspaceId });
+
+    // 寻找属于该工作空间的会话（优先 workspaceId 显式强绑定，向后兼容目录匹配）
+    const wsSessions = get()
+      .sessions.filter(
+        (s) =>
+          s.workspaceId === workspaceId ||
+          (!s.workspaceId && s.workDir && targetWs.folders.some((f) => f.path === s.workDir))
+      )
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+    if (wsSessions.length > 0) {
+      await get().setActiveSession(wsSessions[0].id);
+    } else {
+      await get().addSessionInWorkspace(workspaceId);
+    }
+  },
+
+  setSessionWorkspace: async (sessionId, workspaceId, workDir) => {
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId
+          ? {
+              ...s,
+              workspaceId: workspaceId || undefined,
+              workDir: workDir !== undefined ? (workDir || undefined) : s.workDir,
+            }
+          : s
+      ),
+      activeWorkspaceId:
+        sessionId === state.activeSessionId && workspaceId
+          ? workspaceId
+          : state.activeWorkspaceId,
+    }));
+    if (window.electronAPI?.dbUpdateSessionWorkspace) {
+      try {
+        await window.electronAPI.dbUpdateSessionWorkspace(sessionId, workspaceId, workDir);
+      } catch (err) {
+        console.error("更新会话工作空间失败:", err);
+      }
+    }
+  },
+
   addSessionWithWorkspacePrompt: async () => {
     await get().addSession();
     // 新建会话时，给一个空的工作空间，里面的目录为空，弹窗让用户选择
@@ -775,6 +834,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         initialMessages[newId] = [welcomeMsg];
       }
 
+      const activeSession = dbSessions.find((s: any) => s.id === activeId);
+      let initialWsId = activeSession?.workspace_id || activeSession?.workspaceId || null;
+      if (!initialWsId && (activeSession?.work_dir || activeSession?.workDir)) {
+        const dir = activeSession?.work_dir || activeSession?.workDir;
+        const matched = get().workspaces.find((w) => w.folders.some((f) => f.path === dir));
+        if (matched) initialWsId = matched.id;
+      }
+
       set({
         sessions: dbSessions.map((s: any) => ({
           id: s.id,
@@ -782,11 +849,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           title_source: s.title_source || "default",
           updatedAt: s.updated_at || s.updatedAt,
           model: s.model || "",
+          workspaceId: s.workspace_id || s.workspaceId || undefined,
           workDir: s.work_dir || s.workDir || undefined,
           permissionMode: (s.permission_mode || s.permissionMode || "auto-sandbox") as PermissionMode,
+          reasoningEffort: (s.reasoning_effort || s.reasoningEffort || "medium") as ReasoningEffort,
           archived: !!s.archived,
         })),
         activeSessionId: activeId,
+        activeWorkspaceId: initialWsId,
         messages: initialMessages,
       });
 
@@ -852,7 +922,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   addSession: async (options) => {
-    if (!window.electronAPI) return;
+    if (!window.electronAPI) return null;
     const newId = crypto.randomUUID();
 
     const chatModels = get().models.filter((model) => !model.type || model.type === "chat");
@@ -861,29 +931,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
     );
     const fallbackModel = usableModels[0]?.id || chatModels[0]?.id || "";
 
+    // 确定 workspaceId 与 workDir
+    let targetWorkspaceId = options?.workspaceId !== undefined ? options.workspaceId : get().activeWorkspaceId;
+    let targetWorkDir = options?.workDir;
+    if (targetWorkspaceId && !targetWorkDir) {
+      const ws = get().workspaces.find((w) => w.id === targetWorkspaceId);
+      const primary = ws?.folders.find((f) => f.isPrimary) || ws?.folders[0];
+      targetWorkDir = primary?.path || undefined;
+    } else if (!targetWorkspaceId && targetWorkDir) {
+      const ws = get().workspaces.find((w) => w.folders.some((f) => f.path === targetWorkDir));
+      if (ws) targetWorkspaceId = ws.id;
+    }
+
     const newSession: Session = {
       id: newId,
       title: "新的 Agent 会话",
       updatedAt: Date.now(),
       model: options?.model || fallbackModel,
-      workDir: options?.workDir || undefined,
+      workspaceId: targetWorkspaceId || undefined,
+      workDir: targetWorkDir || undefined,
       permissionMode: get().defaultPermissionMode || "auto-sandbox",
+      reasoningEffort: "medium",
     };
 
     try {
-      await window.electronAPI.dbAddSession(newSession);
+      await window.electronAPI.dbAddSession({
+        ...newSession,
+        workspace_id: newSession.workspaceId,
+        work_dir: newSession.workDir,
+        reasoning_effort: newSession.reasoningEffort,
+      });
 
       set((state) => ({
         sessions: [newSession, ...state.sessions],
         activeSessionId: newId,
+        activeWorkspaceId: targetWorkspaceId || state.activeWorkspaceId,
         messages: { ...state.messages, [newId]: [] },
         outputs: [],
         contextMetrics: null,
       }));
 
-      get().refreshMcpAndSkills(options?.workDir || null);
+      get().refreshMcpAndSkills(newSession.workDir || null);
+      get().refreshGitStatus(newSession.workDir || null);
+      return newId;
     } catch (err) {
       console.error("创建会话失败:", err);
+      return null;
     }
   },
 
@@ -900,8 +993,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const workspaceSessions = get()
       .sessions.filter(
         (session) =>
-          session.workDir &&
-          workspace.folders.some((folder) => folder.path === session.workDir)
+          session.workspaceId === workspaceId ||
+          (!session.workspaceId &&
+            session.workDir &&
+            workspace.folders.some((folder) => folder.path === session.workDir))
       )
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
@@ -921,19 +1016,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       title: "新的 Agent 会话",
       updatedAt: Date.now(),
       model,
+      workspaceId,
       workDir: workDir || undefined,
       permissionMode:
         workspaceSessions[0]?.permissionMode ||
         get().defaultPermissionMode ||
         "auto-sandbox",
+      reasoningEffort: workspaceSessions[0]?.reasoningEffort || "medium",
     };
 
     try {
-      await window.electronAPI.dbAddSession(newSession);
+      await window.electronAPI.dbAddSession({
+        ...newSession,
+        workspace_id: newSession.workspaceId,
+        work_dir: newSession.workDir,
+        reasoning_effort: newSession.reasoningEffort,
+      });
 
       set((state) => ({
         sessions: [newSession, ...state.sessions],
         activeSessionId: newId,
+        activeWorkspaceId: workspaceId,
         messages: { ...state.messages, [newId]: [] },
         outputs: [],
         contextMetrics: null,
@@ -943,7 +1046,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       get().refreshGitStatus(workDir);
       return newId;
     } catch (err) {
-      console.error("创建会话失败:", err);
+      console.error("创建工作空间会话失败:", err);
       return null;
     }
   },
@@ -954,6 +1057,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const state = get();
     const targetSession = state.sessions.find((s) => s.id === id);
     const workDir = targetSession?.workDir;
+
+    let targetWorkspaceId = targetSession?.workspaceId || null;
+    if (!targetWorkspaceId && workDir) {
+      const matched = state.workspaces.find((w) =>
+        w.folders.some((f) => f.path === workDir)
+      );
+      if (matched) targetWorkspaceId = matched.id;
+    }
 
     if (!state.messages[id]) {
       try {
@@ -977,6 +1088,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         set((state) => ({
           activeSessionId: id,
+          activeWorkspaceId: targetWorkspaceId !== null ? targetWorkspaceId : state.activeWorkspaceId,
           contextMetrics: state.contextMetricsBySession[id] || null,
           messages: { ...state.messages, [id]: mappedMsgs }
         }));
@@ -986,6 +1098,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } else {
       set((state) => ({
         activeSessionId: id,
+        activeWorkspaceId: targetWorkspaceId !== null ? targetWorkspaceId : state.activeWorkspaceId,
         contextMetrics: state.contextMetricsBySession[id] || null,
       }));
     }
@@ -1066,11 +1179,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSessionWorkDir: async (id, workDir) => {
     if (!window.electronAPI) return;
     try {
+      let matchedWorkspaceId: string | undefined = undefined;
+      if (workDir) {
+        const matched = get().workspaces.find((w) =>
+          w.folders.some((f) => f.path === workDir)
+        );
+        if (matched) matchedWorkspaceId = matched.id;
+      }
+
       await window.electronAPI.dbUpdateSessionWorkDir(id, workDir || "");
+      if (window.electronAPI.dbUpdateSessionWorkspace && matchedWorkspaceId) {
+        try {
+          await window.electronAPI.dbUpdateSessionWorkspace(id, matchedWorkspaceId, workDir);
+        } catch (e) {
+          console.warn("同步更新会话工作空间失败:", e);
+        }
+      }
+
       set((state) => ({
         sessions: state.sessions.map((s) =>
-          s.id === id ? { ...s, workDir: workDir || undefined, updatedAt: Date.now() } : s
+          s.id === id
+            ? {
+                ...s,
+                workDir: workDir || undefined,
+                workspaceId: matchedWorkspaceId || s.workspaceId,
+                updatedAt: Date.now(),
+              }
+            : s
         ),
+        activeWorkspaceId:
+          id === state.activeSessionId && matchedWorkspaceId
+            ? matchedWorkspaceId
+            : state.activeWorkspaceId,
       }));
 
       // 如果有选择工作目录，保存至最近项目
@@ -1091,6 +1231,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ]);
     } catch (err) {
       console.error("更新会话工作目录失败:", err);
+    }
+  },
+
+  setSessionReasoningEffort: async (id, effort) => {
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === id ? { ...s, reasoningEffort: effort } : s
+      ),
+    }));
+    if (window.electronAPI?.dbUpdateSessionReasoningEffort) {
+      try {
+        await window.electronAPI.dbUpdateSessionReasoningEffort(id, effort);
+      } catch (err) {
+        console.error("更新会话推理强度失败:", err);
+      }
     }
   },
 

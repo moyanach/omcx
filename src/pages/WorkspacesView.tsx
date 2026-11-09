@@ -17,7 +17,8 @@ export const WorkspacesView: React.FC = () => {
   const {
     sessions,
     activeSessionId,
-    setSessionWorkDir,
+    activeWorkspaceId,
+    setActiveWorkspace,
     workspaces,
     fetchWorkspaces,
     saveWorkspace,
@@ -47,14 +48,9 @@ export const WorkspacesView: React.FC = () => {
     setIsModalOpen(true);
   };
 
-  // 切换到指定空间并进入会话
+  // 切换到指定空间并激活对应会话
   const handleEnterWorkspace = async (ws: WorkspaceItem) => {
-    if (activeSessionId) {
-      const primary = ws.folders.find((f) => f.isPrimary) || ws.folders[0];
-      if (primary) {
-        await setSessionWorkDir(activeSessionId, primary.path);
-      }
-    }
+    await setActiveWorkspace(ws.id);
     setActiveNavTab('sessions');
   };
 
@@ -98,9 +94,13 @@ export const WorkspacesView: React.FC = () => {
         <div className='flex-1 overflow-y-auto p-6 custom-scrollbar'>
           <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4'>
             {workspaces.map((ws) => {
-              const isCurrent = ws.folders.some((f) => f.path === currentWorkDir);
+              const isCurrent = activeWorkspaceId
+                ? ws.id === activeWorkspaceId
+                : ws.folders.some((f) => f.path === currentWorkDir);
               const projectSessions = sessions.filter((s) =>
-                ws.folders.some((f) => f.path === s.workDir)
+                s.workspaceId
+                  ? s.workspaceId === ws.id
+                  : ws.folders.some((f) => f.path === s.workDir)
               );
 
               return (
