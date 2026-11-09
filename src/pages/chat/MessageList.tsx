@@ -1395,7 +1395,16 @@ const AgentLiveStatusBar: React.FC<{
   activeTodos: TodoItem[];
   hasStreamingText: boolean;
 }> = ({ activeToolCalls, activeTodos, hasStreamingText }) => {
-  const [elapsedSec, setElapsedSec] = useState(0);
+  const { activeSessionId, sessionStartTimeBySession } = useChatStore();
+  const sessionStartTime = activeSessionId ? sessionStartTimeBySession[activeSessionId] : null;
+
+  // 根据会话绝对启动时间戳计算物理流逝秒数：切换会话重新挂载时无缝继承真实时长，彻底杜绝归零重置
+  const computeElapsedSec = () => {
+    if (!sessionStartTime) return 0;
+    return Math.max(0, Math.floor((Date.now() - sessionStartTime) / 1000));
+  };
+
+  const [elapsedSec, setElapsedSec] = useState<number>(computeElapsedSec);
   const barRef = useRef<HTMLDivElement>(null);
   const [barDimensions, setBarDimensions] = useState<{ width: number; height: number }>({
     width: 0,
@@ -1403,12 +1412,12 @@ const AgentLiveStatusBar: React.FC<{
   });
 
   useEffect(() => {
-    setElapsedSec(0);
+    setElapsedSec(computeElapsedSec());
     const timer = setInterval(() => {
-      setElapsedSec((s) => s + 1);
+      setElapsedSec(computeElapsedSec());
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [sessionStartTime]);
 
   // 动态测量物理像素宽高，让 SVG 边框光晕 100% 贴合卡片四边与圆角，自适应任何卡片伸缩
   useEffect(() => {

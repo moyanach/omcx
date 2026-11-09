@@ -142,6 +142,7 @@ export function useStreamChat() {
     truncateMessages,
     setContextMetrics,
     refreshOutputs,
+    setSessionStartTime,
   } = useChatStore();
 
   const isGenerating = Boolean(activeSessionId && generatingBySession[activeSessionId]);
@@ -164,6 +165,7 @@ export function useStreamChat() {
       setSessionPermission(targetSessionId, null);
 
       const startTime = Date.now();
+      setSessionStartTime(targetSessionId, startTime);
 
       const userMsg = {
         id: crypto.randomUUID(),
@@ -215,6 +217,7 @@ export function useStreamChat() {
           (endPayload: any) => {
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
+            setSessionStartTime(targetSessionId, null);
             const durationMs = Date.now() - startTime;
             const durationFormatted = formatDuration(durationMs);
             const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
@@ -270,6 +273,7 @@ export function useStreamChat() {
             appendMessageDelta(targetSessionId, assistantMsgId, errorContent);
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
+            setSessionStartTime(targetSessionId, null);
             saveMessageToDb(targetSessionId, {
               id: assistantMsgId,
               role: "assistant",
@@ -381,6 +385,7 @@ export function useStreamChat() {
       setSessionPermission(targetSessionId, null);
 
       const startTime = Date.now();
+      setSessionStartTime(targetSessionId, startTime);
 
       try {
         await truncateMessages(targetSessionId, msgId);
@@ -422,6 +427,7 @@ export function useStreamChat() {
           (endPayload: any) => {
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
+            setSessionStartTime(targetSessionId, null);
             const durationMs = Date.now() - startTime;
             const durationFormatted = formatDuration(durationMs);
             const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
@@ -477,6 +483,7 @@ export function useStreamChat() {
             appendMessageDelta(targetSessionId, assistantMsgId, errorContent);
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
+            setSessionStartTime(targetSessionId, null);
             saveMessageToDb(targetSessionId, {
               id: assistantMsgId,
               role: "assistant",
@@ -576,10 +583,11 @@ export function useStreamChat() {
 
   const cancelMessage = useCallback(() => {
     if (!activeSessionId) return;
+    setSessionStartTime(activeSessionId, null);
     if (window.electronAPI?.cancelChat) {
       window.electronAPI.cancelChat(activeSessionId);
     }
-  }, [activeSessionId]);
+  }, [activeSessionId, setSessionStartTime]);
 
   const runQueuedPromptNow = useCallback(
     async (prompt: QueuedPrompt, callbacks?: StreamCallbacks) => {

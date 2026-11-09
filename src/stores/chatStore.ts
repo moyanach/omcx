@@ -235,6 +235,8 @@ interface ChatState {
   truncateMessages: (sessionId: string, messageId: string) => Promise<void>;
 
   setSessionGenerating: (sessionId: string, isGenerating: boolean) => void;
+  sessionStartTimeBySession: Record<string, number | null>;
+  setSessionStartTime: (sessionId: string, startTime: number | null) => void;
   upsertSessionToolCall: (sessionId: string, status: any) => void;
   clearSessionToolCalls: (sessionId: string) => void;
   setSessionTodos: (sessionId: string, todos: any[]) => void;
@@ -261,6 +263,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeSessionId: null,
   messages: {},
   generatingBySession: {},
+  sessionStartTimeBySession: {},
   toolCallsBySession: {},
   todosBySession: {},
   permissionBySession: {},
@@ -1145,11 +1148,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const nextQueue = { ...state.promptQueueBySession };
         delete nextQueue[id];
 
+        const nextStartTimes = { ...state.sessionStartTimeBySession };
+        delete nextStartTimes[id];
+
         return {
           sessions: newSessions,
           activeSessionId: newActive,
           messages: newMessages,
           promptQueueBySession: nextQueue,
+          sessionStartTimeBySession: nextStartTimes,
         };
       });
 
@@ -1422,6 +1429,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       generatingBySession: {
         ...state.generatingBySession,
         [sessionId]: isGenerating,
+      },
+    })),
+
+  setSessionStartTime: (sessionId, startTime) =>
+    set((state) => ({
+      sessionStartTimeBySession: {
+        ...state.sessionStartTimeBySession,
+        [sessionId]: startTime,
       },
     })),
 
