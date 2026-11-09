@@ -213,7 +213,7 @@ function checkSensitivePath(targetPath, sessionId = null) {
     }
   }
 
-  // 2. 保护 ~/.omcx/sessions 下除当前会话 attachments 之外的会话历史文件
+  // 2. 保护 ~/.omcx/sessions 下除 attachments 之外的会话历史与配置元数据文件
   const sessionRoots = [
     path.join(USER_HOME, ".omcx", "sessions"),
     path.join(DEFAULT_OMCX_HOME, "sessions"),
@@ -221,15 +221,15 @@ function checkSensitivePath(targetPath, sessionId = null) {
   ];
   for (const sRoot of sessionRoots) {
     if (isUnderFolderReal(realTarget, sRoot)) {
-      if (sessionId) {
-        const allowedAttachDir = path.join(sRoot, String(sessionId), "attachments");
-        if (isUnderFolderReal(realTarget, allowedAttachDir)) {
-          return { blocked: false };
-        }
+      // 允许访问会话 attachments 附件静态媒体资源 (图片、文本、文档预览)
+      const relative = path.relative(sRoot, realTarget);
+      const segments = relative.split(path.sep);
+      if (segments.length >= 2 && segments[1] === "attachments") {
+        return { blocked: false };
       }
       return {
         blocked: true,
-        reason: `安全沙箱已拦截直接访问会话存储目录: ${targetPath}`,
+        reason: `安全沙箱已拦截直接访问会话核心数据文件: ${targetPath}`,
       };
     }
   }

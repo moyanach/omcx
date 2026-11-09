@@ -660,14 +660,18 @@ app.whenReady().then(() => {
 
   function isAllowedLocalMediaPath(targetPath) {
     const resolved = path.resolve(targetPath);
-    if (checkSensitivePath(resolved).blocked) {
-      return false;
-    }
-    // 1. 允许访问会话附件目录 (~/.omcx/sessions/<id>/attachments/*)
+
+    // 1. 最高优先级放行会话附件目录 (~/.omcx/sessions/<id>/attachments/*)
     if (storageService.isSessionAttachmentPath(resolved)) {
       return true;
     }
-    // 2. 排除 .env 等敏感配置文件
+
+    // 2. 检查高危隐私黑名单
+    if (checkSensitivePath(resolved).blocked) {
+      return false;
+    }
+
+    // 3. 排除 .env 等敏感配置文件
     const baseName = path.basename(resolved).toLowerCase();
     if (
       baseName === ".env" ||
@@ -747,27 +751,32 @@ app.whenReady().then(() => {
         return new Response("Forbidden", { status: 403 });
       }
 
-      const fileUrl = pathToFileURL(resolvedPath).toString();
-      const response = await net.fetch(fileUrl, { bypassCustomProtocolHandlers: true });
-      const headers = new Headers(response.headers);
-      headers.set("Access-Control-Allow-Origin", "*");
-      const lower = resolvedPath.toLowerCase();
-      if (lower.endsWith(".html") || lower.endsWith(".htm")) {
-        headers.set("Content-Type", "text/html; charset=utf-8");
-      } else if (lower.endsWith(".svg")) {
-        headers.set("Content-Type", "image/svg+xml");
-      } else if (lower.endsWith(".css")) {
-        headers.set("Content-Type", "text/css; charset=utf-8");
-      } else if (lower.endsWith(".js") || lower.endsWith(".mjs")) {
-        headers.set("Content-Type", "text/javascript; charset=utf-8");
-      } else if (lower.endsWith(".json")) {
-        headers.set("Content-Type", "application/json; charset=utf-8");
+      if (!fs.existsSync(resolvedPath)) {
+        console.warn(`[protocol:local-media] 文件不存在: ${resolvedPath}`);
+        return new Response("File not found", { status: 404 });
       }
 
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers,
+      // 提取准确的标准 MIME 类型
+      const lower = resolvedPath.toLowerCase();
+      let mimeType = "application/octet-stream";
+      if (lower.endsWith(".png")) mimeType = "image/png";
+      else if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) mimeType = "image/jpeg";
+      else if (lower.endsWith(".webp")) mimeType = "image/webp";
+      else if (lower.endsWith(".gif")) mimeType = "image/gif";
+      else if (lower.endsWith(".svg")) mimeType = "image/svg+xml";
+      else if (lower.endsWith(".html") || lower.endsWith(".htm")) mimeType = "text/html; charset=utf-8";
+      else if (lower.endsWith(".css")) mimeType = "text/css; charset=utf-8";
+      else if (lower.endsWith(".js") || lower.endsWith(".mjs")) mimeType = "text/javascript; charset=utf-8";
+      else if (lower.endsWith(".json")) mimeType = "application/json; charset=utf-8";
+
+      const fileBuffer = await fs.promises.readFile(resolvedPath);
+      return new Response(fileBuffer, {
+        status: 200,
+        headers: {
+          "Content-Type": mimeType,
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=86400",
+        },
       });
     } catch (error) {
       console.error("Failed to load local file via local-media:", error);
