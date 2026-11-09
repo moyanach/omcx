@@ -9,7 +9,9 @@
  */
 
 const { autoUpdater } = require("electron-updater");
-const { ipcMain, app, shell } = require("electron");
+const { ipcMain, app, shell, dialog } = require("electron");
+const fs = require("fs");
+const path = require("path");
 
 const GITHUB_REPO_URL = "https://github.com/moyanach/omcx/releases";
 const GITHUB_API_LATEST = "https://api.github.com/repos/moyanach/omcx/releases/latest";
@@ -42,6 +44,38 @@ function isNewerVersion(remote, local) {
   return false;
 }
 
+// 应用是否已进入退出流程（由 before-quit 置位，用于看门狗判定）
+let isQuitInProgress = false;
+
+/**
+ * 定位 electron-updater 已下载并校验完成的待安装包（macOS 缓存目录）
+ */
+function findPendingUpdatePackage() {
+  try {
+    const cacheDir = app.getPath("cache");
+    const candidates = [
+      path.join(cacheDir, `${app.getName()}-updater`, "pending"),
+      path.join(cacheDir, "omcx-desktop-updater", "pending"),
+      path.join(cacheDir, "OMCX-updater", "pending"),
+    ];
+    for (const dir of candidates) {
+      if (!fs.existsSync(dir)) continue;
+      const files = fs
+        .readdirSync(dir)
+        .filter((f) => /\.(zip|dmg)$/i.test(f))
+        .map((f) => {
+          const full = path.join(dir, f);
+          return { full, mtime: fs.statSync(full).mtimeMs };
+        })
+        .sort((a, b) => b.mtime - a.mtime);
+      if (files.length > 0) return files[0].full;
+    }
+  } catch (err) {
+    console.warn("[updater] 定位已下载安装包失败:", err.message);
+  }
+  return null;
+}
+
 function initAutoUpdater(mainWindow) {
   if (isInitialized) return;
   isInitialized = true;
@@ -62,6 +96,11 @@ function initAutoUpdater(mainWindow) {
       console.warn(`[updater] ${clean}`);
     },
   };
+
+  // 记录退出流程，供安装看门狗判定
+  app.on("before-quit", () => {
+    isQuitInProgress = true;
+  });
 
   let eventHandled = false;
 
@@ -236,16 +275,86 @@ function initAutoUpdater(mainWindow) {
     }
   });
 
-  // 立即退出并重启安装
+  // 立即退出并重启安装（带诊断日志 + 1.5s 看门狗兜底，确保点击必有结果）
   ipcMain.handle("quit-and-install-update", () => {
+    const pendingPackage = findPendingUpdatePackage();
+    console.log("[updater] quitAndInstall 触发诊断:", {
+      isPackaged: app.isPackaged,
+      execPath: process.execPath,
+      appVersion: app.getVersion(),
+      downloadedVersion: updateDownloadedInfo?.version || null,
+      pendingPackage,
+    });
+
+    let installFlowStarted = false;
     try {
-      autoUpdater.quitAndInstall(false, true);
-      return { success: true };
-    } catch (err) {
-      console.error("[updater] quitAndInstall 异常:", err.message);
-      shell.openExternal(GITHUB_REPO_URL);
-      return { success: false, error: err.message };
+      autoUpdater.once("before-quit-for-update", () => {
+        installFlowStarted = true;
+        console.log("[updater] 已触发 before-quit-for-update，ShipIt 安装流程已启动");
+      });
+    } catch (e) {
+      // 忽略事件绑定异常
     }
+
+    try {
+      autoUpdater.autoInstallOnAppQuit = true;
+      autoUpdater.quitAndInstall(false, true);
+      console.log("[updater] quitAndInstall() 调用完成，等待进程退出...");
+    } catch (err) {
+      console.warn("[updater] quitAndInstall() 抛出异常:", err.message);
+    }
+
+    // 看门狗：1.5 秒后若应用仍未退出，判定 ShipIt 静默失败（多见于未签名构建），立即给出确定性兜底
+    setTimeout(() => {
+      if (isQuitInProgress) {
+        console.log("[updater] 应用已进入退出流程，安装交由系统守护进程执行");
+        return;
+      }
+
+      console.warn(
+        `[updater] 1.5s 内应用未退出 (installFlowStarted=${installFlowStarted})，判定系统级静默替换被阻断，启用兜底方案`
+      );
+
+      if (pendingPackage) {
+        try {
+          shell.showItemInFolder(pendingPackage);
+        } catch (e) {
+          // 忽略定位失败
+        }
+      }
+
+      const detail =
+        "当前构建未配置 Apple Developer ID 签名，macOS 系统守护进程无法静默替换应用（ShipIt 被系统拦截）。\n\n" +
+        (pendingPackage
+          ? `已为您在访达中定位新版安装包：\n${pendingPackage}\n\n请将 OMCX 拖入「应用程序」文件夹覆盖旧版本后重新打开。`
+          : "未在更新缓存中找到安装包，可前往 GitHub Releases 手动下载最新版本。");
+
+      const boxOptions = {
+        type: "info",
+        title: "更新已下载完成",
+        message: `新版本 v${updateDownloadedInfo?.version || ""} 已就绪`,
+        detail,
+        buttons: ["退出应用以完成安装", "稍后自行处理"],
+        defaultId: 0,
+        cancelId: 1,
+      };
+
+      const dialogPromise =
+        mainWindow && !mainWindow.isDestroyed()
+          ? dialog.showMessageBox(mainWindow, boxOptions)
+          : dialog.showMessageBox(boxOptions);
+
+      dialogPromise
+        .then(({ response }) => {
+          if (response === 0) {
+            console.log("[updater] 用户确认退出应用以完成手动覆盖安装");
+            app.exit(0);
+          }
+        })
+        .catch(() => {});
+    }, 1500);
+
+    return { success: true, pendingPackage: !!pendingPackage };
   });
 
   // 浏览器直达发布页面

@@ -1,5 +1,5 @@
-import { useCallback } from "react";
-import { useChatStore, type ChatAttachment } from "../stores/chatStore";
+import { useCallback, useEffect } from "react";
+import { useChatStore, type ChatAttachment, type QueuedPrompt } from "../stores/chatStore";
 
 interface StreamCallbacks {
   onToolStatus?: (status: {
@@ -23,6 +23,7 @@ interface StreamCallbacks {
     summarizedMessages: number;
     at: number;
   }) => void;
+  onSteered?: (steers: Array<{ id: string; content: string; at: number }>) => void;
 }
 
 function formatDuration(ms: number): string {
@@ -33,6 +34,39 @@ function formatDuration(ms: number): string {
   const mins = Math.floor(totalSeconds / 60);
   const secs = totalSeconds % 60;
   return `${mins}m ${secs}s`;
+}
+
+/**
+ * 将未被消费的纠偏指示（pendingSteers）回退为普通排队任务，插入队列最前。
+ * 场景：用户在 Agent 收尾瞬间注入纠偏，主进程已退出循环未能注入上下文。
+ */
+function recoverPendingSteers(
+  sessionId: string,
+  pendingSteers: any,
+  modelId?: string,
+  enableTools?: boolean,
+) {
+  if (!sessionId || !Array.isArray(pendingSteers) || pendingSteers.length === 0) return;
+  const store = useChatStore.getState();
+  const existing = store.promptQueueBySession[sessionId] || [];
+  const existingIds = new Set(existing.map((p) => p.id));
+  const recovered: QueuedPrompt[] = pendingSteers
+    .filter((s) => s && s.content && !existingIds.has(s.id))
+    .map((s) => ({
+      id: s.id || crypto.randomUUID(),
+      sessionId,
+      content: String(s.content),
+      modelId,
+      enableTools,
+      createdAt: Date.now(),
+    }));
+  if (recovered.length === 0) return;
+  useChatStore.setState((state) => ({
+    promptQueueBySession: {
+      ...state.promptQueueBySession,
+      [sessionId]: [...recovered, ...(state.promptQueueBySession[sessionId] || [])],
+    },
+  }));
 }
 
 function parseErrorDetails(err: string) {
@@ -119,9 +153,10 @@ export function useStreamChat() {
       enableTools: boolean,
       callbacks?: StreamCallbacks,
       attachments?: ChatAttachment[],
+      targetSessionIdOverride?: string,
     ) => {
-      if (!activeSessionId || !text.trim()) return;
-      const targetSessionId = activeSessionId;
+      const targetSessionId = targetSessionIdOverride || activeSessionId;
+      if (!targetSessionId || !text.trim()) return;
 
       setSessionGenerating(targetSessionId, true);
       clearSessionToolCalls(targetSessionId);
@@ -202,6 +237,32 @@ export function useStreamChat() {
               metadata: finalMeta,
             });
             updateMessageMetadata(targetSessionId, assistantMsgId, finalMeta);
+
+            // 收尾瞬间注入但未被消费的纠偏指示 -> 回退为排队任务，插入队首
+            recoverPendingSteers(
+              targetSessionId,
+              endPayload?.metadata?.pendingSteers,
+              selectedModel,
+              enableTools
+            );
+
+            // 若非主动取消，检查当前会话队列中是否有待执行任务，自动出队无缝接力
+            const isCancelled = Boolean(endPayload?.metadata?.cancelled);
+            if (!isCancelled) {
+              const nextPrompt = useChatStore.getState().dequeuePrompt(targetSessionId);
+              if (nextPrompt) {
+                setTimeout(() => {
+                  sendMessage(
+                    nextPrompt.content,
+                    nextPrompt.modelId || selectedModel,
+                    nextPrompt.enableTools !== undefined ? nextPrompt.enableTools : enableTools,
+                    callbacks,
+                    nextPrompt.attachments,
+                    targetSessionId
+                  );
+                }, 120);
+              }
+            }
           },
           (err: string) => {
             const errorContent = formatErrorContent(err);
@@ -266,7 +327,22 @@ export function useStreamChat() {
             callbacks?.onCompaction?.(data);
           },
           currentPermissionMode,
-          currentReasoningEffort
+          currentReasoningEffort,
+          (steers: any[]) => {
+            if (!Array.isArray(steers) || steers.length === 0) return;
+            for (const steer of steers) {
+              const content = String(steer?.content || "").trim();
+              if (!content) continue;
+              addMessage(targetSessionId, {
+                id: crypto.randomUUID(),
+                role: "user",
+                content,
+                createdAt: Date.now(),
+                metadata: { steering: true, steerRef: steer?.id },
+              });
+            }
+            callbacks?.onSteered?.(steers);
+          }
         );
       } else {
         setSessionGenerating(targetSessionId, false);
@@ -368,6 +444,32 @@ export function useStreamChat() {
               metadata: finalMeta,
             });
             updateMessageMetadata(targetSessionId, assistantMsgId, finalMeta);
+
+            // 收尾瞬间注入但未被消费的纠偏指示 -> 回退为排队任务，插入队首
+            recoverPendingSteers(
+              targetSessionId,
+              endPayload?.metadata?.pendingSteers,
+              selectedModel,
+              enableTools
+            );
+
+            // 若非主动取消，检查当前会话队列中是否有待执行任务，自动出队无缝接力
+            const isCancelled = Boolean(endPayload?.metadata?.cancelled);
+            if (!isCancelled) {
+              const nextPrompt = useChatStore.getState().dequeuePrompt(targetSessionId);
+              if (nextPrompt) {
+                setTimeout(() => {
+                  sendMessage(
+                    nextPrompt.content,
+                    nextPrompt.modelId || selectedModel,
+                    nextPrompt.enableTools !== undefined ? nextPrompt.enableTools : enableTools,
+                    callbacks,
+                    nextPrompt.attachments,
+                    targetSessionId
+                  );
+                }, 120);
+              }
+            }
           },
           (err: string) => {
             const errorContent = formatErrorContent(err);
@@ -432,7 +534,22 @@ export function useStreamChat() {
             callbacks?.onCompaction?.(data);
           },
           currentPermissionMode,
-          currentReasoningEffort
+          currentReasoningEffort,
+          (steers: any[]) => {
+            if (!Array.isArray(steers) || steers.length === 0) return;
+            for (const steer of steers) {
+              const content = String(steer?.content || "").trim();
+              if (!content) continue;
+              addMessage(targetSessionId, {
+                id: crypto.randomUUID(),
+                role: "user",
+                content,
+                createdAt: Date.now(),
+                metadata: { steering: true, steerRef: steer?.id },
+              });
+            }
+            callbacks?.onSteered?.(steers);
+          }
         );
       } catch (err) {
         console.error("重试失败:", err);
@@ -464,5 +581,74 @@ export function useStreamChat() {
     }
   }, [activeSessionId]);
 
-  return { isGenerating, sendMessage, retryMessage, cancelMessage };
+  const runQueuedPromptNow = useCallback(
+    async (prompt: QueuedPrompt, callbacks?: StreamCallbacks) => {
+      if (!prompt || !prompt.sessionId) return;
+      const targetSessionId = prompt.sessionId;
+      // 1. 从队列中移除该项
+      useChatStore.getState().removeQueuedPrompt(targetSessionId, prompt.id);
+      // 2. 若当前会话正在生成，先请求打断并等待当前轮次安全落盘
+      if (useChatStore.getState().generatingBySession[targetSessionId]) {
+        if (window.electronAPI?.cancelChat) {
+          window.electronAPI.cancelChat(targetSessionId);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 260));
+      }
+      // 3. 立即启动当前任务
+      await sendMessage(
+        prompt.content,
+        prompt.modelId || "model_chat_default",
+        prompt.enableTools !== undefined ? prompt.enableTools : true,
+        callbacks,
+        prompt.attachments,
+        targetSessionId
+      );
+    },
+    [sendMessage]
+  );
+
+  /**
+   * 中途动态转向：将用户在 Agent 执行期间追加的纠偏指示注入当前执行流程。
+   * 不会打断当前工具链，而是在下一轮模型请求前作为 user 消息插入上下文。
+   * @returns 是否成功投递到主进程
+   */
+  const steerMessage = useCallback(
+    (sessionId: string, content: string, id?: string): boolean => {
+      const text = String(content || "").trim();
+      if (!sessionId || !text) return false;
+      if (!window.electronAPI?.steerChat) return false;
+      window.electronAPI.steerChat(sessionId, text, id || crypto.randomUUID());
+      return true;
+    },
+    []
+  );
+
+  // 纠偏指令投递时若会话已结束，主进程会拒绝；此时自动回退为普通排队任务
+  useEffect(() => {
+    if (!window.electronAPI?.onSteerRejected) return;
+    const unsubscribe = window.electronAPI.onSteerRejected((payload: any) => {
+      const sessionId = payload?.sessionId;
+      const content = String(payload?.content || "").trim();
+      if (!sessionId || !content) return;
+      const store = useChatStore.getState();
+      const existing = store.promptQueueBySession[sessionId] || [];
+      if (existing.some((p) => p.id === payload.id)) return;
+      store.enqueuePrompt(sessionId, {
+        id: payload.id || crypto.randomUUID(),
+        sessionId,
+        content,
+        createdAt: Date.now(),
+      });
+    });
+    return unsubscribe;
+  }, []);
+
+  return {
+    isGenerating,
+    sendMessage,
+    retryMessage,
+    cancelMessage,
+    runQueuedPromptNow,
+    steerMessage,
+  };
 }

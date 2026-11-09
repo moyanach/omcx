@@ -44,6 +44,16 @@ export interface ContextBreakdownItem {
   label: string;
 }
 
+export interface QueuedPrompt {
+  id: string;
+  sessionId: string;
+  content: string;
+  attachments?: ChatAttachment[];
+  modelId?: string;
+  enableTools?: boolean;
+  createdAt: number;
+}
+
 export interface CompactionInfo {
   at: number;
   beforeTokens: number;
@@ -235,6 +245,15 @@ interface ChatState {
   refreshOutputs: (sessionId: string) => Promise<void>;
   refreshGitStatus: (workDir?: string | null) => Promise<void>;
   refreshMcpAndSkills: (workDir?: string | null) => Promise<void>;
+
+  // 单会话多任务排队管理 (Prompt Queuing)
+  promptQueueBySession: Record<string, QueuedPrompt[]>;
+  enqueuePrompt: (sessionId: string, prompt: QueuedPrompt) => void;
+  dequeuePrompt: (sessionId: string) => QueuedPrompt | null;
+  removeQueuedPrompt: (sessionId: string, promptId: string) => void;
+  moveQueuedPromptToTop: (sessionId: string, promptId: string) => void;
+  updateQueuedPrompt: (sessionId: string, promptId: string, newContent: string) => void;
+  clearPromptQueue: (sessionId: string) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -248,6 +267,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   contextMetricsBySession: {},
   contextMetrics: null,
   lastCompaction: null,
+  promptQueueBySession: {},
   outputs: [],
   gitStatus: null,
   mcpServers: [],
@@ -1122,10 +1142,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const newMessages = { ...state.messages };
         delete newMessages[id];
 
+        const nextQueue = { ...state.promptQueueBySession };
+        delete nextQueue[id];
+
         return {
           sessions: newSessions,
           activeSessionId: newActive,
           messages: newMessages,
+          promptQueueBySession: nextQueue,
         };
       });
 
@@ -1503,4 +1527,76 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.error("刷新 MCP 和 Skills 失败:", err);
     }
   },
+
+  // ─── 排队任务管理 Actions ─────────────────────────
+  enqueuePrompt: (sessionId, prompt) =>
+    set((state) => {
+      const current = state.promptQueueBySession[sessionId] || [];
+      return {
+        promptQueueBySession: {
+          ...state.promptQueueBySession,
+          [sessionId]: [...current, prompt],
+        },
+      };
+    }),
+
+  dequeuePrompt: (sessionId) => {
+    const queue = get().promptQueueBySession[sessionId] || [];
+    if (queue.length === 0) return null;
+    const [first, ...rest] = queue;
+    set((state) => ({
+      promptQueueBySession: {
+        ...state.promptQueueBySession,
+        [sessionId]: rest,
+      },
+    }));
+    return first;
+  },
+
+  removeQueuedPrompt: (sessionId, promptId) =>
+    set((state) => {
+      const current = state.promptQueueBySession[sessionId] || [];
+      return {
+        promptQueueBySession: {
+          ...state.promptQueueBySession,
+          [sessionId]: current.filter((p) => p.id !== promptId),
+        },
+      };
+    }),
+
+  moveQueuedPromptToTop: (sessionId, promptId) =>
+    set((state) => {
+      const current = state.promptQueueBySession[sessionId] || [];
+      const idx = current.findIndex((p) => p.id === promptId);
+      if (idx <= 0) return state;
+      const target = current[idx];
+      const next = [target, ...current.slice(0, idx), ...current.slice(idx + 1)];
+      return {
+        promptQueueBySession: {
+          ...state.promptQueueBySession,
+          [sessionId]: next,
+        },
+      };
+    }),
+
+  updateQueuedPrompt: (sessionId, promptId, newContent) =>
+    set((state) => {
+      const current = state.promptQueueBySession[sessionId] || [];
+      return {
+        promptQueueBySession: {
+          ...state.promptQueueBySession,
+          [sessionId]: current.map((p) =>
+            p.id === promptId ? { ...p, content: newContent } : p
+          ),
+        },
+      };
+    }),
+
+  clearPromptQueue: (sessionId) =>
+    set((state) => ({
+      promptQueueBySession: {
+        ...state.promptQueueBySession,
+        [sessionId]: [],
+      },
+    })),
 }));

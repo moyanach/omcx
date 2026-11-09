@@ -48,10 +48,16 @@ const ChatView: React.FC = () => {
     setWorkbenchOpen,
     pendingMentionInsert,
     setPendingMentionInsert,
+    promptQueueBySession,
+    enqueuePrompt,
+    removeQueuedPrompt,
+    moveQueuedPromptToTop,
+    clearPromptQueue,
   } = useChatStore();
 
   const { activeView } = useAppStore();
-  const { isGenerating, sendMessage, retryMessage, cancelMessage } = useStreamChat();
+  const { isGenerating, sendMessage, retryMessage, cancelMessage, runQueuedPromptNow, steerMessage } =
+    useStreamChat();
 
   const [input, setInput] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
@@ -94,6 +100,7 @@ const ChatView: React.FC = () => {
   const activeToolCalls = activeSessionId ? toolCallsBySession[activeSessionId] || [] : [];
   const activeTodos = activeSessionId ? todosBySession[activeSessionId] || [] : [];
   const pendingPermission = activeSessionId ? permissionBySession[activeSessionId] || null : null;
+  const activePromptQueue = activeSessionId ? promptQueueBySession[activeSessionId] || [] : [];
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
   // 全局响应式模型列表 (过滤 chat 类型)
@@ -152,7 +159,7 @@ const ChatView: React.FC = () => {
   };
 
   const handleSend = async () => {
-    if (!input.trim() || !activeSessionId || isGenerating) return;
+    if (!input.trim() || !activeSessionId) return;
     const text = input;
 
     let savedAttachments: ChatAttachment[] = [];
@@ -188,9 +195,28 @@ const ChatView: React.FC = () => {
     attachments.forEach((item) => URL.revokeObjectURL(item.previewUrl));
     setAttachments([]);
     setInput('');
+
+    const targetModel = selectedModel || availableChatModels[0]?.id || 'model_chat_default';
+
+    // 若当前 Agent 正在生成中，将输入内容放入当前会话的排队队列
+    if (isGenerating) {
+      enqueuePrompt(activeSessionId, {
+        id: crypto.randomUUID(),
+        sessionId: activeSessionId,
+        content: text.trim(),
+        attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
+        modelId: targetModel,
+        enableTools,
+        createdAt: Date.now(),
+      });
+      showToast('已加入任务队列，当前 Agent 完成后将自动接力执行', 2500);
+      return;
+    }
+
+    // 空闲状态直接发起 Agent 请求
     sendMessage(
       text,
-      selectedModel || availableChatModels[0]?.id || 'model_chat_default',
+      targetModel,
       enableTools,
       {
         onCompaction: (data) => {
@@ -203,6 +229,55 @@ const ChatView: React.FC = () => {
       },
       savedAttachments.length > 0 ? savedAttachments : undefined
     );
+  };
+
+  const handleRunQueuedNow = async (prompt: any) => {
+    showToast('正在立即打断并启动该排队任务...', 2000);
+    await runQueuedPromptNow(prompt, {
+      onCompaction: (data) => {
+        setLastCompaction(data);
+      },
+    });
+  };
+
+  const handleEditQueued = (prompt: any) => {
+    if (!activeSessionId) return;
+    removeQueuedPrompt(activeSessionId, prompt.id);
+    setInput(prompt.content);
+    showToast('已将排队任务撤回至输入框', 2000);
+  };
+
+  // 将排队项直接合并追加至当前正在执行的 Agent 上下文（中途补充/澄清/纠偏）
+  const handleSteerQueued = async (prompt: any) => {
+    if (!activeSessionId) return;
+    if (!isGenerating) {
+      showToast('当前 Agent 未在执行，请使用「立即执行」', 2200);
+      return;
+    }
+    const ok = steerMessage(activeSessionId, prompt.content, prompt.id);
+    if (ok) {
+      removeQueuedPrompt(activeSessionId, prompt.id);
+      showToast('已追加至当前执行流程，Agent 将自主结合最新上下文推进', 2600);
+    }
+  };
+
+  // 将输入框当前内容直接注入执行中的 Agent（不入队）
+  const handleSteerCurrent = () => {
+    if (!activeSessionId || !input.trim()) return;
+    if (!isGenerating) {
+      showToast('当前 Agent 未在执行，该消息将按普通发送处理', 2000);
+      handleSend();
+      return;
+    }
+    if (attachments.length > 0) {
+      showToast('中途追加上下文暂仅支持纯文本，请先移除附件或改为排队发送', 3000);
+      return;
+    }
+    const ok = steerMessage(activeSessionId, input);
+    if (ok) {
+      setInput('');
+      showToast('已追加至当前执行流程，Agent 将自主结合最新上下文推进', 2600);
+    }
   };
 
   const handleRetry = (msg: any) => {
@@ -407,6 +482,20 @@ const ChatView: React.FC = () => {
                     if (activeSessionId) {
                       updateSessionModel(activeSessionId, val);
                     }
+                  }}
+                  promptQueue={activePromptQueue}
+                  onRunQueuedNow={handleRunQueuedNow}
+                  onSteerQueuedNow={handleSteerQueued}
+                  onSteerCurrent={handleSteerCurrent}
+                  onEditQueued={handleEditQueued}
+                  onMoveQueuedToTop={(id) => {
+                    if (activeSessionId) moveQueuedPromptToTop(activeSessionId, id);
+                  }}
+                  onRemoveQueued={(id) => {
+                    if (activeSessionId) removeQueuedPrompt(activeSessionId, id);
+                  }}
+                  onClearQueue={() => {
+                    if (activeSessionId) clearPromptQueue(activeSessionId);
                   }}
                 />
               </div>

@@ -280,6 +280,9 @@ const SettingsView: React.FC = () => {
   // 全局自定义系统提示词
   const [customSystemPrompt, setCustomSystemPrompt] = useState("");
 
+  // 正在重启安装更新
+  const [isRestartingUpdate, setIsRestartingUpdate] = useState(false);
+
   // ─── 软件自动更新状态 ───
   const [currentAppVersion, setCurrentAppVersion] = useState("v2.1.0");
   const [updateStatus, setUpdateStatus] = useState<
@@ -385,9 +388,19 @@ const SettingsView: React.FC = () => {
     }
   };
 
-  const handleQuitAndInstall = () => {
-    if (window.electronAPI?.quitAndInstallUpdate) {
-      window.electronAPI.quitAndInstallUpdate();
+  const handleQuitAndInstall = async () => {
+    if (!window.electronAPI?.quitAndInstallUpdate) return;
+    setIsRestartingUpdate(true);
+    showToast("正在准备退出并重启应用...");
+    try {
+      const res = await window.electronAPI.quitAndInstallUpdate();
+      if (!res?.success) {
+        setIsRestartingUpdate(false);
+        showToast("重启失败，已为您打开新版安装包位置");
+      }
+    } catch (err: any) {
+      setIsRestartingUpdate(false);
+      showToast(`重启失败: ${err?.message || "未知异常"}`);
     }
   };
 
@@ -1803,7 +1816,9 @@ const SettingsView: React.FC = () => {
                               新版本已就绪！
                             </span>
                             <p className="text-[11px] text-neutral-400">
-                              最新安装包已完成校验，重启客户端即可无缝完成升级。
+                              {isRestartingUpdate
+                                ? "正在退出应用并应用更新，请稍候..."
+                                : "最新安装包已完成校验，重启客户端即可无缝完成升级。"}
                             </p>
                           </div>
                         </div>
@@ -1812,11 +1827,12 @@ const SettingsView: React.FC = () => {
                       <div className="flex items-center gap-2 pt-1">
                         <button
                           type="button"
+                          disabled={isRestartingUpdate}
                           onClick={handleQuitAndInstall}
-                          className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                          className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
                         >
-                          <RefreshCw size={13} />
-                          <span>立即重启并安装更新</span>
+                          <RefreshCw size={13} className={isRestartingUpdate ? "animate-spin" : ""} />
+                          <span>{isRestartingUpdate ? "正在重启应用..." : "立即重启并安装更新"}</span>
                         </button>
                         <button
                           type="button"

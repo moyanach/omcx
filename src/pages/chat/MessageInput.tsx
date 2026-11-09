@@ -23,9 +23,11 @@ import {
   Flame,
   Rocket,
   Cpu,
+  CornerDownRight,
 } from "lucide-react";
-import { useChatStore, type PermissionMode, type ReasoningEffort } from "@/stores/chatStore";
+import { useChatStore, type PermissionMode, type ReasoningEffort, type QueuedPrompt } from "@/stores/chatStore";
 import MentionPopover, { type MentionPosition } from "@/pages/chat/MentionPopover";
+import PromptQueueBar from "@/pages/chat/PromptQueueBar";
 import {
   MAX_CHAT_ATTACHMENTS,
   MAX_CHAT_ATTACHMENT_BYTES,
@@ -70,6 +72,18 @@ interface Props {
 
   // 中断当前生成任务
   onCancel?: () => void;
+
+  // 任务排队支持
+  promptQueue?: QueuedPrompt[];
+  onRunQueuedNow?: (prompt: QueuedPrompt) => void;
+  onSteerQueuedNow?: (prompt: QueuedPrompt) => void;
+  onEditQueued?: (prompt: QueuedPrompt) => void;
+  onMoveQueuedToTop?: (promptId: string) => void;
+  onRemoveQueued?: (promptId: string) => void;
+  onClearQueue?: () => void;
+
+  // 直接将当前输入框内容注入执行中的 Agent（中途纠偏，不入队）
+  onSteerCurrent?: () => void;
 }
 
 const PERMISSION_MODE_OPTIONS: Array<{
@@ -221,6 +235,14 @@ const MessageInput: React.FC<Props> = ({
   onChangeAttachments,
   onNotify,
   onCancel,
+  promptQueue,
+  onRunQueuedNow,
+  onSteerQueuedNow,
+  onEditQueued,
+  onMoveQueuedToTop,
+  onRemoveQueued,
+  onClearQueue,
+  onSteerCurrent,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -523,6 +545,11 @@ const MessageInput: React.FC<Props> = ({
     if (e.key === "Enter") {
       if (e.shiftKey) return;
       e.preventDefault();
+      // 生成中按 Cmd/Ctrl + Enter：直接注入当前执行流程（中途纠偏），不进入排队
+      if (isGenerating && (e.metaKey || e.ctrlKey) && value.trim() && onSteerCurrent) {
+        onSteerCurrent();
+        return;
+      }
       onSend();
     }
   };
@@ -611,6 +638,19 @@ const MessageInput: React.FC<Props> = ({
 
   return (
     <div className="w-full px-3 pb-1.5 pt-0.5 bg-transparent flex-shrink-0">
+      {/* 吸附在输入框上方的任务排队栏 */}
+      {promptQueue && promptQueue.length > 0 && (
+        <PromptQueueBar
+          queue={promptQueue}
+          onRunNow={(p) => onRunQueuedNow?.(p)}
+          onSteerNow={(p) => onSteerQueuedNow?.(p)}
+          onEdit={(p) => onEditQueued?.(p)}
+          onMoveToTop={(id) => onMoveQueuedToTop?.(id)}
+          onRemove={(id) => onRemoveQueued?.(id)}
+          onClearAll={() => onClearQueue?.()}
+        />
+      )}
+
       {/* 现代化输入卡片 (全宽 100% 铺满大 Card 底部，与上方消息区边缘保持垂直对齐线) */}
       <div
         onDragOver={handleDragOver}
@@ -690,7 +730,11 @@ const MessageInput: React.FC<Props> = ({
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             onBlur={() => window.setTimeout(() => setMention(null), 150)}
-            placeholder="输入消息或任务，输入 @ 引用资源，粘贴或拖入图片、表格、文档，Enter 发送，Shift + Enter 换行..."
+            placeholder={
+              isGenerating
+                ? "Agent 执行中：Enter 加入任务队列，⌘ + Enter 追加上下文，Esc 停止生成..."
+                : "输入消息或任务，输入 @ 引用资源，粘贴或拖入图片、表格、文档，Enter 发送，Shift + Enter 换行..."
+            }
             style={{ border: 'none', outline: 'none', boxShadow: 'none' }}
             className="chat-textarea-seamless w-full max-h-44 min-h-[46px] bg-transparent text-[var(--ui-text-primary)] placeholder-[var(--ui-text-faint)] resize-none border-none outline-none ring-0 focus:ring-0 focus:outline-none focus:border-none shadow-none text-sm leading-relaxed scroll-smooth"
             rows={1}
@@ -997,17 +1041,40 @@ const MessageInput: React.FC<Props> = ({
             )}
           </div>
 
-          {/* 右侧发送 / 停止按钮 */}
-          <div>
+          {/* 右侧发送 / 停止 / 排队 / 纠偏按钮 */}
+          <div className="flex items-center gap-1.5">
             {isGenerating ? (
-              <button
-                type="button"
-                onClick={() => onCancel?.()}
-                className="w-8 h-8 rounded-xl flex items-center justify-center bg-[var(--ui-accent-rose-soft)] hover:bg-rose-600 text-[var(--ui-accent-rose)] hover:text-white border border-[color:var(--ui-accent-rose-border)] hover:border-rose-500 transition-all shadow-sm active:scale-95 cursor-pointer"
-                title="停止生成 (Esc)"
-              >
-                <Square size={11} fill="currentColor" />
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => onCancel?.()}
+                  className="w-8 h-8 rounded-xl flex items-center justify-center bg-[var(--ui-accent-rose-soft)] hover:bg-rose-600 text-[var(--ui-accent-rose)] hover:text-white border border-[color:var(--ui-accent-rose-border)] hover:border-rose-500 transition-all shadow-sm active:scale-95 cursor-pointer"
+                  title="停止生成 (Esc)"
+                >
+                  <Square size={11} fill="currentColor" />
+                </button>
+                {value.trim() && onSteerCurrent && (
+                  <button
+                    type="button"
+                    onClick={onSteerCurrent}
+                    className="h-8 px-2 rounded-xl flex items-center gap-1 justify-center bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/35 shadow-sm active:scale-95 cursor-pointer transition-all"
+                    title="追加至当前执行（中途补充背景/澄清细节/纠偏，⌘ + Enter）"
+                  >
+                    <CornerDownRight size={13} />
+                    <span className="text-[11px] font-medium whitespace-nowrap">追加</span>
+                  </button>
+                )}
+                {value.trim() && (
+                  <button
+                    type="button"
+                    onClick={onSend}
+                    className="w-8 h-8 rounded-xl flex items-center justify-center bg-amber-500 hover:bg-amber-400 text-black shadow-sm active:scale-95 cursor-pointer transition-all"
+                    title="加入任务队列 (Enter)"
+                  >
+                    <Send size={13} className="translate-x-0.5 -translate-y-0.5" />
+                  </button>
+                )}
+              </>
             ) : (
               <button
                 onClick={onSend}

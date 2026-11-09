@@ -1741,6 +1741,23 @@ app.whenReady().then(() => {
     }
   });
 
+  // --- 中途动态转向 (Mid-flight Steering) ---
+  // 用户在 Agent 执行期间追加的纠偏/补充指示，不打断当前工具链，
+  // 而是暂存于该会话的执行上下文，在下一轮工具循环发起模型请求前注入为 user 消息。
+  ipcMain.on("chat-steer", (event, { sessionId, id, content } = {}) => {
+    const text = String(content || "").trim();
+    if (!sessionId || !text) return;
+    const active = activeStreamSessions.get(sessionId);
+    if (!active || active.cancelled) {
+      // 会话已结束或已取消，返回未被接收的信号，由前端回退为普通排队任务
+      event.reply("chat-steer-rejected", { sessionId, id, content: text });
+      return;
+    }
+    if (!Array.isArray(active.steerQueue)) active.steerQueue = [];
+    active.steerQueue.push({ id: id || `steer_${Date.now()}`, content: text, at: Date.now() });
+    console.log(`[chat-steer] session ${sessionId} queued steering injection (pending=${active.steerQueue.length})`);
+  });
+
   // --- 流式聊天与 Agent 执行循环 ---
   ipcMain.on(
     "chat-request",
@@ -1801,6 +1818,7 @@ app.whenReady().then(() => {
         abortController: new AbortController(),
         cancelled: false,
         toolContext: null,
+        steerQueue: [],
       };
       activeStreamSessions.set(sessionId, sessionAbort);
 
@@ -2458,6 +2476,19 @@ app.whenReady().then(() => {
 
           if (sessionAbort.cancelled) break;
 
+          // 中途动态转向：在每轮工具循环发起模型请求之前，将用户追加的上下文/指示注入会话
+          if (Array.isArray(sessionAbort.steerQueue) && sessionAbort.steerQueue.length > 0) {
+            const steers = sessionAbort.steerQueue.splice(0);
+            for (const steer of steers) {
+              apiMessages.push({
+                role: "user",
+                content: `【用户中途更新/追加的需求上下文】\n${steer.content}\n\n[系统引导]：用户在当前任务执行中途补充或更新了上述内容。请自主综合分析用户意图（是补充业务背景、澄清细节、细化边界条件，还是调整/纠偏当前执行路线）：\n- 若属于补充背景、澄清细节或细化约束：请将该上下文无缝融合进当前任务，并在后续步骤与最终答复中予以落实；\n- 若属于方向调整或纠偏：请以最新指示为准调整后续行动，无需推倒已完成且不冲突的工作。`,
+              });
+            }
+            event.reply(`chat-stream-steered-${sessionId}`, steers);
+            console.log(`[chat-steer] injected ${steers.length} steering message(s) into context`);
+          }
+
           const result = await (async () => {
             await maybeCompact("preflight");
             try {
@@ -2476,6 +2507,28 @@ app.whenReady().then(() => {
             const cleanRoundText = (result.content || "").trim();
             const hasIncompleteTodos =
               initialTodos.length > 0 && initialTodos.some((t) => t.status !== "completed");
+
+            // 中途动态转向：模型本轮已准备收尾，但用户在执行期间追加了纠偏指示
+            // -> 保留本轮正式回复，注入纠偏后立即在当前会话内继续推理（无需用户重新发送）
+            if (Array.isArray(sessionAbort.steerQueue) && sessionAbort.steerQueue.length > 0) {
+              const steers = sessionAbort.steerQueue.splice(0);
+              if (cleanRoundText) {
+                apiMessages.push({ role: "assistant", content: result.content });
+              }
+              for (const steer of steers) {
+                apiMessages.push({
+                  role: "user",
+                  content: `【用户中途更新/追加的需求上下文】\n${steer.content}\n\n[系统引导]：用户在当前任务执行中途补充或更新了上述内容。请自主综合分析用户意图（是补充业务背景、澄清细节、细化边界条件，还是调整/纠偏当前执行路线）：\n- 若属于补充背景、澄清细节或细化约束：请将该上下文无缝融合进当前任务，并在后续步骤与最终答复中予以落实；\n- 若属于方向调整或纠偏：请以最新指示为准调整后续行动，无需推倒已完成且不冲突的工作。`,
+                });
+              }
+              event.reply(`chat-stream-steered-${sessionId}`, steers);
+              console.log(
+                `[chat-steer] assistant was finishing; injected ${steers.length} steering message(s) and continued the loop`
+              );
+              // 让前端消息流中清晰呈现"已接收中途追加上下文并继续推进"的分隔
+              sendData("\n\n");
+              continue;
+            }
 
             // 模式 A：正在输出长篇正文或代码块时触发单次输出长度上限 -> 无缝断点续写
             if (result.hitLengthLimit && cleanRoundText.length > 0 && continuationCount < MAX_CONTINUATIONS) {
@@ -2758,6 +2811,7 @@ app.whenReady().then(() => {
             toolRounds: toolRound,
             toolSteps: executedToolSteps,
             todos: initialTodos,
+            pendingSteers: Array.isArray(sessionAbort.steerQueue) ? sessionAbort.steerQueue.slice() : [],
             compaction: {
               count: compactionStats.count,
               beforeTokens: compactionStats.beforeTokens,
@@ -2795,6 +2849,7 @@ app.whenReady().then(() => {
                 toolRounds: toolRound,
                 toolSteps: executedToolSteps,
                 todos: initialTodos,
+                pendingSteers: Array.isArray(sessionAbort.steerQueue) ? sessionAbort.steerQueue.slice() : [],
               },
             });
           } catch (e) {
@@ -2815,7 +2870,12 @@ app.whenReady().then(() => {
 });
 
 app.on("before-quit", () => {
-  mcpClientService.closeAll();
+  // 退出流程中任何子服务异常都绝不能阻断进程退出（否则会卡住自动更新安装）
+  try {
+    mcpClientService.closeAll();
+  } catch (err) {
+    console.warn("[before-quit] 关闭 MCP 客户端异常（已忽略，不阻断退出）:", err.message);
+  }
 });
 
 app.on("window-all-closed", () => {

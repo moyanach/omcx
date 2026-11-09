@@ -86,6 +86,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   respondPermission: (id, allow, decision) =>
     ipcRenderer.send("chat-permission-response", { id, allow, decision }),
   cancelChat: (sessionId) => ipcRenderer.send("chat-cancel", sessionId),
+  steerChat: (sessionId, content, id) =>
+    ipcRenderer.send("chat-steer", { sessionId, content, id }),
 
   // ─── 流式 Agent 调用 ───────────────────────────────
   streamChat: (
@@ -104,7 +106,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     onTodosUpdate,
     onCompaction,
     permissionMode,
-    reasoningEffort
+    reasoningEffort,
+    onSteered
   ) => {
     const dataChannel = `chat-stream-data-${sessionId}`;
     const endChannel = `chat-stream-end-${sessionId}`;
@@ -115,6 +118,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const permChannel = `chat-permission-request-${sessionId}`;
     const todosChannel = `chat-stream-todos-${sessionId}`;
     const compactionChannel = `chat-stream-compaction-${sessionId}`;
+    const steeredChannel = `chat-stream-steered-${sessionId}`;
 
     let isCleanedUp = false;
 
@@ -130,6 +134,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener(permChannel, permHandler);
       ipcRenderer.removeListener(todosChannel, todosHandler);
       ipcRenderer.removeListener(compactionChannel, compactionHandler);
+      ipcRenderer.removeListener(steeredChannel, steeredHandler);
     };
 
     const dataHandler = (e, data) => onData(data);
@@ -159,6 +164,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const compactionHandler = (e, data) => {
       if (onCompaction) onCompaction(data);
     };
+    const steeredHandler = (e, steers) => {
+      if (onSteered) onSteered(steers);
+    };
 
     ipcRenderer.on(toolStatusChannel, toolStatusHandler);
     ipcRenderer.on(dataChannel, dataHandler);
@@ -167,6 +175,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on(permChannel, permHandler);
     ipcRenderer.on(todosChannel, todosHandler);
     ipcRenderer.on(compactionChannel, compactionHandler);
+    ipcRenderer.on(steeredChannel, steeredHandler);
     ipcRenderer.once(endChannel, endHandler);
     ipcRenderer.once(errorChannel, errorHandler);
 
@@ -180,6 +189,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
       permissionMode,
       reasoningEffort,
     });
+  },
+
+  // ─── 纠偏注入被拒绝监听（会话已结束时回退为排队）────
+  onSteerRejected: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("chat-steer-rejected", handler);
+    return () => ipcRenderer.removeListener("chat-steer-rejected", handler);
   },
 
   // ─── 会话标题异步更新监听 ─────────────────────────
