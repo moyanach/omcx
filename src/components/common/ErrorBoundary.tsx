@@ -62,14 +62,14 @@ export class ErrorBoundary extends React.Component<Props, State> {
             </div>
           </div>
 
-          <pre className="p-3 rounded-xl bg-[#141414] border border-[#262626] text-[11px] text-rose-300 font-mono max-h-32 overflow-auto custom-scrollbar whitespace-pre-wrap break-all">
+          <pre className="p-3 rounded-xl bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] text-rose-400 font-mono max-h-32 overflow-auto custom-scrollbar whitespace-pre-wrap break-all">
             {this.state.errorMessage}
           </pre>
 
           <div className="flex items-center justify-end gap-2 pt-1">
             <button
               onClick={this.handleReset}
-              className="px-3.5 py-1.5 rounded-xl bg-[#252525] hover:bg-[#303030] text-neutral-200 text-xs font-medium border border-[#353535] transition-colors flex items-center gap-1.5 cursor-pointer"
+              className="px-3.5 py-1.5 rounded-xl bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-primary)] text-xs font-medium border border-[color:var(--ui-border-hairline)] transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <RotateCcw size={12} />
               <span>尝试恢复界面</span>

@@ -18,6 +18,7 @@ const {
   getPermissionModePolicy,
   checkSensitivePath,
 } = require("../../services/sandboxPolicyService");
+const { fileLockService } = require("../../services/fileLockService");
 
 // ─── 路径安全 ────────────────────────────────────────────────
 
@@ -292,32 +293,35 @@ class WriteFileTool extends StructuredTool {
       fs.mkdirSync(parentDir, { recursive: true });
     }
 
-    const isNew = !fs.existsSync(targetPath);
-    let originalContent = "";
-    if (!isNew) {
-      originalContent = fs.readFileSync(targetPath, "utf-8");
-    }
+    // 路径级异步排他并发锁：同文件排他，不同文件天然并发，杜绝交叉修改覆盖
+    return await fileLockService.withLock(targetPath, async () => {
+      const isNew = !fs.existsSync(targetPath);
+      let originalContent = "";
+      if (!isNew) {
+        originalContent = fs.readFileSync(targetPath, "utf-8");
+      }
 
-    fs.writeFileSync(targetPath, finalContent, "utf-8");
+      fs.writeFileSync(targetPath, finalContent, "utf-8");
 
-    const MAX_SNAPSHOT_CHARS = 30000;
-    const originalTruncated = originalContent.length > MAX_SNAPSHOT_CHARS;
-    const originalSnapshot = !isNew
-      ? originalTruncated
-        ? originalContent.slice(0, MAX_SNAPSHOT_CHARS)
-        : originalContent
-      : undefined;
+      const MAX_SNAPSHOT_CHARS = 30000;
+      const originalTruncated = originalContent.length > MAX_SNAPSHOT_CHARS;
+      const originalSnapshot = !isNew
+        ? originalTruncated
+          ? originalContent.slice(0, MAX_SNAPSHOT_CHARS)
+          : originalContent
+        : undefined;
 
-    return JSON.stringify({
-      success: true,
-      path: targetFilePath,
-      action: isNew ? "created" : "modified",
-      description: description || (isNew ? "创建新文件" : "修改已有文件"),
-      size: Buffer.byteLength(finalContent, "utf-8"),
-      originalSize: originalContent ? Buffer.byteLength(originalContent, "utf-8") : 0,
-      diffHint: isNew ? null : "(文件已修改，建议使用 git diff 查看具体变更)",
-      ...(originalSnapshot !== undefined ? { originalContent: originalSnapshot } : {}),
-      ...(originalTruncated ? { originalTruncated: true } : {}),
+      return JSON.stringify({
+        success: true,
+        path: targetFilePath,
+        action: isNew ? "created" : "modified",
+        description: description || (isNew ? "创建新文件" : "修改已有文件"),
+        size: Buffer.byteLength(finalContent, "utf-8"),
+        originalSize: originalContent ? Buffer.byteLength(originalContent, "utf-8") : 0,
+        diffHint: isNew ? null : "(文件已修改，建议使用 git diff 查看具体变更)",
+        ...(originalSnapshot !== undefined ? { originalContent: originalSnapshot } : {}),
+        ...(originalTruncated ? { originalTruncated: true } : {}),
+      });
     });
   }
 }

@@ -1,5 +1,54 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+// ─── 全局单一多路复用流式 IPC 总线 (chat-stream-event) ───────
+// 彻底消灭动态 channel 拼接 (chat-stream-xxx-sessionId) 与孤儿监听器泄漏隐患
+const activeStreamSessions = new Map();
+
+ipcRenderer.on("chat-stream-event", (event, envelope) => {
+  if (!envelope || !envelope.sessionId) return;
+  const callbacks = activeStreamSessions.get(envelope.sessionId);
+  if (!callbacks) return;
+
+  const { type, data } = envelope;
+  switch (type) {
+    case "data":
+      callbacks.onData?.(data);
+      break;
+    case "tool_status":
+      callbacks.onToolStatus?.(data);
+      break;
+    case "todos":
+      callbacks.onTodosUpdate?.(data);
+      break;
+    case "waiting":
+      callbacks.onWaiting?.(data);
+      break;
+    case "steered":
+      callbacks.onSteered?.(data);
+      break;
+    case "permission":
+      callbacks.onPermissionRequest?.(data);
+      break;
+    case "outputs":
+      callbacks.onOutputsUpdated?.(data);
+      break;
+    case "compaction":
+      callbacks.onCompaction?.(data);
+      break;
+    case "metrics":
+      callbacks.onContextMetrics?.(data);
+      break;
+    case "end":
+      activeStreamSessions.delete(envelope.sessionId);
+      callbacks.onEnd?.(data);
+      break;
+    case "error":
+      activeStreamSessions.delete(envelope.sessionId);
+      callbacks.onError?.(data);
+      break;
+  }
+});
+
 contextBridge.exposeInMainWorld("electronAPI", {
   // ─── 文件系统与工作区 ──────────────────────────────
   showInFolder: (filePath) => ipcRenderer.send("show-in-folder", filePath),
@@ -46,6 +95,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getSessionOutputs: (sessionId) => ipcRenderer.invoke("get-session-outputs", sessionId),
   getContextMetrics: (params) => ipcRenderer.invoke("get-context-metrics", params),
   getWorkspaceGitStatus: (workDir) => ipcRenderer.invoke("get-workspace-git-status", workDir),
+  getWorkspaceBranches: (workDir) => ipcRenderer.invoke("workspace-get-branches", workDir),
+  checkoutWorkspaceBranch: (workDir, branchName, createNew = false) =>
+    ipcRenderer.invoke("workspace-checkout-branch", { workDir, branchName, createNew }),
   getWorkspaceFileDiff: (workDir, filePath) =>
     ipcRenderer.invoke("workspace-git-diff", { workDir, filePath }),
   commitWorkspaceChanges: (workDir, message) =>
@@ -85,11 +137,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   respondPermission: (id, allow, decision) =>
     ipcRenderer.send("chat-permission-response", { id, allow, decision }),
-  cancelChat: (sessionId) => ipcRenderer.send("chat-cancel", sessionId),
+  cancelChat: (sessionId) => {
+    // 仅向主进程派发取消信号，保留回调等待主进程携带已产出结果与 cancelled 标记统一收尾，保障最终元数据与持久化完整
+    ipcRenderer.send("chat-cancel", sessionId);
+  },
   steerChat: (sessionId, content, id) =>
     ipcRenderer.send("chat-steer", { sessionId, content, id }),
 
-  // ─── 流式 Agent 调用 ───────────────────────────────
+  // ─── 流式 Agent 调用 (挂载至多路复用总线，零监听器残留) ──
   streamChat: (
     sessionId,
     messages,
@@ -107,77 +162,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
     onCompaction,
     permissionMode,
     reasoningEffort,
-    onSteered
+    onSteered,
+    onWaiting
   ) => {
-    const dataChannel = `chat-stream-data-${sessionId}`;
-    const endChannel = `chat-stream-end-${sessionId}`;
-    const errorChannel = `chat-stream-error-${sessionId}`;
-    const toolStatusChannel = `chat-stream-tool-status-${sessionId}`;
-    const metricsChannel = `chat-stream-context-metrics-${sessionId}`;
-    const outputsChannel = `session-outputs-updated-${sessionId}`;
-    const permChannel = `chat-permission-request-${sessionId}`;
-    const todosChannel = `chat-stream-todos-${sessionId}`;
-    const compactionChannel = `chat-stream-compaction-${sessionId}`;
-    const steeredChannel = `chat-stream-steered-${sessionId}`;
-
-    let isCleanedUp = false;
-
-    const cleanup = () => {
-      if (isCleanedUp) return;
-      isCleanedUp = true;
-      ipcRenderer.removeListener(dataChannel, dataHandler);
-      ipcRenderer.removeListener(endChannel, endHandler);
-      ipcRenderer.removeListener(errorChannel, errorHandler);
-      ipcRenderer.removeListener(toolStatusChannel, toolStatusHandler);
-      ipcRenderer.removeListener(metricsChannel, metricsHandler);
-      ipcRenderer.removeListener(outputsChannel, outputsHandler);
-      ipcRenderer.removeListener(permChannel, permHandler);
-      ipcRenderer.removeListener(todosChannel, todosHandler);
-      ipcRenderer.removeListener(compactionChannel, compactionHandler);
-      ipcRenderer.removeListener(steeredChannel, steeredHandler);
-    };
-
-    const dataHandler = (e, data) => onData(data);
-    const endHandler = (e, args) => {
-      cleanup();
-      onEnd(args || null);
-    };
-    const errorHandler = (e, err) => {
-      cleanup();
-      onError(err);
-    };
-    const toolStatusHandler = (e, statusData) => {
-      if (onToolStatus) onToolStatus(statusData);
-    };
-    const metricsHandler = (e, metrics) => {
-      if (onContextMetrics) onContextMetrics(metrics);
-    };
-    const outputsHandler = (e, outputItem) => {
-      if (onOutputsUpdated) onOutputsUpdated(outputItem);
-    };
-    const permHandler = (e, permData) => {
-      if (onPermissionRequest) onPermissionRequest(permData);
-    };
-    const todosHandler = (e, todos) => {
-      if (onTodosUpdate) onTodosUpdate(todos);
-    };
-    const compactionHandler = (e, data) => {
-      if (onCompaction) onCompaction(data);
-    };
-    const steeredHandler = (e, steers) => {
-      if (onSteered) onSteered(steers);
-    };
-
-    ipcRenderer.on(toolStatusChannel, toolStatusHandler);
-    ipcRenderer.on(dataChannel, dataHandler);
-    ipcRenderer.on(metricsChannel, metricsHandler);
-    ipcRenderer.on(outputsChannel, outputsHandler);
-    ipcRenderer.on(permChannel, permHandler);
-    ipcRenderer.on(todosChannel, todosHandler);
-    ipcRenderer.on(compactionChannel, compactionHandler);
-    ipcRenderer.on(steeredChannel, steeredHandler);
-    ipcRenderer.once(endChannel, endHandler);
-    ipcRenderer.once(errorChannel, errorHandler);
+    activeStreamSessions.set(sessionId, {
+      onData,
+      onEnd,
+      onError,
+      onToolStatus,
+      onContextMetrics,
+      onOutputsUpdated,
+      onPermissionRequest,
+      onTodosUpdate,
+      onCompaction,
+      onSteered,
+      onWaiting,
+    });
 
     // 触发主进程的流式 Agent 请求 (显式透传当前绑定的工作空间目录、权限模式与推理强度)
     ipcRenderer.send("chat-request", {

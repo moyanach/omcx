@@ -194,8 +194,113 @@ async function commitWorkspaceChanges(workDir, commitMessage) {
   };
 }
 
+/**
+ * 获取指定目录的所有 Git 分支列表及当前分支
+ * @param {string} workDir
+ * @returns {Promise<{success: boolean, currentBranch: string, branches: Array<{name: string, isCurrent: boolean}>, error?: string}>}
+ */
+async function getWorkspaceBranches(workDir) {
+  if (!workDir || !fs.existsSync(workDir)) {
+    return { success: false, currentBranch: "", branches: [], error: "路径不存在" };
+  }
+  const gitDir = path.join(workDir, ".git");
+  if (!fs.existsSync(gitDir)) {
+    return { success: false, currentBranch: "", branches: [], error: "当前目录不是有效的 Git 仓库" };
+  }
+
+  // 1. 获取当前分支
+  const headRes = await runGitExec(["rev-parse", "--abbrev-ref", "HEAD"], workDir);
+  const currentBranch = headRes.ok ? headRes.stdout.trim() : "";
+
+  // 2. 获取本地分支列表
+  const branchRes = await runGitExec(
+    ["branch", "--format=%(refname:short)|%(HEAD)"],
+    workDir
+  );
+
+  if (!branchRes.ok) {
+    return {
+      success: false,
+      currentBranch,
+      branches: currentBranch ? [{ name: currentBranch, isCurrent: true }] : [],
+      error: branchRes.stderr || "获取分支列表失败",
+    };
+  }
+
+  const branches = [];
+  const lines = branchRes.stdout.split(/\r?\n/).filter(Boolean);
+  for (const line of lines) {
+    const parts = line.split("|");
+    const name = parts[0]?.trim();
+    const isHead = parts[1]?.trim() === "*";
+    if (name) {
+      branches.push({
+        name,
+        isCurrent: isHead || name === currentBranch,
+      });
+    }
+  }
+
+  // 确保当前分支排在首位，其余按字母排序
+  branches.sort((a, b) => {
+    if (a.isCurrent) return -1;
+    if (b.isCurrent) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return {
+    success: true,
+    currentBranch,
+    branches,
+  };
+}
+
+/**
+ * 切换或新建检出 Git 分支
+ * @param {string} workDir
+ * @param {string} branchName
+ * @param {boolean} [createNew=false]
+ */
+async function checkoutWorkspaceBranch(workDir, branchName, createNew = false) {
+  if (!workDir || !branchName) {
+    return { success: false, error: "参数不完整" };
+  }
+  const safeBranch = String(branchName).trim();
+  if (!safeBranch) {
+    return { success: false, error: "分支名称不能为空" };
+  }
+
+  const args = createNew ? ["checkout", "-b", safeBranch] : ["checkout", safeBranch];
+  const res = await runGitExec(args, workDir);
+
+  if (!res.ok) {
+    const rawErr = (res.stderr || res.stdout || res.error || "").trim();
+    let friendlyErr = rawErr;
+    if (rawErr.includes("Your local changes to the following files would be overwritten")) {
+      friendlyErr = "检出失败：当前工作区存在未提交的文件修改，与目标分支冲突。请先提交或暂存后再切换。";
+    } else if (rawErr.includes("already exists")) {
+      friendlyErr = `检出失败：分支 '${safeBranch}' 已存在。`;
+    } else if (rawErr.includes("did not match any file(s) known to git")) {
+      friendlyErr = `检出失败：未找到名为 '${safeBranch}' 的分支。`;
+    }
+    return {
+      success: false,
+      error: friendlyErr,
+      rawError: rawErr,
+    };
+  }
+
+  return {
+    success: true,
+    branch: safeBranch,
+    message: res.stdout.trim() || res.stderr.trim() || `已成功切换到分支 ${safeBranch}`,
+  };
+}
+
 module.exports = {
   getWorkspaceGitStatus,
   getWorkspaceFileDiff,
   commitWorkspaceChanges,
+  getWorkspaceBranches,
+  checkoutWorkspaceBranch,
 };

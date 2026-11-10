@@ -1395,8 +1395,9 @@ const AgentLiveStatusBar: React.FC<{
   activeTodos: TodoItem[];
   hasStreamingText: boolean;
 }> = ({ activeToolCalls, activeTodos, hasStreamingText }) => {
-  const { activeSessionId, sessionStartTimeBySession } = useChatStore();
+  const { activeSessionId, sessionStartTimeBySession, waitingBySession } = useChatStore();
   const sessionStartTime = activeSessionId ? sessionStartTimeBySession[activeSessionId] : null;
+  const waitingSec = activeSessionId ? waitingBySession[activeSessionId] || 0 : 0;
 
   // 根据会话绝对启动时间戳计算物理流逝秒数：切换会话重新挂载时无缝继承真实时长，彻底杜绝归零重置
   const computeElapsedSec = () => {
@@ -1446,7 +1447,12 @@ const AgentLiveStatusBar: React.FC<{
   const currentTodo = activeTodos.find((t) => t.status === 'in_progress');
 
   let statusText = '正在深入思考与规划方案...';
-  if (runningStep) {
+  if (waitingSec >= 15 && !runningStep && !hasStreamingText) {
+    statusText =
+      waitingSec >= 120
+        ? `上游模型已 ${Math.floor(waitingSec / 60)} 分钟无响应，仍在等待（可随时停止）...`
+        : `等待上游模型响应 (${waitingSec}s)...`;
+  } else if (runningStep) {
     const { title, subtitle } = getToolStepSummary(runningStep.tool, runningStep.args);
     statusText = `正在${title}${subtitle ? ` (${subtitle})` : ''}...`;
   } else if (hasStreamingText) {
@@ -1597,16 +1603,29 @@ const MessageBubble: React.FC<{
   onCopy: (text: string) => void;
   onRetry: (msg: Message) => void;
   isGenerating: boolean;
-}> = ({
-  msg,
-  isLast,
-  activeToolCalls,
-  activeTodos,
-  onCopy,
-  onRetry,
-  isGenerating,
-}) => {
+  onReportHeight?: (id: string, height: number) => void;
+}> = React.memo(
+  ({
+    msg,
+    isLast,
+    activeToolCalls,
+    activeTodos,
+    onCopy,
+    onRetry,
+    isGenerating,
+    onReportHeight,
+  }) => {
   const [copied, setCopied] = useState(false);
+  const bubbleRef = useRef<HTMLDivElement>(null);
+
+  // 测量物理真实高度并上报高度池，供离屏占位容器 1:1 精准对齐
+  useEffect(() => {
+    if (!bubbleRef.current) return;
+    const h = bubbleRef.current.offsetHeight;
+    if (h > 0) {
+      onReportHeight?.(msg.id, h);
+    }
+  });
 
   const handleCopyText = () => {
     onCopy(msg.content);
@@ -1638,8 +1657,19 @@ const MessageBubble: React.FC<{
       ? msg.metadata.todos
       : [];
 
+  // 兜底：assistant 回合彻底空响应（无正文 / 无思考 / 无工具步骤），且已不在流式中
+  const isStreamingThis = Boolean(isGenerating && isLast);
+  const isEmptyAssistantTurn =
+    !isUser &&
+    !isStreamingThis &&
+    !hasContent &&
+    thinkingBlocks.length === 0 &&
+    displayToolEvents.length === 0 &&
+    displayTodos.length === 0;
+
   return (
     <div
+      ref={bubbleRef}
       id={`msg-bubble-${msg.id}`}
       className={`group flex w-full scroll-mt-6 ${isUser ? 'justify-end' : 'justify-start'}`}
     >
@@ -1753,6 +1783,25 @@ const MessageBubble: React.FC<{
           <div className='px-5 py-3.5 text-sm leading-relaxed break-words bg-[var(--ui-bubble-assistant-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-hairline)] rounded-2xl w-full'>
             <MarkdownContent content={markdownContent} hideThinking />
           </div>
+        ) : isEmptyAssistantTurn ? (
+          <div className='w-full px-4 py-3 rounded-2xl border border-[color:var(--ui-accent-rose-border)] bg-[var(--ui-accent-rose-soft)] flex items-start gap-2.5'>
+            <XCircle size={15} className='text-[var(--ui-accent-rose)] flex-shrink-0 mt-0.5' />
+            <div className='flex flex-col gap-1.5 min-w-0'>
+              <span className='text-xs font-medium text-[var(--ui-text-primary)]'>
+                本次请求未收到模型返回内容
+              </span>
+              <span className='text-[11px] text-[var(--ui-text-muted)] leading-relaxed'>
+                可能是上游网关超时、连接被中断或模型服务异常。可直接重试，或切换到其他模型继续。
+              </span>
+              <button
+                onClick={() => onRetry(msg)}
+                className='self-start mt-0.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-[var(--ui-text-primary)] bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] border border-[color:var(--ui-border-hairline)] flex items-center gap-1.5 transition-colors cursor-pointer'
+              >
+                <RotateCw size={11} />
+                重新生成
+              </button>
+            </div>
+          </div>
         ) : null}
 
         {/* 悬浮操作栏 */}
@@ -1780,7 +1829,25 @@ const MessageBubble: React.FC<{
       </div>
     </div>
   );
-};
+}, (prev, next) => {
+  // 性能优化核心：最后一条消息（处于活跃流式中）必须重新渲染
+  if (prev.isLast !== next.isLast || next.isLast) {
+    return false;
+  }
+
+  // 对已完成的历史消息，深度核验其关键字段，只要内容未变即 100% 命中缓存，直接 0ms 跳过内部庞大组件树与 Markdown 的全部 Diff
+  if (
+    prev.msg.id === next.msg.id &&
+    prev.msg.content === next.msg.content &&
+    prev.msg.metadata === next.msg.metadata &&
+    prev.containerWidth === next.containerWidth &&
+    prev.isGenerating === next.isGenerating
+  ) {
+    return true; // 缓存命中，跳过整个气泡的全部渲染
+  }
+
+  return false;
+});
 
 /**
  * 消息快速定位点位导航轨 (Message Navigator Track)
@@ -1862,6 +1929,74 @@ export const MessageList: React.FC<Props> = ({
   const [activeNavMsgId, setActiveNavMsgId] = useState<string | null>(null);
   const navCalcRafRef = useRef<number | null>(null);
 
+  // ─── 视口动态虚拟窗口化 (Virtual Message Windowing) ───
+  // 当会话历史消息突破 20 条时自动启用，将非视口历史消息卸载为轻量等高占位节点
+  // 无论会话对话 50 轮还是 1000 轮，真实 DOM 节点数恒定保持在 2000 个以内，杜绝内存与合成层雪崩
+  const VIRTUAL_THRESHOLD = 20;
+  const heightMapRef = useRef<Map<string, number>>(new Map());
+
+  const handleReportHeight = useCallback((id: string, h: number) => {
+    heightMapRef.current.set(id, h);
+  }, []);
+
+  const estimateHeight = useCallback((m: Message) => {
+    const cached = heightMapRef.current.get(m.id);
+    if (cached) return cached;
+    if (m.role === 'user') {
+      const hasAtt = Array.isArray(m.metadata?.attachments) && m.metadata.attachments.length > 0;
+      return hasAtt ? 140 : 54;
+    }
+    const len = m.content ? m.content.length : 0;
+    const toolCount = Array.isArray(m.metadata?.toolSteps) ? m.metadata.toolSteps.length : 0;
+    return Math.min(800, Math.max(80, Math.round(len * 0.4) + toolCount * 36));
+  }, []);
+
+  const [visibleIndices, setVisibleIndices] = useState<{ start: number; end: number }>({
+    start: 0,
+    end: 100,
+  });
+
+  const updateVirtualRange = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || messages.length <= VIRTUAL_THRESHOLD) return;
+
+    const scrollTop = el.scrollTop;
+    const clientHeight = el.clientHeight;
+    const viewTop = Math.max(0, scrollTop - 700);
+    const viewBottom = scrollTop + clientHeight + 700;
+
+    let accumulatedY = 0;
+    let start = 0;
+    let end = messages.length - 1;
+    let foundStart = false;
+
+    for (let i = 0; i < messages.length; i++) {
+      const h = estimateHeight(messages[i]);
+      const itemTop = accumulatedY;
+      const itemBottom = accumulatedY + h + 14;
+
+      if (!foundStart && itemBottom >= viewTop) {
+        start = Math.max(0, i - 2);
+        foundStart = true;
+      }
+      if (itemTop > viewBottom) {
+        end = Math.min(messages.length - 1, i + 2);
+        break;
+      }
+      accumulatedY = itemBottom;
+    }
+
+    // 生成中或粘底状态下，末尾活跃消息永久处于挂载窗口内
+    if (isGenerating || isPinnedToBottom) {
+      end = messages.length - 1;
+    }
+
+    setVisibleIndices((prev) => {
+      if (prev.start === start && prev.end === end) return prev;
+      return { start, end };
+    });
+  }, [messages, isGenerating, isPinnedToBottom, estimateHeight]);
+
   // 监听滚动位置：判定是否吸底，并计算当前视口展示的消息节点
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -1871,6 +2006,10 @@ export const MessageList: React.FC<Props> = ({
     const atBottom = distanceToBottom <= 70;
     setIsPinnedToBottom(atBottom);
     setShowScrollBottomBtn(!atBottom && el.scrollHeight > el.clientHeight + 120);
+
+    if (messages.length > VIRTUAL_THRESHOLD) {
+      updateVirtualRange();
+    }
 
     // 性能优化：当处于吸底状态时（如流式生成期间），当前活跃节点必然是最后一条消息，
     // 严禁在此高频路径下对整个消息列表做 getBoundingClientRect 循环测量，消除强制同步回流风暴
@@ -1916,6 +2055,23 @@ export const MessageList: React.FC<Props> = ({
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, isGenerating, activeToolCalls, isPinnedToBottom]);
+
+  // 会话切换或消息数量变动时，重新计算视口虚拟范围
+  useEffect(() => {
+    if (messages.length > VIRTUAL_THRESHOLD) {
+      updateVirtualRange();
+    }
+  }, [messages.length, updateVirtualRange]);
+
+  // 架构对齐：切换会话时重置虚拟窗口至最新底部，杜绝前序会话滚动区间残留引发的画面闪跳
+  const firstMsgId = messages[0]?.id;
+  useEffect(() => {
+    setVisibleIndices({
+      start: Math.max(0, messages.length - 15),
+      end: Math.max(0, messages.length - 1),
+    });
+    setIsPinnedToBottom(true);
+  }, [firstMsgId]);
 
   // 点击回到底部
   const handleScrollToBottom = () => {
@@ -1971,19 +2127,41 @@ export const MessageList: React.FC<Props> = ({
         onWheel={handleWheel}
         className='flex-1 overflow-y-auto pl-6 pr-3 pt-2 pb-2.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
       >
-        {messages.map((msg, idx) => (
-          <MessageBubble
-            key={msg.id}
-            msg={msg}
-            isLast={idx === messages.length - 1}
-            activeToolCalls={idx === messages.length - 1 ? activeToolCalls : []}
-            activeTodos={idx === messages.length - 1 ? activeTodos : []}
-            containerWidth={containerWidth}
-            onCopy={onCopy}
-            onRetry={onRetry}
-            isGenerating={isGenerating}
-          />
-        ))}
+        {messages.map((msg, idx) => {
+          const isVirtualActive = messages.length > VIRTUAL_THRESHOLD;
+          const isVisible =
+            !isVirtualActive ||
+            (idx >= visibleIndices.start && idx <= visibleIndices.end) ||
+            idx === messages.length - 1;
+
+          if (!isVisible) {
+            const h = estimateHeight(msg);
+            return (
+              <div
+                key={msg.id}
+                id={`msg-bubble-${msg.id}`}
+                style={{ height: h, contain: 'strict' }}
+                className='w-full flex-shrink-0 pointer-events-none opacity-0 select-none'
+                aria-hidden='true'
+              />
+            );
+          }
+
+          return (
+            <MessageBubble
+              key={msg.id}
+              msg={msg}
+              isLast={idx === messages.length - 1}
+              activeToolCalls={idx === messages.length - 1 ? activeToolCalls : []}
+              activeTodos={idx === messages.length - 1 ? activeTodos : []}
+              containerWidth={containerWidth}
+              onCopy={onCopy}
+              onRetry={onRetry}
+              isGenerating={isGenerating}
+              onReportHeight={handleReportHeight}
+            />
+          );
+        })}
 
         {/* 会话最下方：实时任务执行状态条 */}
         {isGenerating && (

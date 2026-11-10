@@ -12,6 +12,7 @@ const fs = require("fs");
 const { z } = require("zod");
 const { StructuredTool } = require("@langchain/core/tools");
 const { checkSafePath } = require("./fileTools");
+const { fileLockService } = require("../../services/fileLockService");
 
 class EditFileTool extends StructuredTool {
   constructor() {
@@ -115,60 +116,63 @@ class EditFileTool extends StructuredTool {
       });
     }
 
-    const content = fs.readFileSync(targetPath, "utf-8");
+    // 路径级异步排他并发锁：同文件互斥排队，不同文件并发执行
+    return await fileLockService.withLock(targetPath, async () => {
+      const content = fs.readFileSync(targetPath, "utf-8");
 
-    // 检查 old_string 是否存在
-    if (!content.includes(finalOldString)) {
-      // 容错诊断：尝试寻找部分匹配或行匹配
-      const lines = content.split("\n");
-      const oldFirstLine = finalOldString.split("\n")[0].trim();
-      let matchedLineIdx = -1;
-      if (oldFirstLine) {
-        matchedLineIdx = lines.findIndex((l) => l.includes(oldFirstLine));
+      // 检查 old_string 是否存在
+      if (!content.includes(finalOldString)) {
+        // 容错诊断：尝试寻找部分匹配或行匹配
+        const lines = content.split("\n");
+        const oldFirstLine = finalOldString.split("\n")[0].trim();
+        let matchedLineIdx = -1;
+        if (oldFirstLine) {
+          matchedLineIdx = lines.findIndex((l) => l.includes(oldFirstLine));
+        }
+
+        let hint = "";
+        if (matchedLineIdx >= 0) {
+          hint = `提示：首行匹配在第 ${matchedLineIdx + 1} 行附近，但完整多行未完全匹配。请使用 read_file 重新核对该范围的代码缩进与换行。`;
+        } else {
+          hint = `提示：文件中未找到对应文本。请先调用 read_file 重新确认最新代码。`;
+        }
+
+        return JSON.stringify({
+          success: false,
+          error: `在 ${targetFilePath} 中未找到指定的 old_string。\n${hint}`,
+        });
       }
 
-      let hint = "";
-      if (matchedLineIdx >= 0) {
-        hint = `提示：首行匹配在第 ${matchedLineIdx + 1} 行附近，但完整多行未完全匹配。请使用 read_file 重新核对该范围的代码缩进与换行。`;
+      // 检查唯一性
+      const occurrences = content.split(finalOldString).length - 1;
+      if (occurrences > 1 && !replace_all) {
+        return JSON.stringify({
+          success: false,
+          error: `old_string 在文件 ${targetFilePath} 中出现了 ${occurrences} 次。为了防止误修改，请在 old_string 中包含更多前后上下文行以确保匹配的唯一性，或显式设置 replace_all: true。`,
+        });
+      }
+
+      // 执行精确替换
+      let newContent = "";
+      if (replace_all) {
+        newContent = content.replaceAll(finalOldString, finalNewString);
       } else {
-        hint = `提示：文件中未找到对应文本。请先调用 read_file 重新确认最新代码。`;
+        newContent = content.replace(finalOldString, finalNewString);
       }
 
+      fs.writeFileSync(targetPath, newContent, "utf-8");
+
+      const oldLinesCount = finalOldString.split("\n").length;
+      const newLinesCount = finalNewString.split("\n").length;
+      const lineDelta = newLinesCount - oldLinesCount;
+
       return JSON.stringify({
-        success: false,
-        error: `在 ${targetFilePath} 中未找到指定的 old_string。\n${hint}`,
+        success: true,
+        path: targetFilePath,
+        replacedOccurrences: replace_all ? occurrences : 1,
+        lineDelta: lineDelta >= 0 ? `+${lineDelta}` : `${lineDelta}`,
+        message: `成功更新 ${targetFilePath} (替换 ${replace_all ? occurrences : 1} 处代码片段)`,
       });
-    }
-
-    // 检查唯一性
-    const occurrences = content.split(finalOldString).length - 1;
-    if (occurrences > 1 && !replace_all) {
-      return JSON.stringify({
-        success: false,
-        error: `old_string 在文件 ${targetFilePath} 中出现了 ${occurrences} 次。为了防止误修改，请在 old_string 中包含更多前后上下文行以确保匹配的唯一性，或显式设置 replace_all: true。`,
-      });
-    }
-
-    // 执行精确替换
-    let newContent = "";
-    if (replace_all) {
-      newContent = content.replaceAll(finalOldString, finalNewString);
-    } else {
-      newContent = content.replace(finalOldString, finalNewString);
-    }
-
-    fs.writeFileSync(targetPath, newContent, "utf-8");
-
-    const oldLinesCount = finalOldString.split("\n").length;
-    const newLinesCount = finalNewString.split("\n").length;
-    const lineDelta = newLinesCount - oldLinesCount;
-
-    return JSON.stringify({
-      success: true,
-      path: targetFilePath,
-      replacedOccurrences: replace_all ? occurrences : 1,
-      lineDelta: lineDelta >= 0 ? `+${lineDelta}` : `${lineDelta}`,
-      message: `成功更新 ${targetFilePath} (替换 ${replace_all ? occurrences : 1} 处代码片段)`,
     });
   }
 }

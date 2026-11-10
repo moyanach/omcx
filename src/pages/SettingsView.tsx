@@ -251,6 +251,9 @@ const SettingsView: React.FC = () => {
   // Agent 运行最大轮次 (默认 5000)
   const [maxToolRounds, setMaxToolRounds] = useState(5000);
 
+  // 流式空闲超时（秒）：连续无数据超过该时长将主动中断并提示
+  const [streamIdleTimeout, setStreamIdleTimeout] = useState(180);
+
   // 上下文自动压缩配置
   const [autoCompact, setAutoCompact] = useState(true);
   const [compactThreshold, setCompactThreshold] = useState(85);
@@ -700,6 +703,9 @@ const SettingsView: React.FC = () => {
       const savedRounds = await window.electronAPI.getConfig("max_tool_rounds");
       if (savedRounds) setMaxToolRounds(Number(savedRounds) || 5000);
 
+      const savedIdleTimeout = await window.electronAPI.getConfig("stream_idle_timeout");
+      if (savedIdleTimeout) setStreamIdleTimeout(Number(savedIdleTimeout) || 180);
+
       const savedAutoCompact = await window.electronAPI.getConfig("context_auto_compact");
       if (savedAutoCompact !== null) setAutoCompact(savedAutoCompact !== "false");
 
@@ -737,6 +743,18 @@ const SettingsView: React.FC = () => {
     try {
       await window.electronAPI.setConfig("max_tool_rounds", String(maxToolRounds));
       showToast(`最大执行轮次已更新为 ${maxToolRounds} 轮`);
+    } catch {
+      showToast("保存失败");
+    }
+  };
+
+  const handleSaveStreamIdleTimeout = async () => {
+    if (!window.electronAPI) return;
+    try {
+      const safeValue = Math.max(30, Math.min(1800, Number(streamIdleTimeout) || 180));
+      setStreamIdleTimeout(safeValue);
+      await window.electronAPI.setConfig("stream_idle_timeout", String(safeValue));
+      showToast(`流式空闲超时已更新为 ${safeValue} 秒`);
     } catch {
       showToast("保存失败");
     }
@@ -1539,6 +1557,38 @@ const SettingsView: React.FC = () => {
                     <span className="text-[11px] text-neutral-500">
                       足以支持大型工程持续分析、全量编译与持续多文件重构
                     </span>
+                  </div>
+                </div>
+
+                {/* 流式空闲超时（防静默卡死） */}
+                <div className="bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl p-6 shadow-sm space-y-4">
+                  <div className="border-b border-[#282828] pb-3">
+                    <h3 className="text-xs font-bold text-neutral-100 tracking-wide">
+                      流式空闲超时 (Stream Idle Timeout)
+                    </h3>
+                    <p className="text-[11px] text-neutral-500 mt-0.5">
+                      上游连续超过该时长未返回任何数据时自动中断并提示，避免网关静默掐断后界面无限期干等（默认 180 秒）
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="number"
+                      min={30}
+                      max={1800}
+                      step={30}
+                      value={streamIdleTimeout}
+                      onChange={(e) => setStreamIdleTimeout(Number(e.target.value) || 180)}
+                      className="w-48 bg-[#171717] border border-[#2e2e2e] rounded-xl px-3.5 py-2 text-xs font-mono text-neutral-200 outline-none focus:border-blue-500"
+                    />
+                    <button
+                      onClick={handleSaveStreamIdleTimeout}
+                      className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all shadow-md flex items-center gap-1.5"
+                    >
+                      <Save size={13} />
+                      <span>保存超时时间</span>
+                    </button>
+                    <span className="text-[11px] text-neutral-500">单位：秒（30 ~ 1800）</span>
                   </div>
                 </div>
 

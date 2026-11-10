@@ -132,6 +132,7 @@ interface WorkspaceRootItem {
 interface FileExplorerViewProps {
   initialFilePath?: string;
   initialLineNumber?: number;
+  initialLineEnd?: number;
   initialViewMode?: "preview" | "code";
   refreshKey?: number;
 }
@@ -204,6 +205,7 @@ function getEntryIcon(name: string, isDir: boolean, isExpanded?: boolean) {
 export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   initialFilePath,
   initialLineNumber,
+  initialLineEnd,
   initialViewMode,
   refreshKey,
 }) => {
@@ -272,6 +274,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   const [loadingFile, setLoadingFile] = useState(false);
   const [viewMode, setViewMode] = useState<"preview" | "code">("code");
   const [highlightLine, setHighlightLine] = useState<number | undefined>(initialLineNumber);
+  const [highlightLineEnd, setHighlightLineEnd] = useState<number | undefined>(initialLineEnd);
   const [copied, setCopied] = useState(false);
   const [treeCollapsed, setTreeCollapsed] = useState(false);
 
@@ -408,23 +411,27 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   // 读取并打开某个文件
   const openFile = async (
     targetPath: string,
-    opts?: { line?: number; mode?: "preview" | "code" }
+    opts?: { line?: number; lineEnd?: number; mode?: "preview" | "code" }
   ) => {
     if (!primaryWorkDir || !window.electronAPI?.readWorkspaceFile) return;
-    const resolvedTarget = resolveTargetPath(targetPath);
-    if (!resolvedTarget) return;
+    const clean = String(targetPath || "").trim();
+    if (!clean) return;
 
     setLoadingFile(true);
     try {
-      const res = await window.electronAPI.readWorkspaceFile(
-        primaryWorkDir,
-        resolvedTarget
-      );
+      // 优先直接传递原始目标路径（主进程具备多源深度穿透匹配能力）
+      let res = await window.electronAPI.readWorkspaceFile(primaryWorkDir, clean);
+      if (!res?.success && !clean.startsWith("/") && !/^[a-zA-Z]:[\\/]/.test(clean)) {
+        const fallbackTarget = resolveTargetPath(clean);
+        res = await window.electronAPI.readWorkspaceFile(primaryWorkDir, fallbackTarget);
+      }
+
       if (res?.success) {
         const ext = String(res.ext || "").toLowerCase();
         const nextMode =
           opts?.mode || (PREVIEWABLE_EXTS.has(ext) ? "preview" : "code");
-        const abs = String(res.absPath || resolvedTarget).replace(/\/+$/, "");
+        // 关键点：使用主进程真实解析并定位到的物理绝对路径 res.absPath
+        const abs = String(res.absPath || clean).replace(/\/+$/, "");
         setSelectedFile({
           displayPath: formatDisplayPath(abs),
           absPath: abs,
@@ -437,15 +444,16 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         });
         setViewMode(nextMode);
         setHighlightLine(opts?.line);
+        setHighlightLineEnd(opts?.lineEnd);
 
         // 自动展开该文件所属 Root 及全部父级目录
         const matchedRoot = workspaceRoots.find((r) =>
-          abs.startsWith(`${r.path}/`)
+          abs.startsWith(`${r.path}/`) || abs === r.path
         );
         if (matchedRoot) {
           const relInsideRoot = abs.slice(matchedRoot.path.length + 1);
           const segments = relInsideRoot.split("/").filter(Boolean);
-          if (segments.length > 1) {
+          if (segments.length >= 1) {
             let cur = matchedRoot.path;
             const parentsToExpand = [matchedRoot.path];
             for (let i = 0; i < segments.length - 1; i++) {
@@ -457,13 +465,21 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
               parentsToExpand.forEach((p) => (next[p] = true));
               return next;
             });
-            for (const dir of parentsToExpand) {
-              if (!dirEntriesMap[dir]) {
-                loadDirectory(dir);
-              }
+            // 关键优化：等待缺失的祖先目录全部异步加载完毕，树节点就绪后再进行平滑视口锚定
+            const missingDirs = parentsToExpand.filter((dir) => !dirEntriesMap[dir]);
+            if (missingDirs.length > 0) {
+              await Promise.all(missingDirs.map((dir) => loadDirectory(dir)));
             }
           }
         }
+
+        // 平滑滚动定位左侧文件树中的对应选中文件项
+        setTimeout(() => {
+          const el = document.getElementById(`tree-file-${encodeURIComponent(abs)}`);
+          if (el) {
+            el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          }
+        }, 150);
       }
     } catch (err) {
       console.error("读取文件失败:", err);
@@ -476,29 +492,47 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     if (initialFilePath && primaryWorkDir) {
       openFile(initialFilePath, {
         line: initialLineNumber,
+        lineEnd: initialLineEnd,
         mode: initialViewMode,
       });
     } else if (selectedFile && refreshKey) {
       openFile(selectedFile.absPath, {
         line: highlightLine,
+        lineEnd: highlightLineEnd,
         mode: viewMode,
       });
     }
-  }, [initialFilePath, initialLineNumber, initialViewMode, refreshKey, primaryWorkDir]);
+  }, [initialFilePath, initialLineNumber, initialLineEnd, initialViewMode, refreshKey, primaryWorkDir]);
 
+  // 自适应渲染守护：轮询检测 SyntaxHighlighter DOM 挂载完成，平滑居中滚动至指定代码行
   useEffect(() => {
-    if (viewMode === "code" && highlightLine && codeContainerRef.current) {
-      const timer = setTimeout(() => {
-        const lineEl = codeContainerRef.current?.querySelector(
+    if (viewMode !== "code" || !highlightLine) return;
+    let attempts = 0;
+    const maxAttempts = 20; // 约 400ms 自适应守护
+    let timerId: any = null;
+
+    const tryScrollToLine = () => {
+      attempts++;
+      const container = codeContainerRef.current;
+      if (container) {
+        const lineEl = container.querySelector(
           `[data-line-number="${highlightLine}"]`
         );
         if (lineEl) {
           lineEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          return;
         }
-      }, 60);
-      return () => clearTimeout(timer);
-    }
-  }, [viewMode, highlightLine, selectedFile?.absPath]);
+      }
+      if (attempts < maxAttempts) {
+        timerId = setTimeout(tryScrollToLine, 20);
+      }
+    };
+
+    timerId = setTimeout(tryScrollToLine, 30);
+    return () => {
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [viewMode, highlightLine, selectedFile?.absPath, selectedFile?.content]);
 
   const toggleDir = (absDirPath: string) => {
     const norm = absDirPath.replace(/\/+$/, "");
@@ -564,6 +598,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
       return (
         <React.Fragment key={entry.absPath}>
           <div
+            id={isDir ? undefined : `tree-file-${encodeURIComponent(entry.absPath)}`}
             onClick={() => {
               if (isDir) {
                 toggleDir(entry.absPath);
@@ -943,26 +978,37 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
                         fontFamily: "inherit",
                       },
                     }}
-                    lineProps={(lineNumber: number) => ({
-                      "data-line-number": lineNumber,
-                      onClick: () => setHighlightLine(lineNumber),
-                      style: {
-                        display: "block",
-                        cursor: "pointer",
-                        background:
-                          highlightLine === lineNumber
+                    lineProps={(lineNumber: number) => {
+                      const isHighlighted =
+                        lineNumber === highlightLine ||
+                        Boolean(
+                          highlightLine &&
+                          highlightLineEnd &&
+                          lineNumber >= highlightLine &&
+                          lineNumber <= highlightLineEnd
+                        );
+
+                      return {
+                        "data-line-number": lineNumber,
+                        onClick: () => {
+                          setHighlightLine(lineNumber);
+                          setHighlightLineEnd(undefined);
+                        },
+                        style: {
+                          display: "block",
+                          cursor: "pointer",
+                          background: isHighlighted
                             ? "var(--ui-accent-amber-soft)"
                             : "transparent",
-                        backgroundColor:
-                          highlightLine === lineNumber
+                          backgroundColor: isHighlighted
                             ? "var(--ui-accent-amber-soft)"
                             : "transparent",
-                        borderLeft:
-                          highlightLine === lineNumber
+                          borderLeft: isHighlighted
                             ? "2px solid var(--ui-accent-amber)"
                             : "2px solid transparent",
-                      },
-                    })}
+                        },
+                      };
+                    }}
                     customStyle={{
                       margin: 0,
                       padding: "0.5rem 0",

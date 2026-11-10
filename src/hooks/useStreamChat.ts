@@ -143,6 +143,7 @@ export function useStreamChat() {
     setContextMetrics,
     refreshOutputs,
     setSessionStartTime,
+    setSessionWaiting,
   } = useChatStore();
 
   const isGenerating = Boolean(activeSessionId && generatingBySession[activeSessionId]);
@@ -163,6 +164,7 @@ export function useStreamChat() {
       clearSessionToolCalls(targetSessionId);
       setSessionTodos(targetSessionId, []);
       setSessionPermission(targetSessionId, null);
+      setSessionWaiting(targetSessionId, 0);
 
       const startTime = Date.now();
       setSessionStartTime(targetSessionId, startTime);
@@ -217,6 +219,9 @@ export function useStreamChat() {
       const handleIncomingDelta = (delta: string) => {
         accumulatedContent += delta;
         deltaBuffer += delta;
+        if (useChatStore.getState().waitingBySession[targetSessionId]) {
+          setSessionWaiting(targetSessionId, 0);
+        }
         if (flushRafId === null) {
           flushRafId = requestAnimationFrame(() => {
             flushRafId = null;
@@ -243,6 +248,7 @@ export function useStreamChat() {
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
+            setSessionWaiting(targetSessionId, 0);
             const durationMs = Date.now() - startTime;
             const durationFormatted = formatDuration(durationMs);
             const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
@@ -300,6 +306,7 @@ export function useStreamChat() {
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
+            setSessionWaiting(targetSessionId, 0);
             saveMessageToDb(targetSessionId, {
               id: assistantMsgId,
               role: "assistant",
@@ -372,6 +379,10 @@ export function useStreamChat() {
               });
             }
             callbacks?.onSteered?.(steers);
+          },
+          (info: any) => {
+            const idleSec = Number(info?.idleSec) || 0;
+            if (idleSec > 0) setSessionWaiting(targetSessionId, idleSec);
           }
         );
       } else {
@@ -409,6 +420,7 @@ export function useStreamChat() {
       clearSessionToolCalls(targetSessionId);
       setSessionTodos(targetSessionId, []);
       setSessionPermission(targetSessionId, null);
+      setSessionWaiting(targetSessionId, 0);
 
       const startTime = Date.now();
       setSessionStartTime(targetSessionId, startTime);
@@ -453,6 +465,9 @@ export function useStreamChat() {
         const handleIncomingDelta = (delta: string) => {
           accumulatedContent += delta;
           deltaBuffer += delta;
+          if (useChatStore.getState().waitingBySession[targetSessionId]) {
+            setSessionWaiting(targetSessionId, 0);
+          }
           if (flushRafId === null) {
             flushRafId = requestAnimationFrame(() => {
               flushRafId = null;
@@ -478,6 +493,7 @@ export function useStreamChat() {
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
+            setSessionWaiting(targetSessionId, 0);
             const durationMs = Date.now() - startTime;
             const durationFormatted = formatDuration(durationMs);
             const endMeta = endPayload?.metadata || (typeof endPayload === "object" ? endPayload : null);
@@ -535,6 +551,7 @@ export function useStreamChat() {
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
+            setSessionWaiting(targetSessionId, 0);
             saveMessageToDb(targetSessionId, {
               id: assistantMsgId,
               role: "assistant",
@@ -607,6 +624,10 @@ export function useStreamChat() {
               });
             }
             callbacks?.onSteered?.(steers);
+          },
+          (info: any) => {
+            const idleSec = Number(info?.idleSec) || 0;
+            if (idleSec > 0) setSessionWaiting(targetSessionId, idleSec);
           }
         );
       } catch (err) {

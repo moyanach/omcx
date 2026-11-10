@@ -22,6 +22,8 @@ const {
   getWorkspaceGitStatus,
   getWorkspaceFileDiff,
   commitWorkspaceChanges,
+  getWorkspaceBranches,
+  checkoutWorkspaceBranch,
 } = require("./services/workspaceGitService");
 const { calculateContextMetrics, estimateTokens } = require("./services/contextCalculator");
 const { toolRegistry } = require("./utils/toolRegistry");
@@ -118,15 +120,14 @@ function extFromMime(mime, name) {
   return ext || "png";
 }
 
-function processAttachmentImage(base64, mime) {
-  const input = Buffer.from(String(base64 || ""), "base64");
-  if (input.length === 0) throw new Error("图片内容为空");
+function processAttachmentImageBuffer(inputBuffer, mime) {
+  if (!inputBuffer || inputBuffer.length === 0) throw new Error("图片内容为空");
 
-  const image = nativeImage.createFromBuffer(input);
+  const image = nativeImage.createFromBuffer(inputBuffer);
   if (image.isEmpty()) throw new Error("无法识别的图片格式");
 
   let { width, height } = image.getSize();
-  let buffer = input;
+  let buffer = inputBuffer;
   let outMime = mime || "image/png";
 
   if (width > IMAGE_MAX_EDGE || height > IMAGE_MAX_EDGE) {
@@ -145,6 +146,11 @@ function processAttachmentImage(base64, mime) {
   }
 
   return { buffer, width, height, mime: outMime };
+}
+
+function processAttachmentImage(base64, mime) {
+  const input = Buffer.from(String(base64 || ""), "base64");
+  return processAttachmentImageBuffer(input, mime);
 }
 
 function extractTextContent(content) {
@@ -1074,13 +1080,50 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "save-chat-attachment",
-    safeHandler((event, { sessionId, name, mime, base64 }) => {
-      if (!sessionId || !base64) throw new Error("附件参数不完整");
+    safeHandler((event, { sessionId, name, mime, sourcePath, base64 }) => {
+      if (!sessionId || (!base64 && !sourcePath)) throw new Error("附件参数不完整");
       const cleanName = name || "attachment";
       const isImg = isImageFile({ name: cleanName, mime });
 
+      // 1. 优先使用本地物理路径直通，彻底避免大文件转 Base64 的内存暴涨与 IPC 序列化卡顿
+      if (sourcePath && fs.existsSync(sourcePath)) {
+        const id = crypto.randomUUID();
+        if (isImg) {
+          const rawBuffer = fs.readFileSync(sourcePath);
+          const processed = processAttachmentImageBuffer(rawBuffer, mime);
+          const ext = extFromMime(processed.mime, cleanName);
+          const saved = storageService.saveAttachmentBuffer(sessionId, id, ext, processed.buffer);
+          return {
+            id,
+            path: saved.path,
+            width: processed.width,
+            height: processed.height,
+            size: saved.size,
+            mime: processed.mime,
+            name: cleanName,
+          };
+        }
+
+        // 非图片文件（代码、文本、表格、压缩包等）：调用内核原生 copyFileSync 零内存直通落盘
+        const ext = getAttachmentExtension(cleanName) || "bin";
+        const dir = storageService.getSessionAttachmentsDir(sessionId);
+        storageService.ensureDir(dir);
+        const targetPath = path.join(dir, `${id}.${ext}`);
+        fs.copyFileSync(sourcePath, targetPath);
+        const stat = fs.statSync(targetPath);
+        return {
+          id,
+          path: targetPath,
+          size: stat.size,
+          mime: mime || "application/octet-stream",
+          name: cleanName,
+        };
+      }
+
+      // 2. 剪贴板内存截图等无源文件路径的场景，优雅降级走原有 Buffer 解码
+      const inputBuffer = Buffer.from(String(base64 || ""), "base64");
       if (isImg) {
-        const processed = processAttachmentImage(base64, mime);
+        const processed = processAttachmentImageBuffer(inputBuffer, mime);
         const id = crypto.randomUUID();
         const ext = extFromMime(processed.mime, cleanName);
         const saved = storageService.saveAttachmentBuffer(sessionId, id, ext, processed.buffer);
@@ -1095,11 +1138,10 @@ app.whenReady().then(() => {
         };
       }
 
-      // 非图片文件（代码、文本、表格、PDF、压缩包等）原样无损落盘
-      const buffer = Buffer.from(base64, "base64");
+      // 非图片文件原样无损落盘
       const id = crypto.randomUUID();
       const ext = getAttachmentExtension(cleanName) || "bin";
-      const saved = storageService.saveAttachmentBuffer(sessionId, id, ext, buffer);
+      const saved = storageService.saveAttachmentBuffer(sessionId, id, ext, inputBuffer);
       return {
         id,
         path: saved.path,
@@ -1252,6 +1294,18 @@ app.whenReady().then(() => {
   );
 
   ipcMain.handle(
+    "workspace-get-branches",
+    safeHandler((event, workDir) => getWorkspaceBranches(workDir))
+  );
+
+  ipcMain.handle(
+    "workspace-checkout-branch",
+    safeHandler((event, { workDir, branchName, createNew }) =>
+      checkoutWorkspaceBranch(workDir, branchName, createNew)
+    )
+  );
+
+  ipcMain.handle(
     "workspace-list-dir",
     safeHandler((event, { workDir, dirPath = "." } = {}) => {
       const baseRoot = workDir && String(workDir).trim() ? path.resolve(workDir.trim()) : DEFAULT_ROOT;
@@ -1336,12 +1390,71 @@ app.whenReady().then(() => {
         : path.resolve(baseRoot, filePath);
 
       if (!fs.existsSync(targetAbs)) {
-        // 尝试在其他挂载源目录中匹配
+        // 1. 尝试在当前工作空间挂载的全部源目录中直接匹配
         for (const folder of validFolders) {
           const candidate = path.resolve(folder, filePath);
           if (fs.existsSync(candidate)) {
             targetAbs = candidate;
             break;
+          }
+        }
+      }
+
+      // 2. 智能多源目录穿透与深度后缀寻址 (处理大模型引用可能省略顶层或包含局部路径的情况)
+      if (!fs.existsSync(targetAbs)) {
+        const normRel = filePath.replace(/\\/g, "/").replace(/^\.?\//, "");
+        const firstSlash = normRel.indexOf("/");
+
+        // 若大模型在相对路径中带了模块名（如 cmdb-api-v2/core/...），尝试剥离第一层在各挂载源下匹配
+        if (firstSlash > 0) {
+          const withoutFirst = normRel.slice(firstSlash + 1);
+          for (const folder of validFolders) {
+            const cand = path.resolve(folder, withoutFirst);
+            if (fs.existsSync(cand) && fs.statSync(cand).isFile()) {
+              targetAbs = cand;
+              break;
+            }
+          }
+        }
+
+        // 3. 递归模糊后缀与文件名穿透匹配 (彻底解决深层微服务子目录如 notify_v2/runner/life_runner.py)
+        if (!fs.existsSync(targetAbs)) {
+          const IGNORED = new Set([".git", "node_modules", ".venv", "__pycache__", "dist", ".omcx", ".vscode", "build"]);
+          const targetSuffix = "/" + normRel;
+          const targetFileName = normRel.split("/").pop();
+
+          for (const folder of validFolders) {
+            const queue = [folder];
+            while (queue.length > 0) {
+              const curDir = queue.shift();
+              let entries = [];
+              try {
+                entries = fs.readdirSync(curDir);
+              } catch {
+                continue;
+              }
+              for (const item of entries) {
+                if (item.startsWith(".") || IGNORED.has(item)) continue;
+                const full = path.join(curDir, item);
+                let stat;
+                try {
+                  stat = fs.statSync(full);
+                } catch {
+                  continue;
+                }
+                if (stat.isDirectory()) {
+                  queue.push(full);
+                } else if (stat.isFile()) {
+                  const normFull = full.replace(/\\/g, "/");
+                  if (normFull.endsWith(targetSuffix) || item === targetFileName) {
+                    targetAbs = full;
+                    break;
+                  }
+                }
+              }
+              if (fs.existsSync(targetAbs)) break;
+            }
+            if (fs.existsSync(targetAbs)) break;
           }
         }
       }
@@ -1758,18 +1871,44 @@ app.whenReady().then(() => {
     console.log(`[chat-steer] session ${sessionId} queued steering injection (pending=${active.steerQueue.length})`);
   });
 
+  // ─── 全局单一多路复用流式 IPC 总线派发助手 (chat-stream-event) ───────
+  // 彻底消灭动态拼接频道 (chat-stream-xxx-sessionId) 导致的内存泄漏与乱序
+  function sendStreamEvent(sender, sessionId, type, data) {
+    if (!sender || (sender.isDestroyed && sender.isDestroyed())) return;
+    try {
+      sender.send("chat-stream-event", { sessionId, type, data });
+    } catch (e) {
+      // 忽略已关闭窗口异常
+    }
+  }
+
   // --- 流式聊天与 Agent 执行循环 ---
   ipcMain.on(
     "chat-request",
     async (event, { sessionId, messages, model, enableTools, workDir, permissionMode, reasoningEffort }) => {
+      // 统一双轨流式派发器：主通道走 chat-stream-event 多路复用总线，副通道向下兼容
+      const replyStream = (type, data) => {
+        sendStreamEvent(event.sender, sessionId, type, data);
+        try {
+          if (type === "data") event.reply(`chat-stream-data-${sessionId}`, data);
+          else if (type === "tool_status") event.reply(`chat-stream-tool-status-${sessionId}`, data);
+          else if (type === "todos") event.reply(`chat-stream-todos-${sessionId}`, data);
+          else if (type === "metrics") event.reply(`chat-stream-context-metrics-${sessionId}`, data);
+          else if (type === "compaction") event.reply(`chat-stream-compaction-${sessionId}`, data);
+          else if (type === "steered") event.reply(`chat-stream-steered-${sessionId}`, data);
+          else if (type === "waiting") event.reply(`chat-stream-waiting-${sessionId}`, data);
+          else if (type === "permission") event.reply(`chat-permission-request-${sessionId}`, data);
+          else if (type === "outputs") event.reply(`session-outputs-updated-${sessionId}`, data);
+          else if (type === "end") event.reply(`chat-stream-end-${sessionId}`, data);
+          else if (type === "error") event.reply(`chat-stream-error-${sessionId}`, data);
+        } catch (e) {}
+      };
+
       const { modelBaseUrl, modelApiKey, provider, apiModelId, contextLimit, supportsVision } =
         getModelConfig(model, "gpt-4o");
 
       if (!modelApiKey && provider !== "ollama") {
-        event.reply(
-          `chat-stream-error-${sessionId}`,
-          "请先在【设置】中配置该模型的 API Key"
-        );
+        replyStream("error", "请先在【设置】中配置该模型的 API Key");
         return;
       }
 
@@ -1875,7 +2014,7 @@ app.whenReady().then(() => {
             }
             resolve(allow);
           });
-          event.reply(`chat-permission-request-${sessionId}`, {
+          replyStream("permission", {
             id: reqId,
             path: targetPath,
             action: actionDesc,
@@ -1923,7 +2062,7 @@ app.whenReady().then(() => {
             fileType: path.extname(filePath).replace(".", "").toLowerCase() || "file",
           };
           storageService.addSessionOutput(sessionId, outItem);
-          event.reply(`session-outputs-updated-${sessionId}`, outItem);
+          replyStream("outputs", outItem);
         },
       };
       sessionAbort.toolContext = sessionToolContext;
@@ -2151,7 +2290,7 @@ app.whenReady().then(() => {
             consecutiveCompactFailures = 0;
             turnCompactionCount += 1;
 
-            event.reply(`chat-stream-compaction-${sessionId}`, {
+            replyStream("compaction", {
               beforeTokens: result.before,
               afterTokens: result.after,
               keptMessages: result.kept,
@@ -2178,7 +2317,7 @@ app.whenReady().then(() => {
         sessionToolContext.onTodosUpdate = (nextTodos) => {
           if (!Array.isArray(nextTodos)) return;
           initialTodos.splice(0, initialTodos.length, ...nextTodos);
-          event.reply(`chat-stream-todos-${sessionId}`, initialTodos);
+          replyStream("todos", initialTodos);
           refreshSystemInstruction();
           console.log(`[context] todos updated: ${initialTodos.length}`);
         };
@@ -2202,13 +2341,20 @@ app.whenReady().then(() => {
           });
 
         const initMetrics = computeContextMetrics();
-        event.reply(`chat-stream-context-metrics-${sessionId}`, initMetrics);
+        replyStream("metrics", initMetrics);
 
         const MAX_TOOL_ROUNDS = Number(storageService.getConfig("max_tool_rounds")) || 5000;
 
+        // 流式空闲看门狗：连续 N 秒收不到任何字节即主动中断，避免网关掐断后界面无限期干等
+        const STREAM_IDLE_TIMEOUT_SEC = Math.max(
+          30,
+          Number(storageService.getConfig("stream_idle_timeout")) || 180
+        );
+        const STREAM_IDLE_TIMEOUT_MS = STREAM_IDLE_TIMEOUT_SEC * 1000;
+
         function sendData(delta) {
           fullGeneratedText += delta;
-          event.reply(`chat-stream-data-${sessionId}`, delta);
+          replyStream("data", delta);
         }
 
         function isTransientSocketError(err) {
@@ -2310,6 +2456,55 @@ app.whenReady().then(() => {
           let streamFinished = false;
           let finishReason = null;
           let hitLengthLimit = false;
+          let receivedBytes = 0;
+          let lastDataAt = Date.now();
+          let waitingNotifiedSec = 0;
+
+          // 心跳：长时间无任何数据时向前端上报等待状态，避免用户误以为应用卡死
+          const waitingTimer = setInterval(() => {
+            const idleSec = Math.floor((Date.now() - lastDataAt) / 1000);
+            if (idleSec >= 15 && idleSec - waitingNotifiedSec >= 15) {
+              waitingNotifiedSec = idleSec;
+              try {
+                replyStream("waiting", {
+                  idleSec,
+                  timeoutSec: STREAM_IDLE_TIMEOUT_SEC,
+                });
+              } catch (e) {
+                // 忽略窗口已关闭的推送异常
+              }
+            }
+          }, 5000);
+
+          // 空闲看门狗：为每次 read() 施加超时，杜绝上游静默挂起导致无限期等待
+          const readWithIdleGuard = () =>
+            new Promise((resolve, reject) => {
+              let settled = false;
+              const timer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                const err = new Error(
+                  `上游连接已连续 ${STREAM_IDLE_TIMEOUT_SEC} 秒未返回任何数据（可能网关超时、代理中断或模型服务卡死）`
+                );
+                err.name = "StreamIdleTimeoutError";
+                err.code = "STREAM_IDLE_TIMEOUT";
+                reject(err);
+              }, STREAM_IDLE_TIMEOUT_MS);
+              reader.read().then(
+                (v) => {
+                  if (settled) return;
+                  settled = true;
+                  clearTimeout(timer);
+                  resolve(v);
+                },
+                (e) => {
+                  if (settled) return;
+                  settled = true;
+                  clearTimeout(timer);
+                  reject(e);
+                }
+              );
+            });
 
           try {
             while (!streamFinished) {
@@ -2321,8 +2516,13 @@ app.whenReady().then(() => {
                 }
                 break;
               }
-              const { done, value } = await reader.read();
+              const { done, value } = await readWithIdleGuard();
               if (done) break;
+              if (value && value.byteLength) {
+                receivedBytes += value.byteLength;
+                lastDataAt = Date.now();
+                waitingNotifiedSec = 0;
+              }
               buffer += decoder.decode(value, { stream: true });
               const lines = buffer.split(/\r?\n/);
               buffer = lines.pop() || "";
@@ -2416,9 +2616,23 @@ app.whenReady().then(() => {
                 `[chat-stream] 忽略流尾部的对端 Socket 提前关闭 (${readErr.cause?.code || readErr.message})，保留已接收的完整响应`
               );
             } else {
+              // 异常中断前收口未闭合的思考块，避免错误提示被吞进 <think> 内
+              if (inReasoningBlock) {
+                inReasoningBlock = false;
+                try {
+                  sendData("</think>\n\n");
+                } catch (e) {
+                  // 忽略前端已关闭的推送异常
+                }
+              }
+              console.warn(
+                `[chat-stream] 流式读取中断: ${readErr?.name || "Error"} - ${readErr?.message || ""} ` +
+                  `(receivedBytes=${receivedBytes}, finishReason=${finishReason || "none"})`
+              );
               throw readErr;
             }
           } finally {
+            clearInterval(waitingTimer);
             try {
               await reader.cancel();
             } catch {
@@ -2438,6 +2652,7 @@ app.whenReady().then(() => {
             usage,
             hitLengthLimit,
             finishReason,
+            receivedBytes,
           };
         }
 
@@ -2465,6 +2680,7 @@ app.whenReady().then(() => {
 
         // Agent 工具执行与自适应断点续写循环
         let continuationCount = 0;
+        let emptyRoundRetry = 0;
         const MAX_CONTINUATIONS = 4;
 
         while (toolRound < MAX_TOOL_ROUNDS) {
@@ -2485,7 +2701,7 @@ app.whenReady().then(() => {
                 content: `【用户中途更新/追加的需求上下文】\n${steer.content}\n\n[系统引导]：用户在当前任务执行中途补充或更新了上述内容。请自主综合分析用户意图（是补充业务背景、澄清细节、细化边界条件，还是调整/纠偏当前执行路线）：\n- 若属于补充背景、澄清细节或细化约束：请将该上下文无缝融合进当前任务，并在后续步骤与最终答复中予以落实；\n- 若属于方向调整或纠偏：请以最新指示为准调整后续行动，无需推倒已完成且不冲突的工作。`,
               });
             }
-            event.reply(`chat-stream-steered-${sessionId}`, steers);
+            replyStream("steered", steers);
             console.log(`[chat-steer] injected ${steers.length} steering message(s) into context`);
           }
 
@@ -2521,13 +2737,35 @@ app.whenReady().then(() => {
                   content: `【用户中途更新/追加的需求上下文】\n${steer.content}\n\n[系统引导]：用户在当前任务执行中途补充或更新了上述内容。请自主综合分析用户意图（是补充业务背景、澄清细节、细化边界条件，还是调整/纠偏当前执行路线）：\n- 若属于补充背景、澄清细节或细化约束：请将该上下文无缝融合进当前任务，并在后续步骤与最终答复中予以落实；\n- 若属于方向调整或纠偏：请以最新指示为准调整后续行动，无需推倒已完成且不冲突的工作。`,
                 });
               }
-              event.reply(`chat-stream-steered-${sessionId}`, steers);
+              replyStream("steered", steers);
               console.log(
                 `[chat-steer] assistant was finishing; injected ${steers.length} steering message(s) and continued the loop`
               );
               // 让前端消息流中清晰呈现"已接收中途追加上下文并继续推进"的分隔
               sendData("\n\n");
               continue;
+            }
+
+            // 空响应兜底：上游未返回任何正文、思考或工具调用（多见于网关静默掐断连接）
+            const hasAnyPayload =
+              cleanRoundText.length > 0 ||
+              Boolean(result.reasoning && String(result.reasoning).trim()) ||
+              result.toolCalls.length > 0;
+            if (!hasAnyPayload) {
+              if (emptyRoundRetry < 1) {
+                emptyRoundRetry++;
+                console.warn(
+                  `[chat-stream] 第 ${toolRound + 1} 轮模型返回空响应 ` +
+                    `(receivedBytes=${result.receivedBytes || 0}, finishReason=${result.finishReason || "none"})，自动重试 1 次`
+                );
+                await new Promise((r) => setTimeout(r, 600));
+                continue;
+              }
+              throw new Error(
+                `上游模型未返回任何内容（收到的数据量 ${result.receivedBytes || 0} 字节，finish_reason=${
+                  result.finishReason || "无"
+                }）。可能原因：网关超时/连接被中断、模型服务异常或请求被代理拦截。请重试，或切换其他模型。`
+              );
             }
 
             // 模式 A：正在输出长篇正文或代码块时触发单次输出长度上限 -> 无缝断点续写
@@ -2619,7 +2857,7 @@ app.whenReady().then(() => {
 
           // 1. 先统一广播本轮所有工具的 running 状态
           for (const item of preparedCalls) {
-            event.reply(`chat-stream-tool-status-${sessionId}`, {
+            replyStream("tool_status", {
               tool: item.tc.function.name,
               status: "running",
               args: item.args,
@@ -2639,7 +2877,7 @@ app.whenReady().then(() => {
                     ...sessionToolContext,
                     onSubagentProgress: (subSteps) => {
                       currentSubSteps = subSteps;
-                      event.reply(`chat-stream-tool-status-${sessionId}`, {
+                      replyStream("tool_status", {
                         tool: tc.function.name,
                         status: "running",
                         args,
@@ -2672,7 +2910,7 @@ app.whenReady().then(() => {
                 action: execResult?.data?.action || "modified",
               };
               storageService.addSessionOutput(sessionId, outItem);
-              event.reply(`session-outputs-updated-${sessionId}`, outItem);
+              replyStream("outputs", outItem);
             }
 
             executedToolSteps.push({
@@ -2684,7 +2922,7 @@ app.whenReady().then(() => {
               ...(currentSubSteps.length > 0 ? { subSteps: currentSubSteps } : {}),
             });
 
-            event.reply(`chat-stream-tool-status-${sessionId}`, {
+            replyStream("tool_status", {
               tool: tc.function.name,
               status: "done",
               args,
@@ -2760,7 +2998,7 @@ app.whenReady().then(() => {
 
           // 每轮后更新 Context 计量
           const updatedMetrics = computeContextMetrics();
-          event.reply(`chat-stream-context-metrics-${sessionId}`, updatedMetrics);
+          replyStream("metrics", updatedMetrics);
         }
 
         // 提取剥离了 <think> 思考块与合成占位符后的可见正文
@@ -2796,15 +3034,15 @@ app.whenReady().then(() => {
               todo.status = "completed";
             }
           }
-          event.reply(`chat-stream-todos-${sessionId}`, initialTodos);
+          replyStream("todos", initialTodos);
         }
 
         // 最终推送一次 Context
         const finalMetrics = computeContextMetrics();
-        event.reply(`chat-stream-context-metrics-${sessionId}`, finalMetrics);
+        replyStream("metrics", finalMetrics);
 
         // 结束时通知前端，由前端单源原子落盘 (消除主进程重复双写导致的消息被覆盖Bug)
-        event.reply(`chat-stream-end-${sessionId}`, {
+        replyStream("end", {
           content: fullGeneratedText,
           metadata: {
             cancelled: !!sessionAbort.cancelled,
@@ -2842,7 +3080,7 @@ app.whenReady().then(() => {
         if (err.name === "AbortError" || sessionAbort.cancelled) {
           console.log(`[chat-stream] session ${sessionId} cancelled by user`);
           try {
-            event.reply(`chat-stream-end-${sessionId}`, {
+            replyStream("end", {
               content: fullGeneratedText,
               metadata: {
                 cancelled: true,
@@ -2857,7 +3095,7 @@ app.whenReady().then(() => {
           }
         } else {
           console.error(`[chat-stream error ${sessionId}]`, err);
-          event.reply(`chat-stream-error-${sessionId}`, err.message);
+          replyStream("error", err.message);
         }
       } finally {
         activeStreamSessions.delete(sessionId);

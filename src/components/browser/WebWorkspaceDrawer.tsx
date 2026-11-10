@@ -531,6 +531,7 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
             <FileExplorerView
               initialFilePath={activeTab.filePath}
               initialLineNumber={activeTab.lineNumber}
+              initialLineEnd={activeTab.lineEnd}
               initialViewMode={activeTab.viewMode}
               refreshKey={activeTab.refreshKey}
             />

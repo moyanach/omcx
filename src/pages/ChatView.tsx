@@ -167,12 +167,15 @@ const ChatView: React.FC = () => {
       try {
         savedAttachments = await Promise.all(
           attachments.map(async (draft) => {
-            const base64 = await readFileAsBase64(draft.file);
+            const localSourcePath = (draft.file as any)?.path || '';
+            // 性能优化：若为本地已有物理文件，直接传递宿主机路径内核级直通，杜绝 Base64 内存膨胀
+            const base64 = localSourcePath ? '' : await readFileAsBase64(draft.file);
             const saved = await window.electronAPI.saveChatAttachment({
               sessionId: activeSessionId,
               name: draft.name,
               mime: draft.mime,
-              base64,
+              sourcePath: localSourcePath || undefined,
+              base64: base64 || undefined,
             });
             return {
               id: saved.id,
@@ -187,7 +190,7 @@ const ChatView: React.FC = () => {
           })
         );
       } catch (err: any) {
-        showToast(`图片保存失败: ${err?.message || '未知错误'}`);
+        showToast(`附件保存失败: ${err?.message || '未知错误'}`);
         return;
       }
     }

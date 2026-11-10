@@ -135,7 +135,7 @@ const FileReferencePill: React.FC<{
     }
 
     if (isAbs || workDir) {
-      useChatStore.getState().openFileInWorkbench(filePath, { line: lineStart });
+      useChatStore.getState().openFileInWorkbench(filePath, { line: lineStart, lineEnd });
     } else {
       navigator.clipboard.writeText(raw);
       setCopied(true);
@@ -148,7 +148,7 @@ const FileReferencePill: React.FC<{
       type='button'
       onClick={handleClick}
       className='inline-flex items-center gap-1 px-1.5 py-0.5 mx-0.5 rounded-md bg-[var(--ui-accent-blue-soft)] hover:opacity-85 border border-[color:var(--ui-accent-blue-border)] text-[var(--ui-accent-blue)] font-mono text-[12px] leading-tight align-baseline transition-all cursor-pointer'
-      title={`点击在右侧工作台打开 ${filePath}${lineStart ? ` 并跳转到第 ${lineStart} 行` : ''}（按住 ⌘ 点击可在 Finder 中定位）`}
+      title={`点击在右侧工作台打开 ${filePath}${lineStart ? ` 并定位至第 ${lineStart}${lineEnd ? `-${lineEnd}` : ''} 行` : ''}（按住 ⌘ 点击可在 Finder 中定位）`}
     >
       {copied ? (
         <Check size={11} className='text-[var(--ui-accent-emerald)] flex-shrink-0' />

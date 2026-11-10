@@ -14,11 +14,20 @@ import {
 } from 'lucide-react';
 import { useChatStore, WorkspaceItem } from '@/stores/chatStore';
 import EditWorkspaceModal, { WorkspaceData } from './EditWorkspaceModal';
+import BranchSwitchPopover from './BranchSwitchPopover';
 
 export const WorkspaceCard: React.FC = () => {
   const [isOpen, setIsOpen] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingWorkspace, setEditingWorkspace] = useState<WorkspaceData | null>(null);
+
+  // 快速切换分支浮层目标
+  const [popoverTarget, setPopoverTarget] = useState<{
+    workDir: string;
+    folderName: string;
+    currentBranch?: string;
+    anchorEl: HTMLElement | null;
+  } | null>(null);
 
   const {
     activeSessionId,
@@ -27,6 +36,7 @@ export const WorkspaceCard: React.FC = () => {
     sessions,
     setSessionWorkDir,
     gitStatus,
+    refreshGitStatus,
     workspaces,
     fetchWorkspaces,
     saveWorkspace,
@@ -78,6 +88,33 @@ export const WorkspaceCard: React.FC = () => {
       alive = false;
     };
   }, [currentWorkspace?.folders, currentWorkDir]);
+
+  // 打开快速切换分支浮层 (完全对齐用户参考截图)
+  const handleOpenBranchPopover = (
+    e: React.MouseEvent<HTMLButtonElement>,
+    workDir: string,
+    folderName: string,
+    currentBranch?: string
+  ) => {
+    e.stopPropagation();
+    setPopoverTarget({
+      workDir,
+      folderName,
+      currentBranch,
+      anchorEl: e.currentTarget,
+    });
+  };
+
+  // 分支切换成功后联动刷新本地映射与全局 Git 状态
+  const handleBranchSwitched = (folderPath: string, newBranch: string) => {
+    setFolderGitMap((prev) => ({
+      ...prev,
+      [folderPath]: { ...prev[folderPath], branch: newBranch, isGit: true },
+    }));
+    if (currentWorkDir && refreshGitStatus) {
+      refreshGitStatus(currentWorkDir);
+    }
+  };
 
   // 打开编辑弹窗 (对应参考图 8)
   const handleOpenEditModal = (ws?: WorkspaceItem) => {
@@ -206,18 +243,33 @@ export const WorkspaceCard: React.FC = () => {
                         )}
                       </div>
 
-                      {/* 优先展示 Git 分支；非 Git 项目降级展示路径 */}
+                      {/* 优先展示 Git 分支快速切换按钮；非 Git 项目降级展示路径 */}
                       {(() => {
                         const gitInfo = folderGitMap[folder.path];
                         if (gitInfo?.isGit && gitInfo.branch) {
+                          const isActivePopover = popoverTarget?.workDir === folder.path;
                           return (
-                            <span
-                              className='flex items-center gap-1 text-[10px] text-[var(--ui-accent-blue)] font-mono flex-shrink-0'
-                              title={`当前 Git 分支: ${gitInfo.branch}`}
+                            <button
+                              type='button'
+                              onClick={(e) =>
+                                handleOpenBranchPopover(e, folder.path, folder.name, gitInfo.branch)
+                              }
+                              className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-mono transition-all cursor-pointer flex-shrink-0 group/branch select-none border ${
+                                isActivePopover
+                                  ? 'bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border-[color:var(--ui-accent-blue-border)] shadow-sm'
+                                  : 'text-[var(--ui-accent-blue)] border-transparent hover:bg-[var(--ui-accent-blue-soft)] hover:border-[color:var(--ui-accent-blue-border)]'
+                              }`}
+                              title={`当前 Git 分支: ${gitInfo.branch} (点击快速切换分支)`}
                             >
                               <GitBranch size={10} className='text-[var(--ui-accent-blue)] flex-shrink-0' />
-                              <span className='truncate max-w-[110px]'>{gitInfo.branch}</span>
-                            </span>
+                              <span className='truncate max-w-[100px] font-medium'>{gitInfo.branch}</span>
+                              <ChevronDown
+                                size={9}
+                                className={`opacity-60 group-hover/branch:opacity-100 transition-transform duration-150 flex-shrink-0 ${
+                                  isActivePopover ? 'rotate-180 opacity-100' : ''
+                                }`}
+                              />
+                            </button>
                           );
                         }
                         return (
@@ -255,6 +307,21 @@ export const WorkspaceCard: React.FC = () => {
         onSave={handleSaveWorkspaceModal}
         onDelete={handleDeleteWorkspaceModal}
       />
+
+      {/* 快速切换 Git 分支浮层 (参照参考截图，完美自适应亮色/暗色双主题) */}
+      {popoverTarget && (
+        <BranchSwitchPopover
+          workDir={popoverTarget.workDir}
+          folderName={popoverTarget.folderName}
+          currentBranch={popoverTarget.currentBranch}
+          anchorEl={popoverTarget.anchorEl}
+          isOpen={Boolean(popoverTarget)}
+          onClose={() => setPopoverTarget(null)}
+          onBranchSwitched={(newBranch) =>
+            handleBranchSwitched(popoverTarget.workDir, newBranch)
+          }
+        />
+      )}
     </>
   );
 };
