@@ -151,6 +151,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     model,
     enableTools,
     workDir,
+    assistantMsgId,
     onData,
     onEnd,
     onError,
@@ -186,6 +187,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       model,
       enableTools,
       workDir,
+      assistantMsgId,
       permissionMode,
       reasoningEffort,
     });

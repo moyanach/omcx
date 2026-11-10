@@ -656,6 +656,37 @@ function addMessage(sessionId, message) {
   return { success: true, message: fullMsg };
 }
 
+/**
+ * 同步兜底落盘：在主线程直接执行 SQLite UPSERT，不依赖 Worker 消息队列。
+ * 仅用于 before-quit / 崩溃前等必须确保最后一份运行快照写入磁盘的极端场景。
+ */
+function persistMessageSync(sessionId, message) {
+  if (!sessionId || !message) return { success: false, error: "参数不完整" };
+
+  const res = addMessage(sessionId, message);
+  if (!res.success) return res;
+
+  const record = res.message;
+  try {
+    executeFallbackAction("UPSERT_MESSAGE", {
+      message: {
+        id: record.id,
+        session_id: sessionId,
+        role: record.role,
+        content: record.content,
+        tool_calls: record.tool_calls ? JSON.stringify(record.tool_calls) : null,
+        tool_call_id: record.tool_call_id || null,
+        metadata: record.metadata ? JSON.stringify(record.metadata) : null,
+        created_at: record.created_at,
+      },
+      now: Date.now(),
+    });
+  } catch (err) {
+    console.warn(`[storageService] 同步兜底落盘失败:`, err.message);
+  }
+  return res;
+}
+
 function deleteMessagesAfter(sessionId, timestamp) {
   if (!sessionId) return { success: false };
 
@@ -1094,6 +1125,7 @@ module.exports = {
   deleteSession,
   getMessages,
   addMessage,
+  persistMessageSync,
   deleteMessagesAfter,
   saveAttachmentBuffer,
   getSessionAttachmentsDir,

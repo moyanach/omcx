@@ -76,6 +76,9 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
+// 活动 Agent 运行的中断快照落盘器 (sessionId -> flush)，供 before-quit 同步兜底
+const activeStreamSnapshotFlushers = new Map();
+
 // 读取系统配置辅助函数
 function getApiConfig() {
   const apiKey = storageService.getConfig("api_key") || "";
@@ -1061,7 +1064,36 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "db-get-messages",
-    safeHandler((event, sessionId) => storageService.getMessages(sessionId))
+    safeHandler((event, sessionId) => {
+      const msgs = storageService.getMessages(sessionId);
+
+      // 崩溃恢复：非活动会话中若存在上次进程异常退出遗留的 streaming 快照，
+      // 归一化为 interrupted 终态并回写，避免它永远停留在"进行中"而无法展示中断提示。
+      if (activeStreamSessions.has(sessionId)) return msgs;
+      const stale = msgs.filter(
+        (m) => m.metadata && typeof m.metadata === "object" && m.metadata.streaming
+      );
+      if (stale.length === 0) return msgs;
+
+      const interruptedAt = Date.now();
+      for (const m of stale) {
+        const metadata = {
+          ...m.metadata,
+          streaming: false,
+          interrupted: true,
+          interruptedAt,
+        };
+        storageService.addMessage(sessionId, {
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          createdAt: m.created_at,
+          metadata,
+        });
+        m.metadata = metadata;
+      }
+      return msgs;
+    })
   );
 
   ipcMain.handle(
@@ -1885,7 +1917,7 @@ app.whenReady().then(() => {
   // --- 流式聊天与 Agent 执行循环 ---
   ipcMain.on(
     "chat-request",
-    async (event, { sessionId, messages, model, enableTools, workDir, permissionMode, reasoningEffort }) => {
+    async (event, { sessionId, messages, model, enableTools, workDir, assistantMsgId, permissionMode, reasoningEffort }) => {
       // 统一双轨流式派发器：主通道走 chat-stream-event 多路复用总线，副通道向下兼容
       const replyStream = (type, data) => {
         sendStreamEvent(event.sender, sessionId, type, data);
@@ -2032,6 +2064,80 @@ app.whenReady().then(() => {
       let fullGeneratedText = "";
       let toolRound = 0;
       const executedToolSteps = [];
+
+      // ─── 运行快照落盘 (Crash-Safe Streaming Snapshot) ───
+      // 运行中的 assistant 回合不再只存在于 renderer 内存：主进程按节流周期把当前正文、
+      // 工具步骤与 Todo 写入 SQLite，并以 metadata.streaming = true 标记"进行中"。
+      // 正常结束时由 renderer 以终稿覆盖；异常退出时由 before-quit / 下次启动归一化
+      // 转为 interrupted 状态，确保中断前的执行轨迹与部分正文不丢失。
+      const partialMessageId =
+        assistantMsgId || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const runStartedAt = Date.now();
+      const PARTIAL_PERSIST_INTERVAL_MS = 1200;
+      let lastPartialPersistAt = 0;
+
+      const formatRunDuration = (ms) => {
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec % 60;
+        return m > 0 ? `${m}m ${s < 10 ? "0" : ""}${s}s` : `${s}s`;
+      };
+
+      const persistPartial = (force = false, overrides = {}) => {
+        const now = Date.now();
+        if (!force && now - lastPartialPersistAt < PARTIAL_PERSIST_INTERVAL_MS) return;
+        lastPartialPersistAt = now;
+        try {
+          storageService.addMessage(sessionId, {
+            id: partialMessageId,
+            role: "assistant",
+            content: fullGeneratedText,
+            createdAt: runStartedAt,
+            metadata: {
+              streaming: true,
+              startedAt: runStartedAt,
+              durationMs: now - runStartedAt,
+              durationFormatted: formatRunDuration(now - runStartedAt),
+              toolRounds: toolRound,
+              toolSteps: executedToolSteps,
+              todos: initialTodos,
+              ...overrides,
+            },
+          });
+        } catch (err) {
+          console.warn(`[chat-stream] 运行快照落盘失败 (${partialMessageId}):`, err.message);
+        }
+      };
+      // 启动即刻写入空占位：覆盖"模型连接建立阶段即崩溃"导致回合彻底消失的窗口
+      persistPartial(true);
+
+      // 退出兜底：Cmd+Q / 进程退出时同步落盘，明确标记为 interrupted，
+      // 确保下一次启动能看到"执行被中断"的完整轨迹，而不是一条诡异的空回合。
+      const persistInterrupted = () => {
+        const now = Date.now();
+        try {
+          storageService.persistMessageSync(sessionId, {
+            id: partialMessageId,
+            role: "assistant",
+            content: fullGeneratedText,
+            createdAt: runStartedAt,
+            metadata: {
+              streaming: false,
+              interrupted: true,
+              interruptedAt: now,
+              startedAt: runStartedAt,
+              durationMs: now - runStartedAt,
+              durationFormatted: formatRunDuration(now - runStartedAt),
+              toolRounds: toolRound,
+              toolSteps: executedToolSteps,
+              todos: initialTodos,
+            },
+          });
+        } catch (err) {
+          console.warn(`[chat-stream] 退出前快照落盘失败 (${partialMessageId}):`, err.message);
+        }
+      };
+      activeStreamSnapshotFlushers.set(sessionId, persistInterrupted);
 
       // 会话级隔离工具上下文（杜绝并发会话串台覆盖全局单例，并挂载中断信号与沙箱权限模式）
       const sessionToolContext = {
@@ -2318,6 +2424,7 @@ app.whenReady().then(() => {
           if (!Array.isArray(nextTodos)) return;
           initialTodos.splice(0, initialTodos.length, ...nextTodos);
           replyStream("todos", initialTodos);
+          persistPartial(true);
           refreshSystemInstruction();
           console.log(`[context] todos updated: ${initialTodos.length}`);
         };
@@ -2355,6 +2462,8 @@ app.whenReady().then(() => {
         function sendData(delta) {
           fullGeneratedText += delta;
           replyStream("data", delta);
+          // 节流快照：流式正文持续推进时按固定周期落盘一次，避免进程异常退出丢失整段输出
+          persistPartial();
         }
 
         function isTransientSocketError(err) {
@@ -2922,6 +3031,9 @@ app.whenReady().then(() => {
               ...(currentSubSteps.length > 0 ? { subSteps: currentSubSteps } : {}),
             });
 
+            // 每一步工具执行完成后立即强制落盘一次：即使随后进程崩溃，工具轨迹也不丢失
+            persistPartial(true);
+
             replyStream("tool_status", {
               tool: tc.function.name,
               status: "done",
@@ -3098,6 +3210,32 @@ app.whenReady().then(() => {
           replyStream("error", err.message);
         }
       } finally {
+        // 窗口已销毁（用户关闭窗口但 Agent 仍在后台跑完）时没有 renderer 负责终稿落盘，
+        // 由主进程补写终态，避免数据库中遗留 streaming=true 的"永远进行中"回合。
+        try {
+          if (event.sender.isDestroyed && event.sender.isDestroyed()) {
+            const now = Date.now();
+            storageService.persistMessageSync(sessionId, {
+              id: partialMessageId,
+              role: "assistant",
+              content: fullGeneratedText,
+              createdAt: runStartedAt,
+              metadata: {
+                streaming: false,
+                completed: !sessionAbort.cancelled,
+                cancelled: !!sessionAbort.cancelled,
+                durationMs: now - runStartedAt,
+                durationFormatted: formatRunDuration(now - runStartedAt),
+                toolRounds: toolRound,
+                toolSteps: executedToolSteps,
+                todos: initialTodos,
+              },
+            });
+          }
+        } catch (e) {
+          // 忽略窗口已销毁的异常
+        }
+        activeStreamSnapshotFlushers.delete(sessionId);
         activeStreamSessions.delete(sessionId);
       }
     }
@@ -3109,6 +3247,19 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   // 退出流程中任何子服务异常都绝不能阻断进程退出（否则会卡住自动更新安装）
+  // 1. 同步落盘所有仍在运行中的 Agent 回合快照，确保中断前的正文与工具轨迹不丢失
+  try {
+    for (const [sid, flush] of activeStreamSnapshotFlushers) {
+      try {
+        flush();
+      } catch (err) {
+        console.warn(`[before-quit] 会话 ${sid} 中断快照落盘异常（已忽略）:`, err.message);
+      }
+    }
+    activeStreamSnapshotFlushers.clear();
+  } catch (err) {
+    console.warn("[before-quit] 中断快照统一落盘异常（已忽略）:", err.message);
+  }
   try {
     mcpClientService.closeAll();
   } catch (err) {

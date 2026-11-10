@@ -242,6 +242,7 @@ export function useStreamChat() {
           selectedModel,
           enableTools,
           currentWorkDir,
+          assistantMsgId,
           handleIncomingDelta,
           (endPayload: any) => {
             flushBuffer();
@@ -487,6 +488,7 @@ export function useStreamChat() {
           selectedModel,
           enableTools,
           currentWorkDir,
+          assistantMsgId,
           handleIncomingDelta,
           (endPayload: any) => {
             flushBuffer();

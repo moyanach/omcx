@@ -29,6 +29,7 @@ import {
   Pin,
   X,
   ArrowDown,
+  AlertTriangle,
 } from 'lucide-react';
 import { Message, useChatStore } from '../../stores/chatStore';
 import MarkdownContent, { ThinkingBlock } from '@/components/common/MarkdownContent';
@@ -1596,7 +1597,7 @@ const ReferenceLinks: React.FC<{ metadata: any[] }> = ({ metadata }) => (
 
 const MessageBubble: React.FC<{
   msg: Message;
-  isLast: boolean;
+  isActiveTurn: boolean;
   activeToolCalls: ToolStatusEvent[];
   activeTodos?: TodoItem[];
   containerWidth: number;
@@ -1607,7 +1608,7 @@ const MessageBubble: React.FC<{
 }> = React.memo(
   ({
     msg,
-    isLast,
+    isActiveTurn,
     activeToolCalls,
     activeTodos,
     onCopy,
@@ -1644,23 +1645,28 @@ const MessageBubble: React.FC<{
   const hasVisibleMarkdown = Boolean(markdownContent && markdownContent.trim().length > 0);
 
   const displayToolEvents =
-    !isUser && activeToolCalls.length > 0 && isLast
+    !isUser && activeToolCalls.length > 0 && isActiveTurn
       ? activeToolCalls
       : Array.isArray(msg.metadata?.toolSteps)
       ? msg.metadata.toolSteps
       : [];
 
   const displayTodos: TodoItem[] =
-    !isUser && activeTodos && activeTodos.length > 0 && isLast
+    !isUser && activeTodos && activeTodos.length > 0 && isActiveTurn
       ? activeTodos
       : Array.isArray(msg.metadata?.todos)
       ? msg.metadata.todos
       : [];
 
   // 兜底：assistant 回合彻底空响应（无正文 / 无思考 / 无工具步骤），且已不在流式中
-  const isStreamingThis = Boolean(isGenerating && isLast);
+  // 关键：仅当整个会话停止生成后才允许判定为"空响应"，否则中途追加 steer 消息会让
+  // 仍在工具循环中的 assistant 占位气泡失去 isLast 身份，被误判为请求失败。
+  const isStreamingThis = Boolean(isGenerating && isActiveTurn);
+  const isInterrupted = Boolean(!isUser && msg.metadata?.interrupted && !isGenerating);
   const isEmptyAssistantTurn =
     !isUser &&
+    !isGenerating &&
+    !isInterrupted &&
     !isStreamingThis &&
     !hasContent &&
     thinkingBlocks.length === 0 &&
@@ -1680,6 +1686,19 @@ const MessageBubble: React.FC<{
             <Clock size={11} className='text-[var(--ui-text-faint)]' />
             <span>用时 {durationFormatted}</span>
             <ChevronRight size={11} className='opacity-70' />
+          </div>
+        )}
+
+        {/* 0. 中断恢复提示：应用退出/进程异常时主进程已保全部分正文与工具轨迹 */}
+        {isInterrupted && (
+          <div className='w-full mb-1.5 px-3 py-2 rounded-xl border border-[color:var(--ui-accent-amber-border)] bg-[var(--ui-accent-amber-soft)] flex items-start gap-2 text-[11px] leading-relaxed text-[var(--ui-text-secondary)] select-none'>
+            <AlertTriangle
+              size={13}
+              className='text-[var(--ui-accent-amber)] flex-shrink-0 mt-[1px]'
+            />
+            <span>
+              上次执行在应用退出或进程中中断时尚未完成，已保留中断前的正文与工具执行轨迹。可继续追问，或重新执行该任务。
+            </span>
           </div>
         )}
 
@@ -1704,7 +1723,7 @@ const MessageBubble: React.FC<{
 
         {/* 4. 任务规划进度条面板（默认展开） */}
         {!isUser && displayTodos.length > 0 && (
-          <TodoListCard todos={displayTodos} isActive={Boolean(isGenerating && isLast)} />
+          <TodoListCard todos={displayTodos} isActive={Boolean(isGenerating && isActiveTurn)} />
         )}
 
         {/* 5. 网页权威引用来源 */}
@@ -1830,8 +1849,8 @@ const MessageBubble: React.FC<{
     </div>
   );
 }, (prev, next) => {
-  // 性能优化核心：最后一条消息（处于活跃流式中）必须重新渲染
-  if (prev.isLast !== next.isLast || next.isLast) {
+  // 性能优化核心：当前活跃回合（处于活跃流式中）必须重新渲染
+  if (prev.isActiveTurn !== next.isActiveTurn || next.isActiveTurn) {
     return false;
   }
 
@@ -2106,9 +2125,19 @@ export const MessageList: React.FC<Props> = ({
     return () => observer.disconnect();
   }, []);
 
-  const lastMessage = messages[messages.length - 1];
+  // 当前正在推进的 assistant 回合：以「最后一条 assistant 消息」为准，而不是「数组最后一条」。
+  // 用户中途 steer 追加的 user 消息会排在 assistant 占位气泡之后；若仍按最后一条判定，
+  // 会让仍在执行工具循环的回合失去活跃身份，误渲染"本次请求未收到模型返回内容"。
+  const activeAssistantMessage = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i];
+    }
+    return null;
+  }, [messages]);
+  const activeAssistantId = isGenerating ? activeAssistantMessage?.id ?? null : null;
+
   const hasStreamingText = Boolean(
-    lastMessage && lastMessage.role === 'assistant' && lastMessage.content?.trim()
+    isGenerating && activeAssistantMessage?.content?.trim()
   );
 
   return (
@@ -2132,7 +2161,8 @@ export const MessageList: React.FC<Props> = ({
           const isVisible =
             !isVirtualActive ||
             (idx >= visibleIndices.start && idx <= visibleIndices.end) ||
-            idx === messages.length - 1;
+            idx === messages.length - 1 ||
+            msg.id === activeAssistantId;
 
           if (!isVisible) {
             const h = estimateHeight(msg);
@@ -2151,9 +2181,9 @@ export const MessageList: React.FC<Props> = ({
             <MessageBubble
               key={msg.id}
               msg={msg}
-              isLast={idx === messages.length - 1}
-              activeToolCalls={idx === messages.length - 1 ? activeToolCalls : []}
-              activeTodos={idx === messages.length - 1 ? activeTodos : []}
+              isActiveTurn={Boolean(activeAssistantId && msg.id === activeAssistantId)}
+              activeToolCalls={activeAssistantId && msg.id === activeAssistantId ? activeToolCalls : []}
+              activeTodos={activeAssistantId && msg.id === activeAssistantId ? activeTodos : []}
               containerWidth={containerWidth}
               onCopy={onCopy}
               onRetry={onRetry}
