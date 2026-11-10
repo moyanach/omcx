@@ -378,7 +378,7 @@ const MessageInput: React.FC<Props> = ({
 
     const usedNumbers = new Set(
       attachments.map((item) => {
-        const matched = item.placeholder.match(/#(d+)/);
+        const matched = item.placeholder.match(/#(\d+)/);
         return matched ? Number(matched[1]) : 0;
       })
     );

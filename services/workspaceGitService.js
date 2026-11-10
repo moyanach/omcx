@@ -133,11 +133,27 @@ async function getWorkspaceFileDiff(workDir, filePath) {
     try {
       const stat = fs.statSync(absTarget);
       if (stat.isFile()) {
-        const buf = fs.readFileSync(absTarget);
-        if (buf.subarray(0, 4096).includes(0)) {
+        // 仅需判定二进制并在 300k 字符处截断，按固定上限分块读取，避免超大文件整体载入内存
+        const probeBytes = Math.min(stat.size, 4096);
+        const textBytes = Math.min(stat.size, 1024 * 1024);
+        const readBytes = Math.max(probeBytes, textBytes);
+        const buf = Buffer.allocUnsafe(readBytes);
+        const fd = fs.openSync(absTarget, "r");
+        let filled = 0;
+        try {
+          while (filled < readBytes) {
+            const read = fs.readSync(fd, buf, filled, readBytes - filled, filled);
+            if (read <= 0) break;
+            filled += read;
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+        const head = buf.subarray(0, Math.min(filled, 4096));
+        if (head.includes(0)) {
           isBinary = true;
         } else {
-          newText = buf.toString("utf-8").slice(0, 300000);
+          newText = buf.subarray(0, filled).toString("utf-8").slice(0, 300000);
         }
       }
     } catch (err) {

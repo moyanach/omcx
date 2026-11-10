@@ -1,5 +1,6 @@
 const { spawn } = require("child_process");
 const path = require("path");
+const { StringDecoder } = require("string_decoder");
 const storageService = require("./storageService");
 
 const MCP_TOOL_PREFIX = "mcp__";
@@ -49,6 +50,8 @@ class McpStdioClient {
     this.nextId = 1;
     this.pending = new Map();
     this.buffer = "";
+    // UTF-8 流式解码：分块边界可能切断多字节字符，StringDecoder 负责跨块拼装
+    this.stdoutDecoder = new StringDecoder("utf-8");
     this.initialized = false;
     this.initializingPromise = null;
     this.cachedTools = null;
@@ -90,6 +93,8 @@ class McpStdioClient {
           env: buildEnhancedEnv(this.env),
           cwd: this.cwd,
           stdio: ["pipe", "pipe", "pipe"],
+          // 独立进程组：关闭时可连同其派生的孙进程一并终止，避免孤儿进程残留
+          detached: process.platform !== "win32",
         });
       } catch (err) {
         return fail(err);
@@ -114,6 +119,11 @@ class McpStdioClient {
 
       this.proc.stderr.on("data", () => {
         // 静默消费 stderr，防止缓冲区满阻塞子进程
+      });
+
+      // 子进程提前退出后继续写入 stdin 会触发 EPIPE，若不监听将直接击穿主进程
+      this.proc.stdin.on("error", (err) => {
+        this._rejectAllPending(err);
       });
 
       this.request(
@@ -143,7 +153,7 @@ class McpStdioClient {
   }
 
   _onStdoutData(chunk) {
-    this.buffer += chunk.toString("utf-8");
+    this.buffer += this.stdoutDecoder.write(chunk);
 
     while (true) {
       const headerMatch = this.buffer.match(/^Content-Length:\s*(\d+)\r?\n\r?\n/i);
@@ -257,12 +267,24 @@ class McpStdioClient {
   close() {
     this.initialized = false;
     this.cachedTools = null;
+    this.buffer = "";
+    this.stdoutDecoder = new StringDecoder("utf-8");
     this._rejectAllPending(new Error(`MCP client "${this.id}" closed`));
     if (this.proc) {
+      const pid = this.proc.pid;
       try {
-        this.proc.kill();
+        if (process.platform !== "win32" && Number.isInteger(pid) && pid > 0) {
+          // 负 PID 终止整个进程组，覆盖 MCP Server 自行派生的子进程
+          process.kill(-pid, "SIGTERM");
+        } else {
+          this.proc.kill();
+        }
       } catch {
-        // 忽略关闭异常
+        try {
+          this.proc.kill();
+        } catch {
+          // 忽略关闭异常
+        }
       }
       this.proc = null;
     }
@@ -276,7 +298,9 @@ class McpClientManager {
   }
 
   _getClientKey(server) {
-    return `${server.id}::${server.command}::${JSON.stringify(server.args || [])}`;
+    const envKeys = Object.keys(server.env || {}).sort();
+    const envSig = envKeys.map((k) => `${k}=${server.env[k]}`).join("\u0001");
+    return `${server.id}::${server.command}::${JSON.stringify(server.args || [])}::${envSig}::${server.cwd || ""}`;
   }
 
   _getOrCreateClient(server) {
@@ -298,7 +322,8 @@ class McpClientManager {
   async getActiveMcpTools(workDir = null) {
     const servers = storageService
       .getMcpServers(workDir)
-      .filter((s) => s.enabled !== false && s.command);
+      // 安全加固：项目级 MCP 配置必须经用户显式信任后才允许拉起子进程
+      .filter((s) => s.enabled !== false && s.command && (s.source !== "project" || s.trusted === true));
 
     if (servers.length === 0) {
       return [];

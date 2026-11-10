@@ -9,6 +9,9 @@ import type {
   Message,
 } from "../chatStore";
 
+// 会话切换序号：用于丢弃并发切换时旧请求的迟到响应
+let activeSessionSwitchSeq = 0;
+
 export interface SessionSlice {
   sessions: Session[];
   activeSessionId: string | null;
@@ -482,6 +485,8 @@ export const createSessionSlice: StateCreator<
   setActiveSession: async (id) => {
     if (!window.electronAPI) return;
 
+    // 会话切换所有权令牌：快速 A→B 切换时，A 的迟到消息响应不得覆盖 B
+    const switchSeq = ++activeSessionSwitchSeq;
     const state = get();
     const targetSession = state.sessions.find((s) => s.id === id);
     const workDir = targetSession?.workDir;
@@ -494,9 +499,17 @@ export const createSessionSlice: StateCreator<
       if (matched) targetWorkspaceId = matched.id;
     }
 
+    // 立即切换 activeSessionId，消息体稍后填充，避免界面停留在旧会话
+    set((state) => ({
+      activeSessionId: id,
+      activeWorkspaceId: targetWorkspaceId !== null ? targetWorkspaceId : state.activeWorkspaceId,
+      contextMetrics: state.contextMetricsBySession[id] || null,
+    }));
+
     if (!state.messages[id]) {
       try {
         const dbMsgs = await window.electronAPI.dbGetMessages(id);
+        if (switchSeq !== activeSessionSwitchSeq) return;
         const mappedMsgs = dbMsgs.map((m: any) => {
           let parsedMeta = null;
           if (m.metadata) {
@@ -515,21 +528,14 @@ export const createSessionSlice: StateCreator<
           };
         });
         set((state) => ({
-          activeSessionId: id,
-          activeWorkspaceId: targetWorkspaceId !== null ? targetWorkspaceId : state.activeWorkspaceId,
-          contextMetrics: state.contextMetricsBySession[id] || null,
           messages: { ...state.messages, [id]: mappedMsgs },
         }));
       } catch (err) {
         console.error("获取消息历史失败:", err);
       }
-    } else {
-      set((state) => ({
-        activeSessionId: id,
-        activeWorkspaceId: targetWorkspaceId !== null ? targetWorkspaceId : state.activeWorkspaceId,
-        contextMetrics: state.contextMetricsBySession[id] || null,
-      }));
     }
+
+    if (switchSeq !== activeSessionSwitchSeq) return;
 
     get().refreshOutputs(id);
     get().refreshGitStatus(workDir);

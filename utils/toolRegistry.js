@@ -79,7 +79,8 @@ class ToolRegistry {
       if (blockFileWrite && WRITE_FILE_TOOL_NAMES.has(tool.name)) {
         continue;
       }
-      if (allowedToolNames && !allowedToolNames.has(tool.name) && !String(tool.name).startsWith("mcp__")) {
+      // 白名单对内置工具与 MCP 工具一视同仁，Subagent 权限收敛不允许出现 mcp__ 旁路
+      if (allowedToolNames && !allowedToolNames.has(tool.name)) {
         continue;
       }
       defs.push({

@@ -77,7 +77,9 @@ function resolveWorkspacePath(userPath, workDir, allowedFolders = [], options = 
       if (f && typeof f === "string") allReadableFolders.add(path.resolve(f));
     });
   }
-  if (allReadableFolders.size === 0) {
+  // 未绑定任何工作空间时，仅把应用自身目录作为只读兜底，绝不静默提升为可写目标
+  const hasExplicitFolders = allReadableFolders.size > 0;
+  if (!hasExplicitFolders) {
     allReadableFolders.add(DEFAULT_ROOT);
   }
 
@@ -89,10 +91,11 @@ function resolveWorkspacePath(userPath, workDir, allowedFolders = [], options = 
   const writableList =
     Array.isArray(options.writableFolders) && options.writableFolders.length > 0
       ? options.writableFolders.map((f) => path.resolve(f))
-      : folderList.filter(
-          (f) => !builtinTrusted.some((trusted) => isUnderFolderReal(f, trusted))
-        );
-  const effectiveWritableList = writableList.length > 0 ? writableList : [primaryFolder];
+      : folderList.filter((f) => {
+          if (!hasExplicitFolders && path.resolve(f) === path.resolve(DEFAULT_ROOT)) return false;
+          return !builtinTrusted.some((trusted) => isUnderFolderReal(f, trusted));
+        });
+  const effectiveWritableList = writableList.length > 0 ? writableList : hasExplicitFolders ? [primaryFolder] : [];
 
   const finalizeResult = (candidatePath) => {
     const normalized = path.resolve(candidatePath);

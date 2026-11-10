@@ -44,18 +44,23 @@ export const ToolsView: React.FC = () => {
   };
 
   const handleToggleMcpServer = async (serverId: string, currentEnabled: boolean) => {
-    if (!window.electronAPI?.saveMcpServers) return;
-    const currentServersMap: Record<string, any> = {};
-    mcpServers.forEach((s) => {
-      currentServersMap[s.id] = {
-        command: s.command,
-        args: s.args,
-        description: s.description,
-        enabled: s.id === serverId ? !currentEnabled : s.enabled,
-      };
-    });
-    await window.electronAPI.saveMcpServers(currentServersMap);
+    if (!window.electronAPI?.toggleMcpServer) return;
+    const res = await window.electronAPI.toggleMcpServer(serverId, !currentEnabled);
+    if (!res?.success) {
+      console.error('切换 MCP 服务器状态失败:', res?.error);
+      return;
+    }
     await refreshMcpAndSkills(activeSession?.workDir);
+  };
+
+  const handleTrustProjectMcp = async (trusted: boolean) => {
+    if (!window.electronAPI?.trustProjectMcp || !activeSession?.workDir) return;
+    const res = await window.electronAPI.trustProjectMcp(activeSession.workDir, trusted);
+    if (!res?.success) {
+      console.error('项目级 MCP 信任操作失败:', res?.error);
+      return;
+    }
+    await refreshMcpAndSkills(activeSession.workDir);
   };
 
   return (
@@ -393,39 +398,89 @@ export const ToolsView: React.FC = () => {
                             {server.name.charAt(0).toUpperCase()}
                           </div>
                           <div>
-                            <span className='font-bold text-sm text-neutral-100'>
-                              {server.name}
-                            </span>
+                            <div className='flex items-center gap-1.5'>
+                              <span className='font-bold text-sm text-neutral-100'>
+                                {server.name}
+                              </span>
+                              {server.source === 'project' && (
+                                <span className='text-[9px] px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25 font-medium'>
+                                  项目配置
+                                </span>
+                              )}
+                            </div>
                             <div className='flex items-center gap-1.5 mt-0.5'>
                               <span
                                 className={`w-1.5 h-1.5 rounded-full ${
-                                  server.enabled ? 'bg-emerald-500' : 'bg-neutral-600'
+                                  server.requiresTrust
+                                    ? 'bg-amber-500'
+                                    : server.enabled
+                                    ? 'bg-emerald-500'
+                                    : 'bg-neutral-600'
                                 }`}
                               />
                               <span className='text-[10px] font-mono text-neutral-400'>
-                                {server.enabled ? '在线 (Ready)' : '已停用'}
+                                {server.requiresTrust
+                                  ? '待授权'
+                                  : server.enabled
+                                  ? '在线 (Ready)'
+                                  : '已停用'}
                               </span>
                             </div>
                           </div>
                         </div>
 
-                        {/* 启用/停用切换按钮 */}
-                        <button
-                          onClick={() => handleToggleMcpServer(server.id, server.enabled)}
-                          className={`p-1.5 rounded-lg border transition-colors ${
-                            server.enabled
-                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
-                              : 'bg-[#252525] text-neutral-500 border-[#333] hover:text-neutral-300'
-                          }`}
-                          title={server.enabled ? '点击停用' : '点击启用'}
-                        >
-                          <Power size={13} />
-                        </button>
+                        {/* 启用/停用切换按钮（项目级配置由项目文件托管，不在此处改写） */}
+                        {server.source === 'project' ? (
+                          <span
+                            className='p-1.5 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                            title='项目级 MCP 配置请在项目 .omcx/mcp.json 中启停'
+                          >
+                            <Shield size={13} />
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleToggleMcpServer(server.id, server.enabled)}
+                            className={`p-1.5 rounded-lg border transition-colors ${
+                              server.enabled
+                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
+                                : 'bg-[#252525] text-neutral-500 border-[#333] hover:text-neutral-300'
+                            }`}
+                            title={server.enabled ? '点击停用' : '点击启用'}
+                          >
+                            <Power size={13} />
+                          </button>
+                        )}
                       </div>
 
                       <p className='text-xs text-neutral-400 leading-relaxed'>
                         {server.description || '标准 MCP 服务节点'}
                       </p>
+
+                      {server.requiresTrust && (
+                        <div className='flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2'>
+                          <Shield size={13} className='text-amber-400 mt-0.5 flex-shrink-0' />
+                          <div className='flex-1 min-w-0'>
+                            <p className='text-[11px] text-amber-200 leading-relaxed'>
+                              该项目自带 MCP 服务器配置，启用后会以当前用户权限执行其中的命令。请确认项目来源可信后再授权；配置文件变更后需要重新授权。
+                            </p>
+                            <button
+                              onClick={() => handleTrustProjectMcp(true)}
+                              className='mt-1.5 text-[11px] font-semibold text-amber-300 hover:text-amber-200'
+                            >
+                              信任此项目并启用
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {server.source === 'project' && server.trusted && (
+                        <button
+                          onClick={() => handleTrustProjectMcp(false)}
+                          className='self-start text-[10px] text-neutral-500 hover:text-amber-400'
+                        >
+                          撤销项目 MCP 信任
+                        </button>
+                      )}
                     </div>
 
                     {/* 执行配置 */}

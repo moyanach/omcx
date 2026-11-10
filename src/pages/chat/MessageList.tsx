@@ -1611,6 +1611,7 @@ const MessageBubble: React.FC<{
     isActiveTurn,
     activeToolCalls,
     activeTodos,
+    containerWidth,
     onCopy,
     onRetry,
     isGenerating,
@@ -1618,15 +1619,21 @@ const MessageBubble: React.FC<{
   }) => {
   const [copied, setCopied] = useState(false);
   const bubbleRef = useRef<HTMLDivElement>(null);
+  const lastReportedHeightRef = useRef(0);
+  const reportHeightRef = useRef(onReportHeight);
+  reportHeightRef.current = onReportHeight;
 
-  // 测量物理真实高度并上报高度池，供离屏占位容器 1:1 精准对齐
+  // 测量物理真实高度并上报高度池，供离屏占位容器 1:1 精准对齐。
+  // 必须显式声明依赖：此前无依赖数组会在每次渲染（含流式 delta）强制同步回流。
   useEffect(() => {
-    if (!bubbleRef.current) return;
-    const h = bubbleRef.current.offsetHeight;
-    if (h > 0) {
-      onReportHeight?.(msg.id, h);
+    const el = bubbleRef.current;
+    if (!el) return;
+    const h = el.offsetHeight;
+    if (h > 0 && Math.abs(h - lastReportedHeightRef.current) > 0.5) {
+      lastReportedHeightRef.current = h;
+      reportHeightRef.current?.(msg.id, h);
     }
-  });
+  }, [msg.id, msg.content, msg.metadata, isActiveTurn, containerWidth]);
 
   const handleCopyText = () => {
     onCopy(msg.content);
@@ -1975,6 +1982,32 @@ export const MessageList: React.FC<Props> = ({
     end: 100,
   });
 
+  // 预计算每条消息的累计顶部/底部偏移，滚动时用二分查找替代 O(n) 全量遍历
+  const virtualOffsets = useMemo(() => {
+    const tops = new Array<number>(messages.length);
+    const bottoms = new Array<number>(messages.length);
+    let accumulatedY = 0;
+    for (let i = 0; i < messages.length; i++) {
+      tops[i] = accumulatedY;
+      accumulatedY += estimateHeight(messages[i]) + 14;
+      bottoms[i] = accumulatedY;
+    }
+    return { tops, bottoms };
+  }, [messages, estimateHeight]);
+
+  const lowerBound = (arr: number[], value: number, length: number): number => {
+    let lo = 0;
+    let hi = length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid] < value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
+  const virtualRafRef = useRef<number | null>(null);
+
   const updateVirtualRange = useCallback(() => {
     const el = scrollRef.current;
     if (!el || messages.length <= VIRTUAL_THRESHOLD) return;
@@ -1983,38 +2016,33 @@ export const MessageList: React.FC<Props> = ({
     const clientHeight = el.clientHeight;
     const viewTop = Math.max(0, scrollTop - 700);
     const viewBottom = scrollTop + clientHeight + 700;
+    const { tops, bottoms } = virtualOffsets;
+    const len = messages.length;
 
-    let accumulatedY = 0;
-    let start = 0;
-    let end = messages.length - 1;
-    let foundStart = false;
+    const firstVisible = lowerBound(bottoms, viewTop, len);
+    const start = Math.max(0, firstVisible - 2);
 
-    for (let i = 0; i < messages.length; i++) {
-      const h = estimateHeight(messages[i]);
-      const itemTop = accumulatedY;
-      const itemBottom = accumulatedY + h + 14;
-
-      if (!foundStart && itemBottom >= viewTop) {
-        start = Math.max(0, i - 2);
-        foundStart = true;
-      }
-      if (itemTop > viewBottom) {
-        end = Math.min(messages.length - 1, i + 2);
-        break;
-      }
-      accumulatedY = itemBottom;
-    }
+    const firstAfter = lowerBound(tops, viewBottom, len);
+    let end = firstAfter >= len ? len - 1 : Math.min(len - 1, firstAfter + 2);
 
     // 生成中或粘底状态下，末尾活跃消息永久处于挂载窗口内
     if (isGenerating || isPinnedToBottom) {
-      end = messages.length - 1;
+      end = len - 1;
     }
 
     setVisibleIndices((prev) => {
       if (prev.start === start && prev.end === end) return prev;
       return { start, end };
     });
-  }, [messages, isGenerating, isPinnedToBottom, estimateHeight]);
+  }, [messages.length, virtualOffsets, isGenerating, isPinnedToBottom]);
+
+  const scheduleVirtualRange = useCallback(() => {
+    if (virtualRafRef.current !== null) return;
+    virtualRafRef.current = requestAnimationFrame(() => {
+      virtualRafRef.current = null;
+      updateVirtualRange();
+    });
+  }, [updateVirtualRange]);
 
   // 监听滚动位置：判定是否吸底，并计算当前视口展示的消息节点
   const handleScroll = useCallback(() => {
@@ -2027,7 +2055,7 @@ export const MessageList: React.FC<Props> = ({
     setShowScrollBottomBtn(!atBottom && el.scrollHeight > el.clientHeight + 120);
 
     if (messages.length > VIRTUAL_THRESHOLD) {
-      updateVirtualRange();
+      scheduleVirtualRange();
     }
 
     // 性能优化：当处于吸底状态时（如流式生成期间），当前活跃节点必然是最后一条消息，
@@ -2059,7 +2087,7 @@ export const MessageList: React.FC<Props> = ({
         }
       });
     }
-  }, [messages]);
+  }, [messages, scheduleVirtualRange]);
 
   // 监听用户向上滚轮：明确意图向上阅读，立即解除吸底锁定！
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
@@ -2106,13 +2134,35 @@ export const MessageList: React.FC<Props> = ({
 
   // 左侧点位导航点击跳转
   const handleNavigateToMessage = (id: string) => {
-    const el = document.getElementById(`msg-bubble-${id}`);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      setActiveNavMsgId(id);
-      setIsPinnedToBottom(false);
+    const targetIdx = messages.findIndex((m) => m.id === id);
+    if (messages.length > VIRTUAL_THRESHOLD && targetIdx >= 0) {
+      // 虚拟窗口下目标消息可能尚未挂载，先扩展窗口再在下一帧定位
+      setVisibleIndices({
+        start: Math.max(0, targetIdx - 3),
+        end: Math.min(messages.length - 1, targetIdx + 3),
+      });
+      requestAnimationFrame(() => {
+        document
+          .getElementById(`msg-bubble-${id}`)
+          ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } else {
+      const el = document.getElementById(`msg-bubble-${id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     }
+    setActiveNavMsgId(id);
+    setIsPinnedToBottom(false);
   };
+
+  // 卸载时取消尚未执行的滚动调度帧，避免对已卸载组件 setState
+  useEffect(() => {
+    return () => {
+      if (virtualRafRef.current !== null) cancelAnimationFrame(virtualRafRef.current);
+      if (navCalcRafRef.current !== null) cancelAnimationFrame(navCalcRafRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -2156,42 +2206,70 @@ export const MessageList: React.FC<Props> = ({
         onWheel={handleWheel}
         className='flex-1 overflow-y-auto pl-6 pr-3 pt-2 pb-2.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
       >
-        {messages.map((msg, idx) => {
-          const isVirtualActive = messages.length > VIRTUAL_THRESHOLD;
-          const isVisible =
-            !isVirtualActive ||
-            (idx >= visibleIndices.start && idx <= visibleIndices.end) ||
-            idx === messages.length - 1 ||
-            msg.id === activeAssistantId;
+        {(() => {
+          const virtualActive = messages.length > VIRTUAL_THRESHOLD;
+          const clampedStart = virtualActive
+            ? Math.max(0, Math.min(visibleIndices.start, messages.length - 1))
+            : 0;
+          const clampedEnd = virtualActive
+            ? Math.max(clampedStart, Math.min(visibleIndices.end, messages.length - 1))
+            : messages.length - 1;
 
-          if (!isVisible) {
-            const h = estimateHeight(msg);
-            return (
-              <div
-                key={msg.id}
-                id={`msg-bubble-${msg.id}`}
-                style={{ height: h, contain: 'strict' }}
-                className='w-full flex-shrink-0 pointer-events-none opacity-0 select-none'
-                aria-hidden='true'
-              />
-            );
-          }
+          // 仅挂载视口附近的消息，上下各用一个 spacer 撑起被卸载区域的总高度，
+          // 避免为全量历史消息创建占位 DOM 节点（长会话下是主要渲染开销）。
+          const leadingHeight =
+            virtualActive && clampedStart > 0
+              ? Math.max(0, virtualOffsets.tops[clampedStart] - 14)
+              : 0;
+          const trailingHeight =
+            virtualActive && clampedEnd < messages.length - 1
+              ? Math.max(
+                  0,
+                  virtualOffsets.bottoms[messages.length - 1] -
+                    virtualOffsets.bottoms[clampedEnd] -
+                    28
+                )
+              : 0;
+
+          const renderedMessages = virtualActive
+            ? messages.slice(clampedStart, clampedEnd + 1)
+            : messages;
 
           return (
-            <MessageBubble
-              key={msg.id}
-              msg={msg}
-              isActiveTurn={Boolean(activeAssistantId && msg.id === activeAssistantId)}
-              activeToolCalls={activeAssistantId && msg.id === activeAssistantId ? activeToolCalls : []}
-              activeTodos={activeAssistantId && msg.id === activeAssistantId ? activeTodos : []}
-              containerWidth={containerWidth}
-              onCopy={onCopy}
-              onRetry={onRetry}
-              isGenerating={isGenerating}
-              onReportHeight={handleReportHeight}
-            />
+            <>
+              {leadingHeight > 0 && (
+                <div
+                  style={{ height: leadingHeight, contain: 'strict' }}
+                  className='w-full flex-shrink-0 pointer-events-none'
+                  aria-hidden='true'
+                />
+              )}
+              {renderedMessages.map((msg) => (
+                <MessageBubble
+                  key={msg.id}
+                  msg={msg}
+                  isActiveTurn={Boolean(activeAssistantId && msg.id === activeAssistantId)}
+                  activeToolCalls={
+                    activeAssistantId && msg.id === activeAssistantId ? activeToolCalls : []
+                  }
+                  activeTodos={activeAssistantId && msg.id === activeAssistantId ? activeTodos : []}
+                  containerWidth={containerWidth}
+                  onCopy={onCopy}
+                  onRetry={onRetry}
+                  isGenerating={isGenerating}
+                  onReportHeight={handleReportHeight}
+                />
+              ))}
+              {trailingHeight > 0 && (
+                <div
+                  style={{ height: trailingHeight, contain: 'strict' }}
+                  className='w-full flex-shrink-0 pointer-events-none'
+                  aria-hidden='true'
+                />
+              )}
+            </>
           );
-        })}
+        })()}
 
         {/* 会话最下方：实时任务执行状态条 */}
         {isGenerating && (

@@ -178,14 +178,22 @@ function getBuiltinReadOnlyTrustedDirs(sessionId = null) {
  * 宿主机高敏凭据与客户端私密配置黑名单（禁止读取与写入）
  */
 function getSensitiveBlacklistPaths() {
+  const omcxHomes = [path.join(USER_HOME, ".omcx"), DEFAULT_OMCX_HOME, LOCAL_OMCX_FALLBACK];
+  const omcxDbFiles = [];
+  const omcxConfigFiles = [];
+  for (const home of omcxHomes) {
+    // SQLite 主库与 WAL/SHM 伴随文件包含全部会话历史、产物索引与明文 API Key
+    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+      omcxDbFiles.push(path.join(home, `omcx.db${suffix}`));
+    }
+    omcxConfigFiles.push(path.join(home, "config.json"), path.join(home, "mcp.json"));
+  }
+
   return [
+    // 客户端 SQLite 核心数据库（含明文 API Key 与全部会话内容）
+    ...omcxDbFiles,
     // 客户端自身核心配置（包含明文 API Key 与全局 MCP 配置）
-    path.join(USER_HOME, ".omcx", "config.json"),
-    path.join(USER_HOME, ".omcx", "mcp.json"),
-    path.join(DEFAULT_OMCX_HOME, "config.json"),
-    path.join(DEFAULT_OMCX_HOME, "mcp.json"),
-    path.join(LOCAL_OMCX_FALLBACK, "config.json"),
-    path.join(LOCAL_OMCX_FALLBACK, "mcp.json"),
+    ...omcxConfigFiles,
     // 宿主机 SSH / 云厂商 / GPG / 密钥链凭据
     path.join(USER_HOME, ".ssh"),
     path.join(USER_HOME, ".aws"),

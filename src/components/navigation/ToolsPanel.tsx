@@ -70,6 +70,8 @@ ${editingSkill.prompt.trim()}
 
     const nextServers: Record<string, any> = {};
     for (const server of mcpServers) {
+      // 项目级 MCP 配置由项目文件托管，绝不能写回全局 ~/.omcx/mcp.json
+      if (server.source === 'project') continue;
       nextServers[server.id] = {
         command: server.command,
         args: server.args,
@@ -98,18 +100,29 @@ ${editingSkill.prompt.trim()}
 
   // 切换 MCP 服务器启停状态
   const handleToggleMcp = async (server: McpServerItem) => {
-    const nextServers: Record<string, any> = {};
-    for (const s of mcpServers) {
-      nextServers[s.id] = {
-        command: s.command,
-        args: s.args,
-        env: {},
-        description: s.description,
-        enabled: s.id === server.id ? !s.enabled : s.enabled,
-      };
-    }
-    if (window.electronAPI?.saveMcpServers) {
-      await window.electronAPI.saveMcpServers(nextServers);
+    // 项目级配置不参与全局启停
+    if (server.source === 'project') return;
+    if (window.electronAPI?.toggleMcpServer) {
+      const res = await window.electronAPI.toggleMcpServer(server.id, !server.enabled);
+      if (!res?.success) {
+        console.error('切换 MCP 服务器状态失败:', res?.error);
+        return;
+      }
+    } else {
+      const nextServers: Record<string, any> = {};
+      for (const s of mcpServers) {
+        if (s.source === 'project') continue;
+        nextServers[s.id] = {
+          command: s.command,
+          args: s.args,
+          env: {},
+          description: s.description,
+          enabled: s.id === server.id ? !s.enabled : s.enabled,
+        };
+      }
+      if (window.electronAPI?.saveMcpServers) {
+        await window.electronAPI.saveMcpServers(nextServers);
+      }
     }
     if (refreshMcpAndSkills) {
       refreshMcpAndSkills(activeSession?.workDir);
@@ -118,8 +131,10 @@ ${editingSkill.prompt.trim()}
 
   // 删除 MCP 服务器
   const handleDeleteMcp = async (serverId: string) => {
+    if (mcpServers.find((s) => s.id === serverId)?.source === 'project') return;
     const nextServers: Record<string, any> = {};
     for (const s of mcpServers) {
+      if (s.source === 'project') continue;
       if (s.id !== serverId) {
         nextServers[s.id] = {
           command: s.command,

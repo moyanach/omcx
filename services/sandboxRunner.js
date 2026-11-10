@@ -264,6 +264,19 @@ function runSandboxedCommand(
     const canUseSeatbelt = useSandbox && isMacOsSeatbeltAvailable();
     let profilePath = null;
 
+    // 安全加固：请求沙箱但内核沙箱不可用时必须拒绝执行（fail-closed），
+    // 绝不允许静默降级为宿主机裸执行。
+    if (useSandbox && !canUseSeatbelt) {
+      return resolve({
+        success: false,
+        exitCode: -1,
+        stdout: "",
+        stderr: "",
+        sandboxed: false,
+        error: "当前系统未提供可用的 macOS Seatbelt 沙箱，已拒绝执行命令。如需在无沙箱环境运行，请显式切换到「完全访问」模式。",
+      });
+    }
+
     if (canUseSeatbelt) {
       try {
         const profileContent = buildSeatbeltProfile({
@@ -276,8 +289,15 @@ function runSandboxedCommand(
         profilePath = path.join(tmpDir, `omcx-sb-${uniqueId}.sb`);
         fs.writeFileSync(profilePath, profileContent, { encoding: "utf-8", mode: 0o600 });
       } catch (err) {
-        // 如果生成临时策略失败，安全降级并记录
-        profilePath = null;
+        // 安全加固：策略文件生成失败同样 fail-closed，禁止降级为无沙箱执行
+        return resolve({
+          success: false,
+          exitCode: -1,
+          stdout: "",
+          stderr: "",
+          sandboxed: false,
+          error: `安全沙箱策略初始化失败，已拒绝执行命令: ${err.message || String(err)}`,
+        });
       }
     }
 
@@ -295,9 +315,8 @@ function runSandboxedCommand(
     };
 
     const userShell = process.env.SHELL || "/bin/zsh";
-    const env = buildSanitizedShellEnv(process.env, {
-      stripSecrets: Boolean(canUseSeatbelt),
-    });
+    // 安全加固：无论沙箱是否实际启用，Agent 命令都不得继承宿主机凭据环境变量
+    const env = buildSanitizedShellEnv(process.env, { stripSecrets: true });
 
     let child;
     try {

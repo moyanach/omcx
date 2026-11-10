@@ -131,6 +131,12 @@ export interface McpServerItem {
   args: string[];
   description: string;
   enabled: boolean;
+  /** global = ~/.omcx/mcp.json，project = <workDir>/.omcx/mcp.json */
+  source?: 'global' | 'project';
+  /** 项目级配置是否已由用户显式信任（与配置内容指纹绑定） */
+  trusted?: boolean;
+  requiresTrust?: boolean;
+  fingerprint?: string | null;
 }
 
 export interface SkillItem {

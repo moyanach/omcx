@@ -674,7 +674,24 @@ export function useStreamChat() {
         if (window.electronAPI?.cancelChat) {
           window.electronAPI.cancelChat(targetSessionId);
         }
-        await new Promise((resolve) => setTimeout(resolve, 260));
+        // 以 generating 状态归零为信号驱动交接，避免固定延时在慢模型下过早抢跑，
+        // 同时保留超时兜底，防止流结束事件丢失导致队列永久卡住。
+        await new Promise<void>((resolve) => {
+          let finished = false;
+          let unsubscribe: (() => void) | null = null;
+          const done = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timeout);
+            unsubscribe?.();
+            resolve();
+          };
+          const timeout = setTimeout(done, 5000);
+          unsubscribe = useChatStore.subscribe((state) => {
+            if (!state.generatingBySession[targetSessionId]) done();
+          });
+          if (!useChatStore.getState().generatingBySession[targetSessionId]) done();
+        });
       }
       // 3. 立即启动当前任务
       await sendMessage(

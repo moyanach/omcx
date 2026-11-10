@@ -154,10 +154,12 @@ class EditFileTool extends StructuredTool {
 
       // 执行精确替换
       let newContent = "";
+      // 使用函数式替换，确保 new_string 中的 $&、$'、`$`` 等字符按字面量写入，
+      // 而不是被 String.replace 当作替换模式解释（否则会静默损坏源码）。
       if (replace_all) {
-        newContent = content.replaceAll(finalOldString, finalNewString);
+        newContent = content.replaceAll(finalOldString, () => finalNewString);
       } else {
-        newContent = content.replace(finalOldString, finalNewString);
+        newContent = content.replace(finalOldString, () => finalNewString);
       }
 
       fs.writeFileSync(targetPath, newContent, "utf-8");

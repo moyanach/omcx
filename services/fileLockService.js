@@ -42,13 +42,11 @@ class PathLockService {
       releaseLock = resolve;
     });
 
-    this._locks.set(
-      key,
-      prevLock.then(
-        () => currentLock,
-        () => currentLock
-      )
+    const chainedLock = prevLock.then(
+      () => currentLock,
+      () => currentLock
     );
+    this._locks.set(key, chainedLock);
 
     let timer = null;
     try {
@@ -66,7 +64,7 @@ class PathLockService {
     } finally {
       if (timer) clearTimeout(timer);
       releaseLock();
-      if (this._locks.get(key) === currentLock) {
+      if (this._locks.get(key) === chainedLock) {
         this._locks.delete(key);
       }
     }

@@ -6,9 +6,13 @@ const activeStreamSessions = new Map();
 
 ipcRenderer.on("chat-stream-event", (event, envelope) => {
   if (!envelope || !envelope.sessionId) return;
-  const callbacks = activeStreamSessions.get(envelope.sessionId);
-  if (!callbacks) return;
+  const entry = activeStreamSessions.get(envelope.sessionId);
+  if (!entry) return;
 
+  // 事件归属校验：同一会话快速重发/并发时，旧 run 的迟到事件绝不能污染新 run 的回调
+  if (envelope.runId && entry.runId !== envelope.runId) return;
+
+  const callbacks = entry.callbacks;
   const { type, data } = envelope;
   switch (type) {
     case "data":
@@ -39,11 +43,15 @@ ipcRenderer.on("chat-stream-event", (event, envelope) => {
       callbacks.onContextMetrics?.(data);
       break;
     case "end":
-      activeStreamSessions.delete(envelope.sessionId);
+      if (activeStreamSessions.get(envelope.sessionId) === entry) {
+        activeStreamSessions.delete(envelope.sessionId);
+      }
       callbacks.onEnd?.(data);
       break;
     case "error":
-      activeStreamSessions.delete(envelope.sessionId);
+      if (activeStreamSessions.get(envelope.sessionId) === entry) {
+        activeStreamSessions.delete(envelope.sessionId);
+      }
       callbacks.onError?.(data);
       break;
   }
@@ -89,6 +97,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // ─── Agent 扩展与 Inspector 监控 ────────────────────
   getMcpServers: (workDir) => ipcRenderer.invoke("get-mcp-servers", workDir),
   saveMcpServers: (servers) => ipcRenderer.invoke("save-mcp-servers", servers),
+  trustProjectMcp: (workDir, trusted) =>
+    ipcRenderer.invoke("trust-project-mcp", { workDir, trusted }),
+  toggleMcpServer: (id, enabled) => ipcRenderer.invoke("toggle-mcp-server", { id, enabled }),
   getSkills: (workDir) => ipcRenderer.invoke("get-skills", workDir),
   getSubagents: (workDir) => ipcRenderer.invoke("get-subagents", workDir),
   getMemories: (workDir) => ipcRenderer.invoke("get-memories", workDir),
@@ -133,7 +144,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // ─── 工具调用 ──────────────────────────────────────
   getTools: () => ipcRenderer.invoke("get-tools"),
-  executeTool: (name, args) => ipcRenderer.invoke("execute-tool", { name, args }),
+  executeTool: (name, args, workDir) => ipcRenderer.invoke("execute-tool", { name, args, workDir }),
 
   respondPermission: (id, allow, decision) =>
     ipcRenderer.send("chat-permission-response", { id, allow, decision }),
@@ -166,23 +177,29 @@ contextBridge.exposeInMainWorld("electronAPI", {
     onSteered,
     onWaiting
   ) => {
+    // 每次请求生成独立 runId：同一会话重发时，旧 run 的迟到事件会被总线丢弃
+    const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     activeStreamSessions.set(sessionId, {
-      onData,
-      onEnd,
-      onError,
-      onToolStatus,
-      onContextMetrics,
-      onOutputsUpdated,
-      onPermissionRequest,
-      onTodosUpdate,
-      onCompaction,
-      onSteered,
-      onWaiting,
+      runId,
+      callbacks: {
+        onData,
+        onEnd,
+        onError,
+        onToolStatus,
+        onContextMetrics,
+        onOutputsUpdated,
+        onPermissionRequest,
+        onTodosUpdate,
+        onCompaction,
+        onSteered,
+        onWaiting,
+      },
     });
 
     // 触发主进程的流式 Agent 请求 (显式透传当前绑定的工作空间目录、权限模式与推理强度)
     ipcRenderer.send("chat-request", {
       sessionId,
+      runId,
       messages,
       model,
       enableTools,

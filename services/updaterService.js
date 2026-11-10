@@ -9,7 +9,7 @@
  */
 
 const { autoUpdater } = require("electron-updater");
-const { ipcMain, app, shell, dialog } = require("electron");
+const { ipcMain, app, shell, dialog, BrowserWindow } = require("electron");
 const fs = require("fs");
 const path = require("path");
 
@@ -80,6 +80,26 @@ function initAutoUpdater(mainWindow) {
   if (isInitialized) return;
   isInitialized = true;
 
+  // 窗口可能在运行期被关闭重建（或主窗口被销毁后新建），因此事件发送时再解析目标窗口，
+  // 不能把初始化瞬间的窗口实例永久绑定在闭包里。
+  let fallbackWindow = mainWindow || null;
+  const getTargetWindow = () => {
+    const focused = BrowserWindow.getFocusedWindow();
+    if (focused && !focused.isDestroyed()) return focused;
+    if (fallbackWindow && !fallbackWindow.isDestroyed()) return fallbackWindow;
+    const all = BrowserWindow.getAllWindows().filter((win) => win && !win.isDestroyed());
+    return all[0] || null;
+  };
+  const sendUpdateEvent = (channel, payload) => {
+    const target = getTargetWindow();
+    if (!target) return;
+    try {
+      target.webContents.send(channel, payload);
+    } catch (err) {
+      console.warn(`[updater] 推送 ${channel} 失败:`, err.message);
+    }
+  };
+
   // 配置更新行为
   autoUpdater.autoDownload = false; // 由用户查看更新日志后手动触发下载，更轻量受控
   autoUpdater.autoInstallOnAppQuit = true;
@@ -108,9 +128,7 @@ function initAutoUpdater(mainWindow) {
   autoUpdater.on("checking-for-update", () => {
     console.log("[updater] 正在检查远端更新元数据...");
     eventHandled = false;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("update-checking");
-    }
+    sendUpdateEvent("update-checking");
   });
 
   // 2. 发现新版本可用
@@ -118,14 +136,12 @@ function initAutoUpdater(mainWindow) {
     console.log(`[updater] 发现可用新版本: v${info.version}`);
     eventHandled = true;
     hasSucceededStartupCheck = true;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("update-available", {
-        version: info.version,
-        releaseDate: info.releaseDate,
-        releaseNotes: info.releaseNotes,
-        releaseUrl: `${GITHUB_REPO_URL}/tag/v${info.version}`,
-      });
-    }
+    sendUpdateEvent("update-available", {
+      version: info.version,
+      releaseDate: info.releaseDate,
+      releaseNotes: info.releaseNotes,
+      releaseUrl: `${GITHUB_REPO_URL}/tag/v${info.version}`,
+    });
   });
 
   // 3. 当前已是最新版本
@@ -133,35 +149,29 @@ function initAutoUpdater(mainWindow) {
     console.log(`[updater] 当前已是最新版本 (v${info.version || app.getVersion()})`);
     eventHandled = true;
     hasSucceededStartupCheck = true;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("update-not-available", {
-        version: info.version || app.getVersion(),
-      });
-    }
+    sendUpdateEvent("update-not-available", {
+      version: info.version || app.getVersion(),
+    });
   });
 
   // 4. 下载进度实时推送 (0% ~ 100%)
   autoUpdater.on("download-progress", (progressObj) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("update-download-progress", {
-        percent: Math.min(100, Math.floor(progressObj.percent || 0)),
-        bytesPerSecond: progressObj.bytesPerSecond || 0,
-        transferred: progressObj.transferred || 0,
-        total: progressObj.total || 0,
-      });
-    }
+    sendUpdateEvent("update-download-progress", {
+      percent: Math.min(100, Math.floor(progressObj.percent || 0)),
+      bytesPerSecond: progressObj.bytesPerSecond || 0,
+      transferred: progressObj.transferred || 0,
+      total: progressObj.total || 0,
+    });
   });
 
   // 5. 新版本安装包已下载完成并校验成功
   autoUpdater.on("update-downloaded", (info) => {
     console.log(`[updater] 新版本 v${info.version} 下载校验完成，已就绪重启替换`);
     updateDownloadedInfo = info;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("update-downloaded", {
-        version: info.version,
-        releaseDate: info.releaseDate,
-      });
-    }
+    sendUpdateEvent("update-downloaded", {
+      version: info.version,
+      releaseDate: info.releaseDate,
+    });
   });
 
   // 6. 异常捕获 (轻量化清洗输出，避免打印大段 HTML 504 错误页堆栈)
@@ -181,9 +191,7 @@ function initAutoUpdater(mainWindow) {
    * 自动通过 GitHub 官方 REST API 直连比对，确保前端必定收到明确响应，绝不挂起。
    */
   async function performUnifiedCheck(isManual = false) {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("update-checking");
-    }
+    sendUpdateEvent("update-checking");
 
     eventHandled = false;
     let updaterResult = null;
@@ -222,28 +230,24 @@ function initAutoUpdater(mainWindow) {
       if (hasNewer) {
         console.log(`[updater:fallback] 比对发现新版本: ${remoteTag} (当前: v${currentVersion})`);
         hasSucceededStartupCheck = true;
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("update-available", {
-            version: cleanVersion(remoteTag),
-            releaseDate: releaseData.published_at,
-            releaseNotes: releaseData.body,
-            releaseUrl: releaseData.html_url || `${GITHUB_REPO_URL}/tag/${remoteTag}`,
-          });
-        }
+        sendUpdateEvent("update-available", {
+          version: cleanVersion(remoteTag),
+          releaseDate: releaseData.published_at,
+          releaseNotes: releaseData.body,
+          releaseUrl: releaseData.html_url || `${GITHUB_REPO_URL}/tag/${remoteTag}`,
+        });
       } else {
         console.log(`[updater:fallback] 比对确认当前已是最新版 (v${currentVersion})`);
         hasSucceededStartupCheck = true;
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("update-not-available", {
-            version: currentVersion,
-          });
-        }
+        sendUpdateEvent("update-not-available", {
+          version: currentVersion,
+        });
       }
       return { success: true };
     } catch (apiErr) {
       console.error("[updater:fallback] GitHub API 直连检测失败:", apiErr.message);
-      if (isManual && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("update-error", {
+      if (isManual) {
+        sendUpdateEvent("update-error", {
           message: `检查更新失败 (${apiErr.message})，请检查网络或代理连接`,
           fallbackUrl: GITHUB_REPO_URL,
         });
@@ -339,10 +343,10 @@ function initAutoUpdater(mainWindow) {
         cancelId: 1,
       };
 
-      const dialogPromise =
-        mainWindow && !mainWindow.isDestroyed()
-          ? dialog.showMessageBox(mainWindow, boxOptions)
-          : dialog.showMessageBox(boxOptions);
+      const dialogParent = getTargetWindow();
+      const dialogPromise = dialogParent
+        ? dialog.showMessageBox(dialogParent, boxOptions)
+        : dialog.showMessageBox(boxOptions);
 
       dialogPromise
         .then(({ response }) => {

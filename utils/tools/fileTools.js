@@ -9,7 +9,8 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { StringDecoder } = require("string_decoder");
+const { execFileSync } = require("child_process");
 const { z } = require("zod");
 const { StructuredTool } = require("@langchain/core/tools");
 const { resolveWorkspacePath } = require("./pathResolver");
@@ -126,6 +127,55 @@ async function checkSafePath(
 
 // ─── 工具: read_file ─────────────────────────────────────────
 
+const READ_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * 以固定大小分块扫描文件，仅保留目标行区间，避免把超大文件整体读入内存。
+ * 返回与 `content.split("\n")` 一致的行语义（含末尾空行）。
+ * @returns {{ lines: string[], totalLines: number, bytes: number }}
+ */
+function readLinesRange(targetPath, offset = 0, maxLines = 200) {
+  const startLine = Math.max(0, Math.floor(Number(offset) || 0));
+  const unlimited = maxLines === -1;
+  const limit = unlimited ? Infinity : Math.max(1, Math.floor(Number(maxLines) || 1));
+  const endExclusive = startLine + limit;
+
+  const fd = fs.openSync(targetPath, "r");
+  const decoder = new StringDecoder("utf-8");
+  const buf = Buffer.alloc(READ_CHUNK_BYTES);
+  const collected = [];
+  let remainder = "";
+  let lineIndex = 0;
+  let bytes = 0;
+
+  const pushLine = (line) => {
+    if (lineIndex >= startLine && lineIndex < endExclusive) collected.push(line);
+    lineIndex += 1;
+  };
+
+  try {
+    while (true) {
+      const read = fs.readSync(fd, buf, 0, buf.length, null);
+      if (read <= 0) break;
+      bytes += read;
+      const text = remainder + decoder.write(buf.subarray(0, read));
+      let cursor = 0;
+      let nl = text.indexOf("\n");
+      while (nl !== -1) {
+        pushLine(text.slice(cursor, nl));
+        cursor = nl + 1;
+        nl = text.indexOf("\n", cursor);
+      }
+      remainder = text.slice(cursor);
+    }
+    pushLine(remainder + decoder.end());
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  return { lines: collected, totalLines: lineIndex, bytes };
+}
+
 class ReadFileTool extends StructuredTool {
   constructor() {
     super();
@@ -175,37 +225,37 @@ class ReadFileTool extends StructuredTool {
       return JSON.stringify({ success: false, error: `路径不是文件: ${targetFilePath}` });
     }
 
-    const content = fs.readFileSync(targetPath, "utf-8");
-    const lines = content.split("\n");
+    const { lines, totalLines } = readLinesRange(targetPath, offset, maxLines);
 
     if (maxLines === -1) {
+      const content = lines.join("\n");
       // 读取全部
       return JSON.stringify({
         success: true,
         path: filePath,
-        totalLines: lines.length,
+        totalLines,
         content,
         size: content.length,
         truncated: false,
       });
     }
 
-    const start = offset;
-    const end = Math.min(offset + maxLines, lines.length);
-    const limited = lines.slice(start, end);
-    const isTruncated = lines.length > end;
+    const start = Math.max(0, Math.floor(Number(offset) || 0));
+    const end = Math.min(start + Math.floor(Number(maxLines) || 1), totalLines);
+    const limited = lines.slice(0, Math.max(0, end - start)).join("\n");
+    const isTruncated = totalLines > end;
 
     return JSON.stringify({
       success: true,
       path: filePath,
-      totalLines: lines.length,
+      totalLines,
       startLine: start,
       endLine: end,
-      content: limited.join("\n"),
-      size: limited.join("\n").length,
+      content: limited,
+      size: limited.length,
       truncated: isTruncated,
       note: isTruncated
-        ? `文件共 ${lines.length} 行，当前显示 ${start + 1}-${end} 行（共 ${maxLines} 行）。使用 offset 参数继续读取。`
+        ? `文件共 ${totalLines} 行，当前显示 ${start + 1}-${end} 行（共 ${Math.floor(Number(maxLines) || 1)} 行）。使用 offset 参数继续读取。`
         : undefined,
     });
   }
@@ -429,22 +479,26 @@ class SearchCodeTool extends StructuredTool {
       const safeFolders = folderCandidates.filter(
         (f) => f && fs.existsSync(f) && !checkSensitivePath(f, sessionId).blocked
       );
-      const searchTargets = (safeFolders.length > 0 ? safeFolders : [rootPath])
-        .map((f) => `"${path.resolve(f)}"`)
-        .join(" ");
+      const searchTargets = (safeFolders.length > 0 ? safeFolders : [rootPath]).map((f) =>
+        path.resolve(f)
+      );
 
-      let cmd = `rg -n --no-heading`;
-      if (contextLines > 0) {
-        cmd += ` -C ${contextLines}`;
+      // 安全加固：全程使用参数数组调用 rg，绝不经过 shell，彻底杜绝命令注入
+      const normalizedContextLines = Number.isFinite(Number(contextLines))
+        ? Math.max(0, Math.min(20, Math.floor(Number(contextLines))))
+        : 0;
+      const rgArgs = ["-n", "--no-heading"];
+      if (normalizedContextLines > 0) {
+        rgArgs.push("-C", String(normalizedContextLines));
       }
-      cmd += ` "${query.replace(/"/g, '\\"')}"`;
-      if (include) {
-        cmd += ` -g "${include}"`;
+      rgArgs.push("-g", "!node_modules", "-g", "!.git", "-g", "!dist");
+      rgArgs.push(String(query));
+      if (include && String(include).trim()) {
+        rgArgs.push("-g", String(include));
       }
-      cmd += ` --glob '!node_modules' --glob '!.git' --glob '!dist'`;
-      cmd += ` ${searchTargets}`;
+      rgArgs.push(...searchTargets);
 
-      const stdout = execSync(cmd, {
+      const stdout = execFileSync("rg", rgArgs, {
         encoding: "utf-8",
         maxBuffer: 1024 * 1024,
         timeout: 15000,
@@ -475,10 +529,10 @@ class SearchCodeTool extends StructuredTool {
         truncated: lines.length > maxResults,
       });
     } catch (err) {
-      if (err.status === 1 && err.stdout === "") {
+      if (err.status === 1 && (err.stdout === "" || err.stdout == null)) {
         return JSON.stringify({ success: true, total: 0, results: [], truncated: false });
       }
-      if (err.stderr && err.stderr.includes("not found")) {
+      if (err.code === "ENOENT" || (err.stderr && err.stderr.includes("not found"))) {
         return JSON.stringify({ success: false, error: "需要安装 ripgrep (rg) 来使用代码搜索功能" });
       }
       return JSON.stringify({ success: false, error: `搜索失败: ${err.message}` });

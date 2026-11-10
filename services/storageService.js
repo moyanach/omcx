@@ -12,6 +12,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 const { Worker } = require("worker_threads");
 const Database = require("better-sqlite3");
 
@@ -61,18 +62,46 @@ let memorySessions = [];
 let memoryMessagesBySession = new Map();
 let memoryOutputsBySession = new Map();
 
+const MAX_CACHED_MESSAGE_SESSIONS = 50;
+const MAX_CACHED_OUTPUT_SESSIONS = 100;
+
+/**
+ * 带 LRU 上限的缓存写入：长时间运行时不至于无限增长，同时保留最近访问的会话
+ */
+function touchLruCache(cache, key, value, maxSize) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > maxSize) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === key) break;
+    cache.delete(oldestKey);
+  }
+}
+
 // ─── Worker 线程通信管理器 ────────────────────────────────────
 let dbWorker = null;
 let fallbackDb = null;
 let workerMsgId = 1;
 const pendingWorkerRequests = new Map();
+// 最近写入操作的有限回放队列：Worker 崩溃时在主线程降级引擎中重放，避免写请求静默丢失
+const pendingWorkerWrites = new Map();
+const MAX_PENDING_WRITES = 200;
+const WORKER_REQUEST_TIMEOUT_MS = 8000;
 
 function sendToWorker(action, payload) {
   if (dbWorker) {
     const id = workerMsgId++;
+    pendingWorkerWrites.set(id, { action, payload, at: Date.now() });
+    while (pendingWorkerWrites.size > MAX_PENDING_WRITES) {
+      const oldestId = pendingWorkerWrites.keys().next().value;
+      pendingWorkerWrites.delete(oldestId);
+    }
     dbWorker.postMessage({ id, action, payload });
   } else if (fallbackDb) {
     // 降级模式：在主线程同线程执行
+    executeFallbackAction(action, payload);
+  } else {
+    // Worker 尚在初始化但降级库已可用时，直接同步落盘，避免首次启动丢写
     executeFallbackAction(action, payload);
   }
 }
@@ -81,11 +110,58 @@ function sendToWorkerWithPromise(action, payload) {
   if (dbWorker) {
     const id = workerMsgId++;
     return new Promise((resolve, reject) => {
-      pendingWorkerRequests.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        pendingWorkerRequests.delete(id);
+        reject(new Error(`Worker 请求超时: ${action}`));
+      }, WORKER_REQUEST_TIMEOUT_MS);
+      pendingWorkerRequests.set(id, {
+        resolve: (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      });
       dbWorker.postMessage({ id, action, payload });
     });
   }
-  return Promise.resolve(executeFallbackAction(action, payload));
+  try {
+    return Promise.resolve(executeFallbackAction(action, payload));
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
+/**
+ * Worker 崩溃 / 退出时的兜底：拒绝所有挂起请求，并回放最近的写操作
+ */
+function handleWorkerFailure(reason) {
+  for (const [id, pending] of pendingWorkerRequests) {
+    pendingWorkerRequests.delete(id);
+    try {
+      pending.reject(new Error(reason));
+    } catch {}
+  }
+  const replay = Array.from(pendingWorkerWrites.values());
+  pendingWorkerWrites.clear();
+  try {
+    getFallbackDb();
+  } catch (err) {
+    console.warn("[storageService] 降级引擎初始化失败:", err.message);
+    return;
+  }
+  for (const item of replay) {
+    try {
+      executeFallbackAction(item.action, item.payload);
+    } catch (err) {
+      console.warn(`[storageService] 回放操作 ${item.action} 失败:`, err.message);
+    }
+  }
+  if (replay.length > 0) {
+    console.warn(`[storageService] 已将 ${replay.length} 条待写入操作回放到同线程降级引擎`);
+  }
 }
 
 // 降级模式同线程备用执行引擎
@@ -181,7 +257,7 @@ function initWorkerEngine() {
     });
 
     dbWorker.on("message", (msg) => {
-      const { id, type, result, error } = msg || {};
+      const { id, type, result, error, success } = msg || {};
       if (type === "READY") {
         console.log(`[storageService] SQLite 后台 Worker 线程初始化成功 (WAL Mode)`);
         // 加载初始内存快照
@@ -192,22 +268,34 @@ function initWorkerEngine() {
       if (id && pendingWorkerRequests.has(id)) {
         const { resolve, reject } = pendingWorkerRequests.get(id);
         pendingWorkerRequests.delete(id);
-        if (error) reject(new Error(error));
+        if (error || success === false) reject(new Error(error || "Worker 执行失败"));
         else resolve(result);
+        return;
+      }
+
+      if (id && pendingWorkerWrites.has(id)) {
+        pendingWorkerWrites.delete(id);
+        if (error || success === false) {
+          console.error(`[storageService] Worker 写入失败 (id=${id}):`, error || "未知错误");
+        }
       }
     });
 
     dbWorker.on("error", (err) => {
       console.warn("[storageService] dbWorker 抛出异常，启动同线程降级引擎:", err.message);
+      const deadWorker = dbWorker;
       dbWorker = null;
-      getFallbackDb();
+      try {
+        deadWorker?.terminate();
+      } catch {}
+      handleWorkerFailure(`Worker 异常: ${err.message}`);
     });
 
     dbWorker.on("exit", (code) => {
-      if (code !== 0) {
+      if (code !== 0 && dbWorker) {
         console.warn(`[storageService] dbWorker 异常退出 (code ${code})，切换至同线程降级引擎`);
         dbWorker = null;
-        getFallbackDb();
+        handleWorkerFailure(`Worker 异常退出 (code ${code})`);
       }
     });
   } catch (err) {
@@ -221,8 +309,8 @@ let hasLoadedSnapshot = false;
 
 function loadInitialSnapshot() {
   if (hasLoadedSnapshot) return;
-  hasLoadedSnapshot = true;
-  // 从数据库预加载会话与配置，填入内存缓存
+  // 注意：成功后才置位。首次启动时 Worker 可能尚未建表，失败后必须允许后续重试，
+  // 否则一次竞态失败会导致整个进程生命周期内会话列表为空。
   try {
     const d = getFallbackDb();
     const rows = d.prepare("SELECT key, value FROM configs").all();
@@ -247,8 +335,10 @@ function loadInitialSnapshot() {
       created_at: r.created_at,
       updated_at: r.updated_at,
     }));
+    hasLoadedSnapshot = true;
   } catch (e) {
-    console.warn("[storageService] 预加载初始快照提示:", e.message);
+    // 保留 hasLoadedSnapshot = false，等待下一次 READY / 读取时重试
+    console.warn("[storageService] 预加载初始快照提示（稍后自动重试）:", e.message);
   }
 }
 
@@ -558,7 +648,9 @@ function deleteSession(sessionId) {
 function getMessages(sessionId) {
   if (!sessionId) return [];
   if (memoryMessagesBySession.has(sessionId)) {
-    return [...memoryMessagesBySession.get(sessionId)];
+    const cached = memoryMessagesBySession.get(sessionId);
+    touchLruCache(memoryMessagesBySession, sessionId, cached, MAX_CACHED_MESSAGE_SESSIONS);
+    return [...cached];
   }
 
   // 内存未命中时，快速从 SQLite 读取并缓存进内存池
@@ -566,31 +658,57 @@ function getMessages(sessionId) {
     const rows = getFallbackDb()
       .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC")
       .all(sessionId);
-    const list = rows.map((r) => {
-      let tool_calls = null;
-      let metadata = null;
-      try {
-        if (r.tool_calls) tool_calls = JSON.parse(r.tool_calls);
-      } catch {}
-      try {
-        if (r.metadata) metadata = JSON.parse(r.metadata);
-      } catch {}
-      return {
-        id: r.id,
-        session_id: r.session_id,
-        role: r.role,
-        content: r.content || "",
-        tool_calls,
-        tool_call_id: r.tool_call_id || null,
-        metadata,
-        created_at: r.created_at,
-      };
-    });
-    memoryMessagesBySession.set(sessionId, list);
+    const list = rows.map(mapMessageRow);
+    touchLruCache(memoryMessagesBySession, sessionId, list, MAX_CACHED_MESSAGE_SESSIONS);
     return list;
   } catch (err) {
     console.error(`[storageService] 获取会话 ${sessionId} 消息失败:`, err.message);
     return [];
+  }
+}
+
+function mapMessageRow(r) {
+  let tool_calls = null;
+  let metadata = null;
+  try {
+    if (r.tool_calls) tool_calls = JSON.parse(r.tool_calls);
+  } catch {}
+  try {
+    if (r.metadata) metadata = JSON.parse(r.metadata);
+  } catch {}
+  return {
+    id: r.id,
+    session_id: r.session_id,
+    role: r.role,
+    content: r.content || "",
+    tool_calls,
+    tool_call_id: r.tool_call_id || null,
+    metadata,
+    created_at: r.created_at,
+  };
+}
+
+/**
+ * 异步读取消息：缓存未命中时交给 Worker 线程，避免主进程在大历史会话上同步阻塞。
+ */
+async function getMessagesAsync(sessionId) {
+  if (!sessionId) return [];
+  if (memoryMessagesBySession.has(sessionId)) {
+    const cached = memoryMessagesBySession.get(sessionId);
+    touchLruCache(memoryMessagesBySession, sessionId, cached, MAX_CACHED_MESSAGE_SESSIONS);
+    return [...cached];
+  }
+  try {
+    const rows = await sendToWorkerWithPromise("GET_MESSAGES", { sessionId });
+    const list = (rows || []).map(mapMessageRow);
+    touchLruCache(memoryMessagesBySession, sessionId, list, MAX_CACHED_MESSAGE_SESSIONS);
+    return list;
+  } catch (err) {
+    console.warn(
+      `[storageService] Worker 读取会话 ${sessionId} 消息失败，回退主线程读取:`,
+      err.message
+    );
+    return getMessages(sessionId);
   }
 }
 
@@ -630,7 +748,7 @@ function addMessage(sessionId, message) {
   } else {
     currentList.push(fullMsg);
   }
-  memoryMessagesBySession.set(sessionId, currentList);
+  touchLruCache(memoryMessagesBySession, sessionId, currentList, MAX_CACHED_MESSAGE_SESSIONS);
 
   // 同步更新内存中该会话的 updated_at
   const sess = memorySessions.find((s) => s.id === sessionId);
@@ -693,7 +811,7 @@ function deleteMessagesAfter(sessionId, timestamp) {
   // 内存裁剪
   const currentList = memoryMessagesBySession.get(sessionId) || [];
   const filtered = currentList.filter((m) => m.created_at <= timestamp);
-  memoryMessagesBySession.set(sessionId, filtered);
+  touchLruCache(memoryMessagesBySession, sessionId, filtered, MAX_CACHED_MESSAGE_SESSIONS);
 
   sendToWorker("DELETE_MESSAGES_AFTER", { sessionId, timestamp });
   return { success: true };
@@ -755,27 +873,50 @@ function deleteSessionAttachments(sessionId) {
 // 导出产物管理 (Session Outputs)
 // ─────────────────────────────────────────────────────────────
 
+function mapOutputRow(r) {
+  return {
+    id: `out_${r.id}`,
+    name: r.name,
+    filePath: r.file_path,
+    fileType: r.file_type || "file",
+    action: r.action || "created",
+    createdAt: r.created_at,
+  };
+}
+
 function getSessionOutputs(sessionId) {
   if (!sessionId) return [];
   if (memoryOutputsBySession.has(sessionId)) {
-    return [...memoryOutputsBySession.get(sessionId)];
+    const cached = memoryOutputsBySession.get(sessionId);
+    touchLruCache(memoryOutputsBySession, sessionId, cached, MAX_CACHED_OUTPUT_SESSIONS);
+    return [...cached];
   }
   try {
     const rows = getFallbackDb()
       .prepare("SELECT * FROM session_outputs WHERE session_id = ? ORDER BY created_at ASC")
       .all(sessionId);
-    const list = rows.map((r) => ({
-      id: `out_${r.id}`,
-      name: r.name,
-      filePath: r.file_path,
-      fileType: r.file_type || "file",
-      action: r.action || "created",
-      createdAt: r.created_at,
-    }));
-    memoryOutputsBySession.set(sessionId, list);
+    const list = rows.map(mapOutputRow);
+    touchLruCache(memoryOutputsBySession, sessionId, list, MAX_CACHED_OUTPUT_SESSIONS);
     return list;
   } catch {
     return [];
+  }
+}
+
+async function getSessionOutputsAsync(sessionId) {
+  if (!sessionId) return [];
+  if (memoryOutputsBySession.has(sessionId)) {
+    const cached = memoryOutputsBySession.get(sessionId);
+    touchLruCache(memoryOutputsBySession, sessionId, cached, MAX_CACHED_OUTPUT_SESSIONS);
+    return [...cached];
+  }
+  try {
+    const rows = await sendToWorkerWithPromise("GET_OUTPUTS", { sessionId });
+    const list = (rows || []).map(mapOutputRow);
+    touchLruCache(memoryOutputsBySession, sessionId, list, MAX_CACHED_OUTPUT_SESSIONS);
+    return list;
+  } catch {
+    return getSessionOutputs(sessionId);
   }
 }
 
@@ -794,7 +935,7 @@ function addSessionOutput(sessionId, outputItem) {
       createdAt: Date.now(),
     };
     current.push(item);
-    memoryOutputsBySession.set(sessionId, current);
+    touchLruCache(memoryOutputsBySession, sessionId, current, MAX_CACHED_OUTPUT_SESSIONS);
 
     sendToWorker("INSERT_OUTPUT", {
       session_id: sessionId,
@@ -836,39 +977,127 @@ function addRecentProject(proj) {
 // MCP / Skills / Memory 静态 Markdown 与配置文件扫描
 // ─────────────────────────────────────────────────────────────
 
+function getProjectMcpConfigPath(workDir) {
+  if (!workDir || typeof workDir !== "string" || !workDir.trim()) return null;
+  return path.join(path.resolve(workDir.trim()), ".omcx", "mcp.json");
+}
+
+function readProjectMcpConfig(workDir) {
+  const projectMcpFile = getProjectMcpConfigPath(workDir);
+  if (!projectMcpFile || !fs.existsSync(projectMcpFile)) {
+    return { servers: null, fingerprint: null, configPath: projectMcpFile };
+  }
+  try {
+    const raw = fs.readFileSync(projectMcpFile, "utf-8");
+    const parsed = JSON.parse(raw);
+    return {
+      servers: parsed?.mcpServers && typeof parsed.mcpServers === "object" ? parsed.mcpServers : {},
+      fingerprint: crypto.createHash("sha256").update(raw).digest("hex"),
+      configPath: projectMcpFile,
+    };
+  } catch {
+    return { servers: null, fingerprint: null, configPath: projectMcpFile };
+  }
+}
+
+function getProjectMcpTrustMap() {
+  const map = getConfig("mcp_project_trust");
+  return map && typeof map === "object" && !Array.isArray(map) ? map : {};
+}
+
+function isProjectMcpTrusted(workDir, fingerprint) {
+  if (!workDir || !fingerprint) return false;
+  const trustedFingerprint = getProjectMcpTrustMap()[path.resolve(workDir.trim())];
+  return Boolean(trustedFingerprint && trustedFingerprint === fingerprint);
+}
+
+/**
+ * 信任 / 撤销信任项目级 MCP 配置。
+ * 信任记录与配置文件内容指纹绑定，配置文件一旦被修改即自动失效，必须重新授权。
+ */
+function setProjectMcpTrust(workDir, trusted) {
+  if (!workDir || typeof workDir !== "string" || !workDir.trim()) {
+    return { success: false, error: "缺少工作目录" };
+  }
+  const resolvedDir = path.resolve(workDir.trim());
+  const map = { ...getProjectMcpTrustMap() };
+
+  if (trusted) {
+    const { fingerprint, configPath, servers } = readProjectMcpConfig(resolvedDir);
+    if (!servers || !fingerprint) {
+      return { success: false, error: `未找到有效的项目级 MCP 配置: ${configPath || resolvedDir}` };
+    }
+    map[resolvedDir] = fingerprint;
+  } else {
+    delete map[resolvedDir];
+  }
+
+  setConfig("mcp_project_trust", map);
+  return { success: true, trusted: Boolean(trusted) };
+}
+
 function getMcpServers(workDir = null) {
-  let servers = {};
+  let globalServers = {};
   if (fs.existsSync(MCP_FILE)) {
     try {
       const globalMcp = JSON.parse(fs.readFileSync(MCP_FILE, "utf-8"));
-      servers = { ...(globalMcp.mcpServers || {}) };
+      globalServers = { ...(globalMcp.mcpServers || {}) };
     } catch {}
   }
 
-  if (workDir) {
-    const projectMcpFile = path.join(workDir, ".omcx", "mcp.json");
-    if (fs.existsSync(projectMcpFile)) {
-      try {
-        const projectMcp = JSON.parse(fs.readFileSync(projectMcpFile, "utf-8"));
-        servers = { ...servers, ...(projectMcp.mcpServers || {}) };
-      } catch {}
-    }
-  }
+  const project = workDir ? readProjectMcpConfig(workDir) : { servers: null, fingerprint: null };
+  const projectServers = project.servers || {};
+  const projectTrusted = isProjectMcpTrusted(workDir, project.fingerprint);
+  const merged = { ...globalServers, ...projectServers };
 
-  return Object.entries(servers).map(([key, item]) => ({
-    id: key,
-    name: key,
-    command: item.command,
-    args: item.args || [],
-    env: item.env || {},
-    description: item.description || "",
-    enabled: item.enabled !== false,
-  }));
+  return Object.entries(merged).map(([key, item]) => {
+    const isProject = Object.prototype.hasOwnProperty.call(projectServers, key);
+    return {
+      id: key,
+      name: key,
+      command: item.command,
+      args: item.args || [],
+      env: item.env || {},
+      description: item.description || "",
+      enabled: item.enabled !== false,
+      source: isProject ? "project" : "global",
+      trusted: isProject ? projectTrusted : true,
+      requiresTrust: isProject && !projectTrusted,
+      fingerprint: isProject ? project.fingerprint : null,
+    };
+  });
 }
 
 function saveGlobalMcpServers(serversMap) {
   ensureDir(path.dirname(MCP_FILE));
-  fs.writeFileSync(MCP_FILE, JSON.stringify({ mcpServers: serversMap }, null, 2), "utf-8");
+  // 读取现有配置，避免 UI 回传空 env 时抹掉用户原本配置的环境变量
+  let existingServers = {};
+  try {
+    if (fs.existsSync(MCP_FILE)) {
+      existingServers = JSON.parse(fs.readFileSync(MCP_FILE, "utf-8"))?.mcpServers || {};
+    }
+  } catch {}
+
+  // 仅持久化全局 MCP 配置，剥离 UI 回传的运行时来源与信任标记字段
+  const cleanServers = {};
+  for (const [id, item] of Object.entries(serversMap || {})) {
+    if (!item || typeof item !== "object") continue;
+    const clean = {};
+    if (typeof item.command === "string") clean.command = item.command;
+    if (Array.isArray(item.args)) clean.args = item.args;
+    const incomingEnv = item.env && typeof item.env === "object" ? item.env : null;
+    if (incomingEnv && Object.keys(incomingEnv).length > 0) {
+      clean.env = incomingEnv;
+    } else if (existingServers[id]?.env && typeof existingServers[id].env === "object") {
+      clean.env = existingServers[id].env;
+    } else if (incomingEnv) {
+      clean.env = incomingEnv;
+    }
+    if (typeof item.description === "string") clean.description = item.description;
+    if (typeof item.enabled === "boolean") clean.enabled = item.enabled;
+    cleanServers[id] = clean;
+  }
+  fs.writeFileSync(MCP_FILE, JSON.stringify({ mcpServers: cleanServers }, null, 2), "utf-8");
   return true;
 }
 
@@ -1124,6 +1353,7 @@ module.exports = {
   updateSessionGeneratedTitle,
   deleteSession,
   getMessages,
+  getMessagesAsync,
   addMessage,
   persistMessageSync,
   deleteMessagesAfter,
@@ -1136,10 +1366,14 @@ module.exports = {
   inferVisionSupport,
   getMcpServers,
   saveGlobalMcpServers,
+  setProjectMcpTrust,
+  isProjectMcpTrusted,
+  readProjectMcpConfig,
   getSkills,
   getMemories,
   getMemoryIndex,
   getProjectInstructions,
   getSessionOutputs,
+  getSessionOutputsAsync,
   addSessionOutput,
 };

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useId, memo } from 'react';
+import React, { useState, useEffect, useId, memo, useMemo } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import * as Diff from 'diff';
@@ -24,6 +24,15 @@ function useEffectiveTheme(): EffectiveTheme {
     return subscribeThemeChange(setTheme);
   }, []);
   return theme;
+}
+
+// 制品预览隔离：SVG/XML 属于模型或工作区可控内容，必须放入无脚本权限的 sandbox iframe，
+// 并通过内联 CSP 禁止外部资源请求，彻底阻断 <svg onload> / <img onerror> 一类 XSS 链。
+const ARTIFACT_PREVIEW_CSP =
+  "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:";
+
+function buildArtifactSrcDoc(svg: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"/><meta http-equiv="Content-Security-Policy" content="${ARTIFACT_PREVIEW_CSP}"/><style>html,body{margin:0;padding:0;background:transparent;overflow:auto;}body{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:16px;box-sizing:border-box;}svg{max-width:100%;height:auto;}</style></head><body>${String(svg || '')}</body></html>`;
 }
 
 // 清洗语法高亮主题中内层 code / token 的默认背景色与文字阴影，由外层容器语义背景统一承载
@@ -670,10 +679,14 @@ const MermaidBlock: React.FC<{ code: string }> = memo(({ code }) => {
       </div>
 
       {viewMode === 'preview' && svgHtml && !renderError ? (
-        <div
-          className='p-4 flex justify-center items-center overflow-x-auto bg-[var(--ui-code-bg)]'
-          dangerouslySetInnerHTML={{ __html: svgHtml }}
-        />
+        <div className='p-2 bg-[var(--ui-code-bg)] overflow-hidden'>
+          <iframe
+            title='Mermaid 图表预览'
+            sandbox=''
+            srcDoc={buildArtifactSrcDoc(svgHtml)}
+            className='w-full h-[360px] border-0 bg-transparent'
+          />
+        </div>
       ) : (
         <pre className='p-3.5 text-xs font-mono text-[var(--ui-text-secondary)] overflow-x-auto bg-[var(--ui-code-bg)] m-0'>
           {code}
@@ -716,6 +729,11 @@ export const CodeBlock: React.FC<CodeBlockProps> = memo(({ language = '', value,
   const isPreviewableArtifact =
     (cleanLang === 'svg' || (cleanLang === 'xml' && value.trim().startsWith('<svg'))) &&
     value.includes('</svg>');
+
+  const artifactSrcDoc = useMemo(
+    () => (isPreviewableArtifact ? buildArtifactSrcDoc(value) : ''),
+    [isPreviewableArtifact, value]
+  );
 
   const handleCopy = () => {
     navigator.clipboard.writeText(value);
@@ -815,10 +833,14 @@ export const CodeBlock: React.FC<CodeBlockProps> = memo(({ language = '', value,
 
       {/* 内容区 */}
       {isPreviewableArtifact && previewTab === 'preview' ? (
-        <div
-          className='p-4 flex justify-center items-center bg-[var(--ui-code-bg)] overflow-auto max-h-[420px]'
-          dangerouslySetInnerHTML={{ __html: value }}
-        />
+        <div className='p-2 bg-[var(--ui-code-bg)] overflow-hidden'>
+          <iframe
+            title='制品预览'
+            sandbox=''
+            srcDoc={artifactSrcDoc}
+            className='w-full h-[360px] border-0 bg-transparent'
+          />
+        </div>
       ) : (
         <div className='text-[12.5px] leading-[1.6] overflow-x-auto custom-scrollbar'>
           <SyntaxHighlighter
