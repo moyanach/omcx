@@ -80,9 +80,18 @@ function initDb() {
       tool_calls TEXT,
       tool_call_id TEXT,
       metadata TEXT,
+      reasoning_chars INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at ASC);
+
+    CREATE TABLE IF NOT EXISTS message_reasonings (
+      message_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      reasoning_content TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_reasonings_session ON message_reasonings(session_id);
 
     CREATE TABLE IF NOT EXISTS session_outputs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,6 +104,16 @@ function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_outputs_session ON session_outputs(session_id, created_at ASC);
   `);
+
+  // 保证历史 messages 表升级增加 reasoning_chars 列
+  try {
+    const messageCols = db.pragma("table_info(messages)");
+    if (!messageCols.some((c) => c.name === "reasoning_chars")) {
+      db.exec("ALTER TABLE messages ADD COLUMN reasoning_chars INTEGER DEFAULT 0;");
+    }
+  } catch (e) {
+    console.warn("[dbWorker] 检查 messages 表列失败:", e.message);
+  }
 
   statements = {
     getConfig: db.prepare("SELECT value FROM configs WHERE key = ?"),
@@ -124,18 +143,30 @@ function initDb() {
     deleteSession: db.prepare("DELETE FROM sessions WHERE id = ?"),
 
     getMessages: db.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC"),
+    getMessageById: db.prepare("SELECT * FROM messages WHERE id = ?"),
     upsertMessage: db.prepare(`
-      INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, metadata, created_at)
-      VALUES (@id, @session_id, @role, @content, @tool_calls, @tool_call_id, @metadata, @created_at)
+      INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, metadata, reasoning_chars, created_at)
+      VALUES (@id, @session_id, @role, @content, @tool_calls, @tool_call_id, @metadata, @reasoning_chars, @created_at)
       ON CONFLICT(id) DO UPDATE SET
         role = excluded.role,
         content = excluded.content,
         tool_calls = excluded.tool_calls,
         tool_call_id = excluded.tool_call_id,
-        metadata = excluded.metadata
+        metadata = excluded.metadata,
+        reasoning_chars = excluded.reasoning_chars
     `),
     deleteMessagesAfter: db.prepare("DELETE FROM messages WHERE session_id = ? AND created_at > ?"),
     deleteSessionMessages: db.prepare("DELETE FROM messages WHERE session_id = ?"),
+
+    getMessageReasoning: db.prepare("SELECT reasoning_content FROM message_reasonings WHERE message_id = ?"),
+    upsertMessageReasoning: db.prepare(`
+      INSERT INTO message_reasonings (message_id, session_id, reasoning_content, created_at)
+      VALUES (@message_id, @session_id, @reasoning_content, @created_at)
+      ON CONFLICT(message_id) DO UPDATE SET
+        reasoning_content = excluded.reasoning_content
+    `),
+    deleteSessionReasonings: db.prepare("DELETE FROM message_reasonings WHERE session_id = ?"),
+    deleteReasoningsAfter: db.prepare("DELETE FROM message_reasonings WHERE session_id = ? AND created_at > ?"),
 
     getSessionOutputs: db.prepare("SELECT * FROM session_outputs WHERE session_id = ? ORDER BY created_at ASC"),
     insertOutput: db.prepare(`
@@ -209,6 +240,7 @@ parentPort.on("message", (msg) => {
           statements.deleteSession.run(sessionId);
           statements.deleteSessionMessages.run(sessionId);
           statements.deleteSessionOutputs.run(sessionId);
+          statements.deleteSessionReasonings.run(sessionId);
         });
         deleteTx();
         parentPort.postMessage({ id, success: true });
@@ -216,9 +248,12 @@ parentPort.on("message", (msg) => {
       }
 
       case "UPSERT_MESSAGE": {
-        const { message, now } = payload;
+        const { message, reasoning, now } = payload;
         const upsertTx = db.transaction(() => {
           statements.upsertMessage.run(message);
+          if (reasoning && reasoning.reasoning_content) {
+            statements.upsertMessageReasoning.run(reasoning);
+          }
           statements.touchSession.run(now, message.session_id);
         });
         upsertTx();
@@ -228,7 +263,11 @@ parentPort.on("message", (msg) => {
 
       case "DELETE_MESSAGES_AFTER": {
         const { sessionId, timestamp } = payload;
-        statements.deleteMessagesAfter.run(sessionId, timestamp);
+        const deleteTx = db.transaction(() => {
+          statements.deleteMessagesAfter.run(sessionId, timestamp);
+          statements.deleteReasoningsAfter.run(sessionId, timestamp);
+        });
+        deleteTx();
         parentPort.postMessage({ id, success: true });
         break;
       }
@@ -246,6 +285,24 @@ parentPort.on("message", (msg) => {
         // 避免 Worker 与降级引擎两条读取链路返回不同形状的数据。
         const rows = statements.getMessages.all(sessionId);
         parentPort.postMessage({ id, success: true, result: rows });
+        break;
+      }
+
+      case "GET_MESSAGE_BY_ID": {
+        const messageId =
+          typeof payload === "string" ? payload : payload?.messageId || payload?.id || "";
+        if (!messageId) throw new Error("GET_MESSAGE_BY_ID 缺少 messageId");
+        const row = statements.getMessageById.get(String(messageId).trim());
+        parentPort.postMessage({ id, success: true, result: row || null });
+        break;
+      }
+
+      case "GET_MESSAGE_REASONING": {
+        const messageId =
+          typeof payload === "string" ? payload : payload?.messageId || payload?.id || "";
+        if (!messageId) throw new Error("GET_MESSAGE_REASONING 缺少 messageId");
+        const row = statements.getMessageReasoning.get(String(messageId).trim());
+        parentPort.postMessage({ id, success: true, result: row ? row.reasoning_content : null });
         break;
       }
 

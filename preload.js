@@ -122,6 +122,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   dbUpdateSessionReasoningEffort: (id, reasoningEffort) =>
     ipcRenderer.invoke("db-update-session-reasoning-effort", { id, reasoningEffort }),
   dbGetMessages: (sessionId) => ipcRenderer.invoke("db-get-messages", sessionId),
+  dbGetMessageReasoning: (messageId) => ipcRenderer.invoke("db-get-message-reasoning", messageId),
   dbAddMessage: (message) => ipcRenderer.invoke("db-add-message", message),
   dbDeleteMessagesAfter: (sessionId, timestamp) =>
     ipcRenderer.invoke("db-delete-messages-after", { sessionId, timestamp }),

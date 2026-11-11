@@ -32,7 +32,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { Message, useChatStore } from '../../stores/chatStore';
-import MarkdownContent, { ThinkingBlock } from '@/components/common/MarkdownContent';
+import MarkdownContent, { ThinkingBlock, LazyThinkingBlock } from '@/components/common/MarkdownContent';
 import CodeBlock, { DiffViewer, SplitDiffViewer } from '@/components/common/CodeBlock';
 import TodoListCard, { TodoItem } from '@/components/agent/TodoListCard';
 import BtwSelectionMenu, { BtwSelectionPayload } from '@/pages/chat/BtwSelectionMenu';
@@ -1673,12 +1673,14 @@ const MessageBubble: React.FC<{
   // 仍在工具循环中的 assistant 占位气泡失去 isLast 身份，被误判为请求失败。
   const isStreamingThis = Boolean(isGenerating && isActiveTurn);
   const isInterrupted = Boolean(!isUser && msg.metadata?.interrupted && !isGenerating);
+  const hasLazyReasoning = Number(msg.reasoningChars) > 0;
   const isEmptyAssistantTurn =
     !isUser &&
     !isGenerating &&
     !isInterrupted &&
     !isStreamingThis &&
     !hasContent &&
+    !hasLazyReasoning &&
     thinkingBlocks.length === 0 &&
     displayToolEvents.length === 0 &&
     displayTodos.length === 0;
@@ -1716,9 +1718,31 @@ const MessageBubble: React.FC<{
         {!isUser && thinkingBlocks.length > 0 && (
           <ThinkingBlock
             thoughts={thinkingBlocks}
-            isStreaming={isThinkingStreaming}
+            // 只有当前活跃回合仍在生成时才允许显示"思考中"转圈：
+            // 上游异常中断后消息会留下未闭合 <think>，不能因此永久 loading。
+            isStreaming={isThinkingStreaming && Boolean(isGenerating && isActiveTurn)}
             className='mb-1.5'
           />
+        )}
+
+        {/* 1.1 历史思考块：正文已瘦身，展开时按需拉取 */}
+        {!isUser && thinkingBlocks.length === 0 && Number(msg.reasoningChars) > 0 && (
+          <LazyThinkingBlock
+            messageId={msg.id}
+            chars={Number(msg.reasoningChars)}
+            className='mb-1.5'
+          />
+        )}
+
+        {/* 1.2 上游截断提示：输出在代码块中途结束 */}
+        {!isUser && msg.metadata?.truncated && !isGenerating && (
+          <div
+            data-testid='truncated-banner'
+            className='w-full mb-1.5 px-3 py-1.5 rounded-xl border border-[color:var(--ui-accent-amber-border)] bg-[var(--ui-accent-amber-soft)] flex items-center gap-1.5 text-[11px] text-[var(--ui-text-secondary)] select-none'
+          >
+            <AlertTriangle size={12} className='text-[var(--ui-accent-amber)] flex-shrink-0' />
+            <span>本次输出在代码块中途结束，可能已被上游截断。可重新生成获取完整内容。</span>
+          </div>
         )}
 
         {/* 2. 工具执行步进紧凑组件 */}
@@ -2049,15 +2073,32 @@ export const MessageList: React.FC<Props> = ({
       const hasAtt = Array.isArray(m.metadata?.attachments) && m.metadata.attachments.length > 0;
       return hasAtt ? 140 : 54;
     }
-    const len = m.content ? m.content.length : 0;
+    // 思考块默认折叠为 40px 静态条：估算高度必须剥离思考正文，
+    // 否则数万字思考会被误算成数千像素，导致滚动条抖动与画面跳变。
+    // 新版架构消息 content 已剥离思考，此处加入 fast-path 避免无谓正则计算
+    let visibleLen = 0;
+    const rawContent = String(m.content || '');
+    if (rawContent.includes('<think') || rawContent.includes('<thinking')) {
+      const visibleContent = rawContent
+        .replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, '')
+        .replace(/<(?:think|thinking)>[\s\S]*$/i, '');
+      visibleLen = visibleContent.length;
+    } else {
+      visibleLen = rawContent.length;
+    }
+    const reasoningChars = Number(m.reasoningChars || m.metadata?.reasoningChars) || 0;
+    const thinkingHeight = reasoningChars > 0 ? 40 : 0;
     const toolCount = Array.isArray(m.metadata?.toolSteps) ? m.metadata.toolSteps.length : 0;
-    return Math.min(800, Math.max(80, Math.round(len * 0.4) + toolCount * 36));
+    return Math.min(
+      800,
+      Math.max(80, Math.round(visibleLen * 0.4) + thinkingHeight + toolCount * 36)
+    );
   }, []);
 
-  const [visibleIndices, setVisibleIndices] = useState<{ start: number; end: number }>({
-    start: 0,
-    end: 100,
-  });
+  const [visibleIndices, setVisibleIndices] = useState<{ start: number; end: number }>(() => ({
+    start: Math.max(0, messages.length - 15),
+    end: Math.max(0, messages.length - 1),
+  }));
 
   // 预计算每条消息的累计顶部/底部偏移，滚动时用二分查找替代 O(n) 全量遍历
   const virtualOffsets = useMemo(() => {

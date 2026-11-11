@@ -61,9 +61,39 @@ let memoryConfigs = new Map();
 let memorySessions = [];
 let memoryMessagesBySession = new Map();
 let memoryOutputsBySession = new Map();
+let memoryReasoningsByMsgId = new Map();
 
 const MAX_CACHED_MESSAGE_SESSIONS = 50;
 const MAX_CACHED_OUTPUT_SESSIONS = 100;
+const MAX_CACHED_REASONINGS = 200;
+
+/**
+ * 拆分正文中的思考块：
+ * { content: 最终正文, reasoning: <think>/<thinking> 内的推演内容 }
+ * 用于持久化分流与按需查询，实现思考内容物理独立存储。
+ */
+function splitThinkingContent(raw) {
+  let reasoning = "";
+  let remaining = String(raw || "");
+  if (!remaining.includes("<think") && !remaining.includes("<thinking")) {
+    return { content: remaining, reasoning: "" };
+  }
+  remaining = remaining.replace(
+    /<(?:think|thinking)>([\s\S]*?)<\/(?:think|thinking)>/gi,
+    (_, inner) => {
+      const text = String(inner || "").trim();
+      if (text) reasoning += `${text}\n\n`;
+      return "";
+    }
+  );
+  const unclosed = remaining.match(/<(?:think|thinking)>([\s\S]*)$/i);
+  if (unclosed && unclosed.index !== undefined) {
+    const text = unclosed[1].trim();
+    if (text) reasoning += text;
+    remaining = remaining.slice(0, unclosed.index);
+  }
+  return { content: remaining.trim(), reasoning: reasoning.trim() };
+}
 
 /**
  * 带 LRU 上限的缓存写入：长时间运行时不至于无限增长，同时保留最近访问的会话
@@ -201,23 +231,33 @@ function executeFallbackAction(action, payload) {
         d.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
         d.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId);
         d.prepare("DELETE FROM session_outputs WHERE session_id = ?").run(sessionId);
+        d.prepare("DELETE FROM message_reasonings WHERE session_id = ?").run(sessionId);
       });
       tx();
       break;
     }
     case "UPSERT_MESSAGE": {
-      const { message, now } = payload;
+      const { message, reasoning, now } = payload;
       const tx = d.transaction(() => {
         d.prepare(`
-          INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, metadata, created_at)
-          VALUES (@id, @session_id, @role, @content, @tool_calls, @tool_call_id, @metadata, @created_at)
+          INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, metadata, reasoning_chars, created_at)
+          VALUES (@id, @session_id, @role, @content, @tool_calls, @tool_call_id, @metadata, @reasoning_chars, @created_at)
           ON CONFLICT(id) DO UPDATE SET
             role = excluded.role,
             content = excluded.content,
             tool_calls = excluded.tool_calls,
             tool_call_id = excluded.tool_call_id,
-            metadata = excluded.metadata
+            metadata = excluded.metadata,
+            reasoning_chars = excluded.reasoning_chars
         `).run(message);
+        if (reasoning && reasoning.reasoning_content) {
+          d.prepare(`
+            INSERT INTO message_reasonings (message_id, session_id, reasoning_content, created_at)
+            VALUES (@message_id, @session_id, @reasoning_content, @created_at)
+            ON CONFLICT(message_id) DO UPDATE SET
+              reasoning_content = excluded.reasoning_content
+          `).run(reasoning);
+        }
         d.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(now, message.session_id);
       });
       tx();
@@ -225,7 +265,11 @@ function executeFallbackAction(action, payload) {
     }
     case "DELETE_MESSAGES_AFTER": {
       const { sessionId, timestamp } = payload;
-      d.prepare("DELETE FROM messages WHERE session_id = ? AND created_at > ?").run(sessionId, timestamp);
+      const tx = d.transaction(() => {
+        d.prepare("DELETE FROM messages WHERE session_id = ? AND created_at > ?").run(sessionId, timestamp);
+        d.prepare("DELETE FROM message_reasonings WHERE session_id = ? AND created_at > ?").run(sessionId, timestamp);
+      });
+      tx();
       break;
     }
     case "INSERT_OUTPUT": {
@@ -241,6 +285,30 @@ function executeFallbackAction(action, payload) {
       return d
         .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC")
         .all(sessionId);
+    }
+    case "GET_MESSAGE_BY_ID": {
+      const messageId =
+        typeof payload === "string" ? payload : payload?.messageId || payload?.id;
+      return d.prepare("SELECT * FROM messages WHERE id = ?").get(messageId) || null;
+    }
+    case "GET_MESSAGE_REASONING": {
+      const messageId =
+        typeof payload === "string" ? payload : payload?.messageId || payload?.id;
+      const id = String(messageId || "").trim();
+      if (!id) return null;
+      try {
+        const row = d.prepare("SELECT reasoning_content FROM message_reasonings WHERE message_id = ?").get(id);
+        if (row && row.reasoning_content) return row.reasoning_content;
+      } catch (_) {}
+      // 兼容历史混杂在 messages.content 中的旧数据
+      try {
+        const msg = d.prepare("SELECT content FROM messages WHERE id = ?").get(id);
+        if (msg && msg.content) {
+          const { reasoning } = splitThinkingContent(msg.content);
+          return reasoning || null;
+        }
+      } catch (_) {}
+      return null;
     }
     case "GET_OUTPUTS": {
       const sessionId =
@@ -258,6 +326,66 @@ function getFallbackDb() {
     fallbackDb = new Database(DB_FILE);
     fallbackDb.pragma("journal_mode = WAL");
     fallbackDb.pragma("synchronous = NORMAL");
+    fallbackDb.pragma("temp_store = MEMORY");
+    fallbackDb.pragma("cache_size = -64000");
+
+    fallbackDb.exec(`
+      CREATE TABLE IF NOT EXISTS configs (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        title_source TEXT,
+        model TEXT,
+        workspace_id TEXT,
+        work_dir TEXT,
+        permission_mode TEXT,
+        reasoning_effort TEXT,
+        archived INTEGER DEFAULT 0,
+        created_at INTEGER,
+        updated_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC);
+      CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT,
+        tool_calls TEXT,
+        tool_call_id TEXT,
+        metadata TEXT,
+        reasoning_chars INTEGER DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at ASC);
+      CREATE TABLE IF NOT EXISTS message_reasonings (
+        message_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        reasoning_content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_reasonings_session ON message_reasonings(session_id);
+      CREATE TABLE IF NOT EXISTS session_outputs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_type TEXT,
+        action TEXT,
+        created_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_outputs_session ON session_outputs(session_id, created_at ASC);
+    `);
+
+    try {
+      const cols = fallbackDb.pragma("table_info(messages)");
+      if (!cols.some((c) => c.name === "reasoning_chars")) {
+        fallbackDb.exec("ALTER TABLE messages ADD COLUMN reasoning_chars INTEGER DEFAULT 0;");
+      }
+    } catch (_) {}
   }
   return fallbackDb;
 }
@@ -699,6 +827,20 @@ function parseJsonColumn(value) {
 }
 
 function mapMessageRow(r) {
+  const metadata = parseJsonColumn(r.metadata);
+  const reasoningChars =
+    r.reasoning_chars !== undefined && r.reasoning_chars !== null
+      ? Number(r.reasoning_chars)
+      : Number(metadata?.reasoningChars || 0);
+
+  let normalizedMeta = metadata;
+  if (reasoningChars > 0 && (!normalizedMeta || normalizedMeta.reasoningChars === undefined)) {
+    normalizedMeta = {
+      ...(normalizedMeta && typeof normalizedMeta === "object" ? normalizedMeta : {}),
+      reasoningChars,
+    };
+  }
+
   return {
     id: r.id,
     session_id: r.session_id,
@@ -706,7 +848,9 @@ function mapMessageRow(r) {
     content: r.content || "",
     tool_calls: parseJsonColumn(r.tool_calls),
     tool_call_id: r.tool_call_id || null,
-    metadata: parseJsonColumn(r.metadata),
+    metadata: normalizedMeta,
+    reasoning_chars: reasoningChars,
+    reasoningChars: reasoningChars,
     created_at: r.created_at,
   };
 }
@@ -736,6 +880,67 @@ async function getMessagesAsync(sessionId) {
   }
 }
 
+/**
+ * 按消息 ID 读取单条消息：供思考块展开时按需拉取，避免整会话重传。
+ */
+async function getMessageByIdAsync(messageId) {
+  const id = String(messageId || "").trim();
+  if (!id) return null;
+  try {
+    const row = await sendToWorkerWithPromise("GET_MESSAGE_BY_ID", { messageId: id });
+    return row ? mapMessageRow(row) : null;
+  } catch (err) {
+    try {
+      const row = getFallbackDb().prepare("SELECT * FROM messages WHERE id = ?").get(id);
+      return row ? mapMessageRow(row) : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * 同步读取单条消息的思考内容（优先查内存池，其次查 DB，兼容老数据）
+ */
+function getMessageReasoning(messageId) {
+  const id = String(messageId || "").trim();
+  if (!id) return "";
+  if (memoryReasoningsByMsgId.has(id)) {
+    const cached = memoryReasoningsByMsgId.get(id);
+    touchLruCache(memoryReasoningsByMsgId, id, cached, MAX_CACHED_REASONINGS);
+    return cached;
+  }
+  const text = executeFallbackAction("GET_MESSAGE_REASONING", id);
+  if (text) {
+    touchLruCache(memoryReasoningsByMsgId, id, text, MAX_CACHED_REASONINGS);
+    return text;
+  }
+  return "";
+}
+
+/**
+ * 异步读取单条消息的思考内容（展开卡片时按需单点调取，0ms 不卡死主进程）
+ */
+async function getMessageReasoningAsync(messageId) {
+  const id = String(messageId || "").trim();
+  if (!id) return "";
+  if (memoryReasoningsByMsgId.has(id)) {
+    const cached = memoryReasoningsByMsgId.get(id);
+    touchLruCache(memoryReasoningsByMsgId, id, cached, MAX_CACHED_REASONINGS);
+    return cached;
+  }
+  try {
+    const text = await sendToWorkerWithPromise("GET_MESSAGE_REASONING", { messageId: id });
+    if (typeof text === "string" && text) {
+      touchLruCache(memoryReasoningsByMsgId, id, text, MAX_CACHED_REASONINGS);
+      return text;
+    }
+  } catch (err) {
+    console.warn(`[storageService] Worker 读取思考内容失败，回退降级引擎:`, err.message);
+  }
+  return getMessageReasoning(id);
+}
+
 function addMessage(sessionId, message) {
   if (!sessionId || !message) return { success: false, error: "参数不完整" };
 
@@ -749,18 +954,48 @@ function addMessage(sessionId, message) {
   const now = Date.now();
   const createdAt = message.created_at || message.createdAt || now;
 
+  let rawContent = message.content !== undefined ? String(message.content) : "";
+  let reasoning =
+    typeof message.reasoning === "string"
+      ? message.reasoning
+      : typeof message.reasoningContent === "string"
+      ? message.reasoningContent
+      : "";
+
+  // 双轨兼容：若未显式传 reasoning，但 rawContent 包含 <think>/<thinking>，剥离并物理分流
+  if (!reasoning && rawContent && (rawContent.includes("<think") || rawContent.includes("<thinking"))) {
+    const split = splitThinkingContent(rawContent);
+    if (split.reasoning) {
+      rawContent = split.content;
+      reasoning = split.reasoning;
+    }
+  }
+
+  const reasoningChars = reasoning
+    ? reasoning.length
+    : Number(message.reasoning_chars || message.reasoningChars || message.metadata?.reasoningChars || 0);
+
+  let metadataObj = message.metadata;
+  if (reasoningChars > 0) {
+    metadataObj = {
+      ...(metadataObj && typeof metadataObj === "object" ? metadataObj : {}),
+      reasoningChars,
+    };
+  }
+
   const toolCallsStr = message.tool_calls ? JSON.stringify(message.tool_calls) : null;
-  const metadataStr = message.metadata ? JSON.stringify(message.metadata) : null;
-  const content = message.content !== undefined ? String(message.content) : "";
+  const metadataStr = metadataObj ? JSON.stringify(metadataObj) : null;
 
   const fullMsg = {
     id: msgId,
     session_id: sessionId,
     role: message.role,
-    content,
+    content: rawContent,
     tool_calls: message.tool_calls || null,
     tool_call_id: message.tool_call_id || null,
-    metadata: message.metadata || null,
+    metadata: metadataObj || null,
+    reasoning_chars: reasoningChars,
+    reasoningChars: reasoningChars,
     created_at: createdAt,
   };
 
@@ -774,6 +1009,11 @@ function addMessage(sessionId, message) {
   }
   touchLruCache(memoryMessagesBySession, sessionId, currentList, MAX_CACHED_MESSAGE_SESSIONS);
 
+  // 缓存思考文本到 LRU 池
+  if (reasoning) {
+    touchLruCache(memoryReasoningsByMsgId, msgId, reasoning, MAX_CACHED_REASONINGS);
+  }
+
   // 同步更新内存中该会话的 updated_at
   const sess = memorySessions.find((s) => s.id === sessionId);
   if (sess) {
@@ -786,12 +1026,21 @@ function addMessage(sessionId, message) {
       id: msgId,
       session_id: sessionId,
       role: message.role,
-      content,
+      content: rawContent,
       tool_calls: toolCallsStr,
       tool_call_id: message.tool_call_id || null,
       metadata: metadataStr,
+      reasoning_chars: reasoningChars,
       created_at: createdAt,
     },
+    reasoning: reasoning
+      ? {
+          message_id: msgId,
+          session_id: sessionId,
+          reasoning_content: reasoning,
+          created_at: createdAt,
+        }
+      : null,
     now,
   });
 
@@ -809,6 +1058,7 @@ function persistMessageSync(sessionId, message) {
   if (!res.success) return res;
 
   const record = res.message;
+  const reasoning = memoryReasoningsByMsgId.get(record.id) || null;
   try {
     executeFallbackAction("UPSERT_MESSAGE", {
       message: {
@@ -819,8 +1069,17 @@ function persistMessageSync(sessionId, message) {
         tool_calls: record.tool_calls ? JSON.stringify(record.tool_calls) : null,
         tool_call_id: record.tool_call_id || null,
         metadata: record.metadata ? JSON.stringify(record.metadata) : null,
+        reasoning_chars: record.reasoning_chars || 0,
         created_at: record.created_at,
       },
+      reasoning: reasoning
+        ? {
+            message_id: record.id,
+            session_id: sessionId,
+            reasoning_content: reasoning,
+            created_at: record.created_at,
+          }
+        : null,
       now: Date.now(),
     });
   } catch (err) {
@@ -1528,6 +1787,10 @@ module.exports = {
   deleteSession,
   getMessages,
   getMessagesAsync,
+  getMessageByIdAsync,
+  getMessageReasoning,
+  getMessageReasoningAsync,
+  splitThinkingContent,
   addMessage,
   persistMessageSync,
   deleteMessagesAfter,

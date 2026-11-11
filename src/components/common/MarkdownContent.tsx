@@ -31,7 +31,9 @@ export const ThinkingBlock: React.FC<{
   isStreaming: boolean;
   className?: string;
 }> = memo(({ thoughts, isStreaming, className = 'mb-1.5' }) => {
-  const [isOpen, setIsOpen] = useState(true);
+  // 历史消息默认折叠：避免一次挂载多个数万字思考块造成排版/DOM 风暴；
+  // 仅正在流式生成的思考默认展开。
+  const [isOpen, setIsOpen] = useState(isStreaming);
   const [showFullHistory, setShowFullHistory] = useState(false);
 
   if (thoughts.length === 0) return null;
@@ -98,6 +100,88 @@ export const ThinkingBlock: React.FC<{
             </div>
           )}
           <div>{visibleText}</div>
+        </div>
+      )}
+    </div>
+  );
+});
+
+/**
+ * 历史思考块（按需拉取）：
+ * 消息正文经 IPC 瘦身后不再携带数万字思考内容，展开时才向主进程请求原文。
+ */
+export const LazyThinkingBlock: React.FC<{
+  messageId: string;
+  chars: number;
+  isStreaming?: boolean;
+  className?: string;
+}> = memo(({ messageId, chars, isStreaming = false, className = 'mb-1.5' }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [text, setText] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleToggle = async () => {
+    const nextOpen = !isOpen;
+    setIsOpen(nextOpen);
+    if (!nextOpen || text !== null || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const value = await (window as any).electronAPI?.dbGetMessageReasoning?.(messageId);
+      setText(String(value || ''));
+    } catch (err: any) {
+      setError(err?.message || '思考内容加载失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div
+      data-testid='lazy-thinking-block'
+      style={{ contain: 'content' }}
+      className={`${className} w-full rounded-xl border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] bg-[var(--ui-block-bg)] overflow-hidden select-none transition-colors`}
+    >
+      <div
+        data-testid='lazy-thinking-header'
+        onClick={handleToggle}
+        className='px-3.5 py-2 flex items-center justify-between cursor-pointer hover:bg-[var(--ui-block-hover-bg)] transition-colors'
+      >
+        <div className='flex items-center gap-2 text-xs'>
+          {isStreaming ? (
+            <Loader2 size={13} className='text-[var(--ui-accent-purple)] animate-spin' />
+          ) : (
+            <BrainCircuit size={13} className='text-[var(--ui-accent-purple)]' />
+          )}
+          <span className='font-medium text-[var(--ui-text-secondary)]'>
+            {isStreaming ? '正在深度思考与推演...' : '已深度思考'}
+          </span>
+          <span className='text-[10px] font-mono text-[var(--ui-text-faint)]'>
+            ({Number(chars || 0).toLocaleString()} 字)
+          </span>
+        </div>
+        <div className='flex items-center gap-1 text-[11px] text-[var(--ui-text-faint)] font-mono'>
+          <span>{isOpen ? '收起' : '展开'}</span>
+          {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </div>
+      </div>
+
+      {isOpen && (
+        <div
+          style={{ contain: 'content' }}
+          className='px-3.5 py-2.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar'
+        >
+          {loading ? (
+            <div className='flex items-center gap-1.5 text-[11px] text-[var(--ui-text-faint)]'>
+              <Loader2 size={11} className='animate-spin' />
+              正在加载思考内容…
+            </div>
+          ) : error ? (
+            <div className='text-[11px] text-[var(--ui-accent-rose)]'>{error}</div>
+          ) : (
+            <div>{text || '（无思考内容）'}</div>
+          )}
         </div>
       )}
     </div>

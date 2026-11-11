@@ -40,6 +40,10 @@ export interface Message {
   createdAt: number;
   metadata?: any;
   attachments?: ChatAttachment[];
+  /** 历史消息的思考内容按需拉取，此处仅保留字数用于折叠条展示 */
+  reasoningChars?: number;
+  /** 按需拉取后的思考正文（仅当前渲染会话内存态，不落盘） */
+  reasoning?: string;
 }
 
 export type PermissionMode = "plan" | "auto-sandbox" | "ask" | "full-access";

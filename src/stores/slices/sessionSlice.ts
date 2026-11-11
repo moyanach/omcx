@@ -12,6 +12,38 @@ import type {
 // 会话切换序号：用于丢弃并发切换时旧请求的迟到响应
 let activeSessionSwitchSeq = 0;
 
+// 渲染进程消息内存池上限：仅保留最近访问的少量会话，防止长思考大会话堆积导致 V8 Heap OOM
+const MAX_CACHED_MESSAGE_SESSIONS = 3;
+
+function pruneMessageCache(
+  cache: Record<string, Message[]>,
+  sessions: Session[],
+  generatingBySession: Record<string, boolean>,
+  activeSessionId: string
+): Record<string, Message[]> {
+  const ids = Object.keys(cache);
+  if (ids.length <= MAX_CACHED_MESSAGE_SESSIONS) return cache;
+
+  const protectedIds = new Set<string>([activeSessionId]);
+  for (const [sessionId, generating] of Object.entries(generatingBySession || {})) {
+    if (generating) protectedIds.add(sessionId);
+  }
+
+  const updatedAtById = new Map(sessions.map((s) => [s.id, s.updatedAt || 0]));
+  const evictionOrder = ids
+    .filter((sessionId) => !protectedIds.has(sessionId))
+    .sort((a, b) => (updatedAtById.get(a) || 0) - (updatedAtById.get(b) || 0));
+
+  const next = { ...cache };
+  let remaining = ids.length;
+  for (const sessionId of evictionOrder) {
+    if (remaining <= MAX_CACHED_MESSAGE_SESSIONS) break;
+    delete next[sessionId];
+    remaining -= 1;
+  }
+  return next;
+}
+
 export interface SessionSlice {
   sessions: Session[];
   activeSessionId: string | null;
@@ -231,6 +263,7 @@ export const createSessionSlice: StateCreator<
             content: m.content,
             createdAt: m.created_at || m.createdAt,
             metadata: parsedMeta,
+            reasoningChars: Number(parsedMeta?.reasoningChars) || 0,
           };
         });
       } else {
@@ -526,11 +559,39 @@ export const createSessionSlice: StateCreator<
             content: m.content,
             createdAt: m.created_at || m.createdAt,
             metadata: parsedMeta,
+            reasoningChars: Number(parsedMeta?.reasoningChars) || 0,
           };
         });
-        set((state) => ({
-          messages: { ...state.messages, [id]: mappedMsgs },
-        }));
+        set((state) => {
+          // 会话消息内存池 LRU：仅保留最近 3 个会话（切换到的大会话优先），
+          // 避免连续浏览多个长思考会话导致渲染进程 Heap 持续膨胀。
+          const nextMessages = pruneMessageCache(
+            { ...state.messages, [id]: mappedMsgs },
+            state.sessions,
+            state.generatingBySession,
+            id
+          );
+          const evictedIds = Object.keys(state.messages).filter(
+            (sessionId) => sessionId !== id && !nextMessages[sessionId]
+          );
+          if (evictedIds.length === 0) return { messages: nextMessages };
+
+          // 同步清理被淘汰会话的附属缓存，避免残留工具轨迹/待办占用内存
+          const nextToolCalls = { ...state.toolCallsBySession };
+          const nextTodos = { ...state.todosBySession };
+          const nextMetrics = { ...state.contextMetricsBySession };
+          for (const sessionId of evictedIds) {
+            delete nextToolCalls[sessionId];
+            delete nextTodos[sessionId];
+            delete nextMetrics[sessionId];
+          }
+          return {
+            messages: nextMessages,
+            toolCallsBySession: nextToolCalls,
+            todosBySession: nextTodos,
+            contextMetricsBySession: nextMetrics,
+          };
+        });
       } catch (err) {
         console.error("获取消息历史失败:", err);
       }
@@ -617,6 +678,7 @@ export const createSessionSlice: StateCreator<
           content: m.content,
           createdAt: m.created_at || m.createdAt,
           metadata: parsedMeta,
+          reasoningChars: Number(parsedMeta?.reasoningChars) || 0,
         };
       });
 
@@ -624,7 +686,12 @@ export const createSessionSlice: StateCreator<
         sessions: [newSession, ...state.sessions],
         activeSessionId: newSession.id,
         activeWorkspaceId: newSession.workspaceId || state.activeWorkspaceId,
-        messages: { ...state.messages, [newSession.id]: messages },
+        messages: pruneMessageCache(
+          { ...state.messages, [newSession.id]: messages },
+          [newSession, ...state.sessions],
+          state.generatingBySession,
+          newSession.id
+        ),
         outputs: [],
         contextMetrics: null,
       }));

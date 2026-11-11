@@ -247,6 +247,40 @@ function extractTextContent(content) {
   return "";
 }
 
+/**
+ * 拆分正文中的思考块：
+ * { content: 最终正文, reasoning: <think>/<thinking> 内的推演内容 }
+ * 用于 IPC 按需下发与上游历史裁剪，避免把数万字思考反复序列化。
+ */
+function splitThinkingContent(raw) {
+  let reasoning = "";
+  let remaining = String(raw || "");
+  if (!remaining.includes("<think") && !remaining.includes("<thinking")) {
+    return { content: remaining, reasoning: "" };
+  }
+  remaining = remaining.replace(
+    /<(?:think|thinking)>([\s\S]*?)<\/(?:think|thinking)>/gi,
+    (_, inner) => {
+      const text = String(inner || "").trim();
+      if (text) reasoning += `${text}\n\n`;
+      return "";
+    }
+  );
+  const unclosed = remaining.match(/<(?:think|thinking)>([\s\S]*)$/i);
+  if (unclosed && unclosed.index !== undefined) {
+    const text = unclosed[1].trim();
+    if (text) reasoning += text;
+    remaining = remaining.slice(0, unclosed.index);
+  }
+  return { content: remaining.trim(), reasoning: reasoning.trim() };
+}
+
+/** 是否以未闭合的代码围栏结尾（上游静默截断的典型特征） */
+function hasUnclosedCodeFence(text) {
+  const matches = String(text || "").match(/^```/gm);
+  return Boolean(matches && matches.length % 2 === 1);
+}
+
 function encodeAttachmentForModel(attachment) {
   if (!attachment || !attachment.path) return null;
   if (!storageService.isSessionAttachmentPath(attachment.path)) return null;
@@ -1296,13 +1330,48 @@ app.whenReady().then(() => {
       // 大历史会话的首次读取交给 Worker 线程，避免主进程同步 SQLite 阻塞事件循环
       const msgs = await storageService.getMessagesAsync(sessionId);
 
+      // IPC 瘦身与零正则直通：
+      // 新数据在入库时已将思考抽离至独立存储，消息自带 reasoningChars 元数据；
+      // 对老数据保留兜底解析，但仅在包含思考围栏标签时才执行正则，避免全量无谓扫描。
+      const toIpcMessage = (m) => {
+        if (!m || m.role !== "assistant") return m;
+        const chars = Number(m.reasoning_chars || m.reasoningChars || m.metadata?.reasoningChars || 0);
+        if (chars > 0) {
+          // 已具有独立思考字段，正文已经是剥离后的纯净正文，无需任何正则扫描
+          return {
+            ...m,
+            reasoningChars: chars,
+            metadata: {
+              ...(m.metadata && typeof m.metadata === "object" ? m.metadata : {}),
+              reasoningChars: chars,
+            },
+          };
+        }
+        // 兼容历史混杂在 content 里的老数据
+        if (typeof m.content === "string" && (m.content.includes("<think") || m.content.includes("<thinking"))) {
+          const { content, reasoning } = splitThinkingContent(m.content);
+          if (reasoning) {
+            return {
+              ...m,
+              content,
+              reasoningChars: reasoning.length,
+              metadata: {
+                ...(m.metadata && typeof m.metadata === "object" ? m.metadata : {}),
+                reasoningChars: reasoning.length,
+              },
+            };
+          }
+        }
+        return m;
+      };
+
       // 崩溃恢复：非活动会话中若存在上次进程异常退出遗留的 streaming 快照，
       // 归一化为 interrupted 终态并回写，避免它永远停留在"进行中"而无法展示中断提示。
-      if (activeStreamSessions.has(sessionId)) return msgs;
+      if (activeStreamSessions.has(sessionId)) return msgs.map(toIpcMessage);
       const stale = msgs.filter(
         (m) => m.metadata && typeof m.metadata === "object" && m.metadata.streaming
       );
-      if (stale.length === 0) return msgs;
+      if (stale.length === 0) return msgs.map(toIpcMessage);
 
       const interruptedAt = Date.now();
       for (const m of stale) {
@@ -1321,7 +1390,22 @@ app.whenReady().then(() => {
         });
         m.metadata = metadata;
       }
-      return msgs;
+      return msgs.map(toIpcMessage);
+    })
+  );
+
+  ipcMain.handle(
+    "db-get-message-reasoning",
+    safeHandler(async (event, messageId) => {
+      const id = String(messageId || "").trim();
+      if (!id) return "";
+      // 优先异步按需从独立的思考表中读取，零阻塞事件循环
+      const reasoning = await storageService.getMessageReasoningAsync(id);
+      if (reasoning) return reasoning;
+      // 降级兜底：查询老消息记录正文并抽离
+      const message = await storageService.getMessageByIdAsync(id);
+      if (!message || !message.content) return "";
+      return splitThinkingContent(message.content).reasoning;
     })
   );
 
@@ -3210,8 +3294,12 @@ app.whenReady().then(() => {
       // 回合累计用量与成本（声明在 try 之外，确保 catch/finally 的观测收尾可安全读取）
       let turnUsage = null;
       let turnCostUsd = 0;
-      const PARTIAL_PERSIST_INTERVAL_MS = 1200;
+      // 写入削峰保护：节流拉长至 4000ms，增量阈值提升至 2500 字符，
+      // 关键里程碑（如工具调用完成/回合结束）仍会 force=true 即刻落盘。
+      const PARTIAL_PERSIST_INTERVAL_MS = 4000;
+      const PARTIAL_PERSIST_MIN_GROWTH = 2500;
       let lastPartialPersistAt = 0;
+      let lastPartialPersistLength = 0;
 
       const formatRunDuration = (ms) => {
         const totalSec = Math.max(0, Math.floor(ms / 1000));
@@ -3248,7 +3336,14 @@ app.whenReady().then(() => {
       const persistPartial = (force = false, overrides = {}) => {
         const now = Date.now();
         if (!force && now - lastPartialPersistAt < PARTIAL_PERSIST_INTERVAL_MS) return;
+        if (
+          !force &&
+          fullGeneratedText.length - lastPartialPersistLength < PARTIAL_PERSIST_MIN_GROWTH
+        ) {
+          return;
+        }
         lastPartialPersistAt = now;
+        lastPartialPersistLength = fullGeneratedText.length;
         try {
           storageService.addMessage(sessionId, {
             id: partialMessageId,
@@ -3345,7 +3440,13 @@ app.whenReady().then(() => {
           headers["Authorization"] = `Bearer ${modelApiKey}`;
         }
 
-        let apiMessages = [...messages];
+        // 历史回合的思考块对后续推理价值极低，却会在每次请求中重复上传数万 token：
+        // 统一剥离，仅保留最终正文（当前回合的实时思考仍走流式通道）。
+        let apiMessages = (Array.isArray(messages) ? messages : []).map((m) => {
+          if (!m || m.role !== "assistant" || typeof m.content !== "string") return m;
+          if (!m.content.includes("<think")) return m;
+          return { ...m, content: splitThinkingContent(m.content).content };
+        });
         // 斜杠命令展开：仅在最后一条用户消息以 /command 开头时替换为完整提示词
         let slashCommandInfo = null;
         try {
@@ -4306,6 +4407,31 @@ app.whenReady().then(() => {
               continue;
             }
 
+            // 模式 D：上游以 stop 收尾但把代码块留在未闭合状态（网关静默截断的典型表现）
+            // -> 断点续写一次，避免最终回答直接断在代码块中间。
+            // 必须检查累计正文：单轮续写可能只输出"闭合围栏"，只看本轮会误判并无限续写。
+            const cumulativeVisibleText = splitThinkingContent(fullGeneratedText)
+              .content.replace(/\btask ready\b/gi, "")
+              .trim();
+            if (
+              !result.hitLengthLimit &&
+              cumulativeVisibleText.length > 0 &&
+              hasUnclosedCodeFence(cumulativeVisibleText) &&
+              continuationCount < MAX_CONTINUATIONS
+            ) {
+              continuationCount++;
+              console.log(
+                `[auto-continue] 模式D：代码块未闭合即结束，发起第 ${continuationCount} 次断点续写`
+              );
+              apiMessages.push({ role: "assistant", content: cumulativeVisibleText });
+              apiMessages.push({
+                role: "user",
+                content:
+                  "你的上一条回复在一个未闭合的代码块中途停止了（末尾没有正常收尾）。请紧接最后一行继续输出剩余内容，补全代码块并给出完整结论；禁止重复前文、禁止重新开场。",
+              });
+              continue;
+            }
+
             break;
           }
 
@@ -4662,10 +4788,13 @@ app.whenReady().then(() => {
         });
 
         // 结束时通知前端，由前端单源原子落盘 (消除主进程重复双写导致的消息被覆盖Bug)
+        const finalVisibleForCheck = splitThinkingContent(fullGeneratedText).content;
+        const outputTruncated = hasUnclosedCodeFence(finalVisibleForCheck);
         replyStream("end", {
           content: fullGeneratedText,
           metadata: {
             cancelled: !!sessionAbort.cancelled,
+            truncated: outputTruncated,
             toolRounds: toolRound,
             toolSteps: executedToolSteps,
             todos: initialTodos,
