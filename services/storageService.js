@@ -195,7 +195,8 @@ function executeFallbackAction(action, payload) {
       break;
     }
     case "DELETE_SESSION": {
-      const sessionId = payload;
+      const sessionId =
+        typeof payload === "string" ? payload : payload?.sessionId || payload?.session_id;
       const tx = d.transaction(() => {
         d.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
         d.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId);
@@ -233,6 +234,20 @@ function executeFallbackAction(action, payload) {
         VALUES (@session_id, @name, @file_path, @file_type, @action, @created_at)
       `).run(payload);
       break;
+    }
+    case "GET_MESSAGES": {
+      const sessionId =
+        typeof payload === "string" ? payload : payload?.sessionId || payload?.session_id;
+      return d
+        .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC")
+        .all(sessionId);
+    }
+    case "GET_OUTPUTS": {
+      const sessionId =
+        typeof payload === "string" ? payload : payload?.sessionId || payload?.session_id;
+      return d
+        .prepare("SELECT * FROM session_outputs WHERE session_id = ? ORDER BY created_at ASC")
+        .all(sessionId);
     }
   }
 }
@@ -672,23 +687,26 @@ function getMessages(sessionId) {
   }
 }
 
+function parseJsonColumn(value) {
+  if (value === null || value === undefined || value === "") return null;
+  // Worker / 降级引擎应返回 JSON 字符串；对象形态做兼容，避免二次 JSON.parse 丢字段
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 function mapMessageRow(r) {
-  let tool_calls = null;
-  let metadata = null;
-  try {
-    if (r.tool_calls) tool_calls = JSON.parse(r.tool_calls);
-  } catch {}
-  try {
-    if (r.metadata) metadata = JSON.parse(r.metadata);
-  } catch {}
   return {
     id: r.id,
     session_id: r.session_id,
     role: r.role,
     content: r.content || "",
-    tool_calls,
+    tool_calls: parseJsonColumn(r.tool_calls),
     tool_call_id: r.tool_call_id || null,
-    metadata,
+    metadata: parseJsonColumn(r.metadata),
     created_at: r.created_at,
   };
 }
@@ -705,7 +723,8 @@ async function getMessagesAsync(sessionId) {
   }
   try {
     const rows = await sendToWorkerWithPromise("GET_MESSAGES", { sessionId });
-    const list = (rows || []).map(mapMessageRow);
+    if (!Array.isArray(rows)) throw new Error("Worker 未返回消息数组");
+    const list = rows.map(mapMessageRow);
     touchLruCache(memoryMessagesBySession, sessionId, list, MAX_CACHED_MESSAGE_SESSIONS);
     return list;
   } catch (err) {
@@ -879,13 +898,14 @@ function deleteSessionAttachments(sessionId) {
 // ─────────────────────────────────────────────────────────────
 
 function mapOutputRow(r) {
+  const rawId = String(r.id ?? "");
   return {
-    id: `out_${r.id}`,
+    id: rawId.startsWith("out_") ? rawId : `out_${rawId}`,
     name: r.name,
-    filePath: r.file_path,
-    fileType: r.file_type || "file",
+    filePath: r.filePath ?? r.file_path,
+    fileType: r.fileType || r.file_type || "file",
     action: r.action || "created",
-    createdAt: r.created_at,
+    createdAt: r.createdAt ?? r.created_at,
   };
 }
 
@@ -917,7 +937,8 @@ async function getSessionOutputsAsync(sessionId) {
   }
   try {
     const rows = await sendToWorkerWithPromise("GET_OUTPUTS", { sessionId });
-    const list = (rows || []).map(mapOutputRow);
+    if (!Array.isArray(rows)) throw new Error("Worker 未返回产出物数组");
+    const list = rows.map(mapOutputRow);
     touchLruCache(memoryOutputsBySession, sessionId, list, MAX_CACHED_OUTPUT_SESSIONS);
     return list;
   } catch {

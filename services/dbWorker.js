@@ -25,6 +25,19 @@ if (!dbFile) {
 let db = null;
 let statements = null;
 
+/**
+ * 兼容两种调用形态：直接传 sessionId 字符串，或传 { sessionId } 负载。
+ * 早期主线程 GET_MESSAGES / GET_OUTPUTS 以对象负载发送，若按字符串绑定
+ * 会被 better-sqlite3 当作命名参数，抛出 "Too few parameter values were provided"。
+ */
+function resolveSessionId(payload) {
+  if (typeof payload === "string") return payload.trim();
+  if (payload && typeof payload === "object") {
+    return String(payload.sessionId || payload.session_id || "").trim();
+  }
+  return "";
+}
+
 function initDb() {
   const dir = path.dirname(dbFile);
   if (!fs.existsSync(dir)) {
@@ -190,7 +203,8 @@ parentPort.on("message", (msg) => {
       }
 
       case "DELETE_SESSION": {
-        const sessionId = payload;
+        const sessionId = resolveSessionId(payload);
+        if (!sessionId) throw new Error("DELETE_SESSION 缺少 sessionId");
         const deleteTx = db.transaction(() => {
           statements.deleteSession.run(sessionId);
           statements.deleteSessionMessages.run(sessionId);
@@ -226,44 +240,20 @@ parentPort.on("message", (msg) => {
       }
 
       case "GET_MESSAGES": {
-        const sessionId = payload;
+        const sessionId = resolveSessionId(payload);
+        if (!sessionId) throw new Error("GET_MESSAGES 缺少 sessionId");
+        // 返回原始行（snake_case + JSON 字符串），由主线程统一走 mapMessageRow 归一化，
+        // 避免 Worker 与降级引擎两条读取链路返回不同形状的数据。
         const rows = statements.getMessages.all(sessionId);
-        const list = rows.map((r) => {
-          let tool_calls = null;
-          let metadata = null;
-          try {
-            if (r.tool_calls) tool_calls = JSON.parse(r.tool_calls);
-          } catch {}
-          try {
-            if (r.metadata) metadata = JSON.parse(r.metadata);
-          } catch {}
-          return {
-            id: r.id,
-            session_id: r.session_id,
-            role: r.role,
-            content: r.content || "",
-            tool_calls,
-            tool_call_id: r.tool_call_id || null,
-            metadata,
-            created_at: r.created_at,
-          };
-        });
-        parentPort.postMessage({ id, success: true, result: list });
+        parentPort.postMessage({ id, success: true, result: rows });
         break;
       }
 
       case "GET_OUTPUTS": {
-        const sessionId = payload;
+        const sessionId = resolveSessionId(payload);
+        if (!sessionId) throw new Error("GET_OUTPUTS 缺少 sessionId");
         const rows = statements.getSessionOutputs.all(sessionId);
-        const list = rows.map((r) => ({
-          id: `out_${r.id}`,
-          name: r.name,
-          filePath: r.file_path,
-          fileType: r.file_type || "file",
-          action: r.action || "created",
-          createdAt: r.created_at,
-        }));
-        parentPort.postMessage({ id, success: true, result: list });
+        parentPort.postMessage({ id, success: true, result: rows });
         break;
       }
 
