@@ -13,6 +13,7 @@ import {
   type EffectiveTheme,
 } from './theme';
 import { useAppStore } from './stores/appStore';
+import { initFontSettings, loadFontSettings } from './lib/fontSettings';
 
 function App() {
   const setTheme = useAppStore((s) => s.setTheme);
@@ -24,6 +25,10 @@ function App() {
     loadTheme()
       .then((mode) => setTheme(mode))
       .catch(() => {});
+
+    // 先用本地缓存立即应用字体，再从配置校准，避免启动字体闪烁
+    initFontSettings();
+    loadFontSettings().catch(() => {});
 
     const unsubApp = subscribeAppearanceChange((cfg) => setAppearanceState({ ...cfg }));
     const unsubTheme = subscribeThemeChange((t) => setEffectiveTheme(t));

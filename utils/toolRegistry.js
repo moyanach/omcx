@@ -16,6 +16,14 @@ const { WebSearchTool, WebFetchTool } = require("./tools/webTools");
 const { RunCommandTool } = require("./tools/shellTools");
 const { TodoWriteTool } = require("./tools/todoTool");
 const { DispatchSubagentTool } = require("./tools/subagentTool");
+const { RepoMapTool, SearchSymbolsTool, FindReferencesTool } = require("./tools/repoIndexTools");
+const { RunSkillScriptTool } = require("./tools/skillTools");
+const { SpecWriteTool } = require("./tools/specTool");
+const {
+  BrowserOpenTool,
+  BrowserInteractTool,
+  BrowserSnapshotTool,
+} = require("./tools/browserTools");
 const { getPermissionModePolicy } = require("../services/sandboxPolicyService");
 
 const WRITE_FILE_TOOL_NAMES = new Set(["write_file", "edit_file"]);
@@ -347,6 +355,14 @@ const ALL_TOOLS = [
   fromLangChainTool(new WebFetchTool()),
   fromLangChainTool(new TodoWriteTool()),
   fromLangChainTool(new DispatchSubagentTool({}, toolRegistry)),
+  fromLangChainTool(new RepoMapTool()),
+  fromLangChainTool(new SearchSymbolsTool()),
+  fromLangChainTool(new FindReferencesTool()),
+  fromLangChainTool(new SpecWriteTool()),
+  fromLangChainTool(new RunSkillScriptTool()),
+  fromLangChainTool(new BrowserOpenTool()),
+  fromLangChainTool(new BrowserInteractTool()),
+  fromLangChainTool(new BrowserSnapshotTool()),
 ];
 
 // web_search 需要一个可选的 searchConfig，注册时不传参使用默认配置

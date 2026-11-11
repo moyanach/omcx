@@ -5,6 +5,7 @@ import ChatView from '@/pages/ChatView';
 import ToolsView from '@/pages/ToolsView';
 import WorkspacesView from '@/pages/WorkspacesView';
 import SettingsView from '@/pages/SettingsView';
+import InsightsView from '@/pages/InsightsView';
 
 const MainContent: React.FC = () => {
   const { activeNavTab } = useAppStore();
@@ -14,6 +15,8 @@ const MainContent: React.FC = () => {
       return <ToolsView />;
     case 'workspaces':
       return <WorkspacesView />;
+    case 'insights':
+      return <InsightsView />;
     case 'settings':
       return <SettingsView />;
     case 'sessions':

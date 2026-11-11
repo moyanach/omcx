@@ -147,6 +147,35 @@ export const ContextCard: React.FC = () => {
               </div>
             ))}
           </div>
+
+          {/* 本轮模型用量与成本 (原生 Anthropic/兼容端点 usage 归一化后) */}
+          {metrics.usage && (
+            <div className='flex flex-col gap-1 pt-2.5 border-t border-[color:var(--ui-divider-hairline)] text-[10.5px] font-mono text-[var(--ui-text-muted)]'>
+              <div className='flex items-center justify-between'>
+                <span>本轮 Tokens</span>
+                <span className='text-[var(--ui-text-secondary)]'>
+                  ↑{metrics.usage.prompt_tokens.toLocaleString()} / ↓
+                  {metrics.usage.completion_tokens.toLocaleString()}
+                </span>
+              </div>
+              {metrics.usage.cached_tokens > 0 && (
+                <div className='flex items-center justify-between'>
+                  <span>Prompt Cache 命中</span>
+                  <span className='text-[var(--ui-accent-emerald)]'>
+                    {metrics.usage.cached_tokens.toLocaleString()} tokens
+                  </span>
+                </div>
+              )}
+              {typeof metrics.costUsd === 'number' && metrics.costUsd > 0 && (
+                <div className='flex items-center justify-between'>
+                  <span>本轮成本</span>
+                  <span className='text-[var(--ui-accent-amber)]'>
+                    ${metrics.costUsd.toFixed(4)}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

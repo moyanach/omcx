@@ -16,6 +16,9 @@ import { createSessionSlice, SessionSlice } from "./slices/sessionSlice";
 import { createConversationSlice, ConversationSlice } from "./slices/conversationSlice";
 import { createWorkbenchSlice, WorkbenchSlice } from "./slices/workbenchSlice";
 import { createServiceSlice, ServiceSlice } from "./slices/serviceSlice";
+import { createBtwSlice, BtwSlice } from "./slices/btwSlice";
+
+export type { BtwThread, BtwToolStep, BtwUsage, BtwQuote } from "./slices/btwSlice";
 
 // ─── 全局类型定义 (保持 100% 兼容) ─────────────────────
 
@@ -87,6 +90,14 @@ export interface ContextMetrics {
   usedTokens: number;
   usedTokensFormatted: string;
   usedPercent: number;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cached_tokens: number;
+    cache_creation_tokens: number;
+  } | null;
+  costUsd?: number;
   breakdown: {
     messages: ContextBreakdownItem;
     systemTools: ContextBreakdownItem;
@@ -107,7 +118,7 @@ export interface SessionOutput {
 export interface WorkbenchTab {
   id: string;
   title: string;
-  type: "newtab" | "url" | "files" | "changes" | "terminal";
+  type: "newtab" | "url" | "files" | "changes" | "terminal" | "automation" | "btw";
   url?: string;
   filePath?: string;
   lineNumber?: number;
@@ -137,6 +148,9 @@ export interface McpServerItem {
   trusted?: boolean;
   requiresTrust?: boolean;
   fingerprint?: string | null;
+  url?: string;
+  transport?: 'stdio' | 'http' | 'sse';
+  disabledTools?: string[];
 }
 
 export interface SkillItem {
@@ -145,6 +159,10 @@ export interface SkillItem {
   description: string;
   tools: string[];
   scope: string;
+  allowedTools?: string[];
+  scripts?: Array<{ name: string; path: string; ext?: string }>;
+  filePath?: string;
+  version?: string;
 }
 
 export interface SubagentItem {
@@ -189,7 +207,8 @@ export interface LlmModelItem {
 export type ChatState = SessionSlice &
   ConversationSlice &
   WorkbenchSlice &
-  ServiceSlice;
+  ServiceSlice &
+  BtwSlice;
 
 // ─── 主 Store 实例化 ───────────────────────────────────
 
@@ -198,6 +217,7 @@ export const useChatStore = create<ChatState>()((...a) => ({
   ...createConversationSlice(...a),
   ...createWorkbenchSlice(...a),
   ...createServiceSlice(...a),
+  ...createBtwSlice(...a),
 }));
 
 // ─── 高性能细粒度 Selector 助手函数 ───────────────────

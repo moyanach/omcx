@@ -36,6 +36,7 @@ export interface SessionSlice {
   addSessionInWorkspace: (workspaceId: string) => Promise<string | null>;
   setActiveSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
+  forkSession: (id: string) => Promise<string | null>;
   archiveSession: (id: string, isArchived: boolean) => Promise<void>;
   updateSessionTitle: (id: string, title: string) => Promise<void>;
   setSessionWorkDir: (id: string, workDir: string | null) => Promise<void>;
@@ -577,6 +578,62 @@ export const createSessionSlice: StateCreator<
       }
     } catch (err) {
       console.error("删除会话失败:", err);
+    }
+  },
+
+  forkSession: async (id) => {
+    if (!window.electronAPI?.forkSession) return null;
+    try {
+      const result = await window.electronAPI.forkSession(id);
+      if (!result?.success || !result.session) {
+        console.error("分支会话失败:", result?.error);
+        return null;
+      }
+      const record = result.session;
+      const newSession: Session = {
+        id: record.id,
+        title: record.title,
+        title_source: record.title_source,
+        updatedAt: record.updated_at || Date.now(),
+        model: record.model,
+        workspaceId: record.workspace_id || undefined,
+        workDir: record.work_dir || undefined,
+        permissionMode: record.permission_mode,
+        reasoningEffort: record.reasoning_effort,
+        archived: Boolean(record.archived),
+      };
+
+      const dbMsgs = await window.electronAPI.dbGetMessages(newSession.id);
+      const messages = (dbMsgs || []).map((m: any) => {
+        let parsedMeta = null;
+        if (m.metadata) {
+          try {
+            parsedMeta = typeof m.metadata === "string" ? JSON.parse(m.metadata) : m.metadata;
+          } catch {}
+        }
+        return {
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          createdAt: m.created_at || m.createdAt,
+          metadata: parsedMeta,
+        };
+      });
+
+      set((state) => ({
+        sessions: [newSession, ...state.sessions],
+        activeSessionId: newSession.id,
+        activeWorkspaceId: newSession.workspaceId || state.activeWorkspaceId,
+        messages: { ...state.messages, [newSession.id]: messages },
+        outputs: [],
+        contextMetrics: null,
+      }));
+      get().refreshMcpAndSkills(newSession.workDir || null);
+      get().refreshGitStatus(newSession.workDir || null);
+      return newSession.id;
+    } catch (err) {
+      console.error("分支会话失败:", err);
+      return null;
     }
   },
 

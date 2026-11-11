@@ -19,6 +19,8 @@ import {
   Sparkles,
   Copy,
   Check,
+  Bot,
+  MessageSquareText,
 } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { getEffectiveTheme, subscribeThemeChange, type EffectiveTheme } from "@/theme";
@@ -26,6 +28,8 @@ import BrowserNewTabTools from "./BrowserNewTabTools";
 import FileExplorerView from "./FileExplorerView";
 import IntegratedTerminalView from "./IntegratedTerminalView";
 import GitChangesView from "./GitChangesView";
+import BrowserAutomationView from "./BrowserAutomationView";
+import BtwPanel from "@/pages/chat/BtwPanel";
 
 interface WebWorkspaceDrawerProps {
   isOpen?: boolean;
@@ -221,6 +225,25 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
     setTimeout(() => setIsRefreshing(false), 450);
   };
 
+  const handleOpenAutomation = () => {
+    const existing = workbenchTabs.find((t) => t.type === "automation");
+    if (existing) {
+      setActiveWorkbenchTab(existing.id);
+      return;
+    }
+    addWorkbenchTab({ title: "浏览器自动化", type: "automation" });
+  };
+
+  const handleOpenBtw = () => {
+    const existing = workbenchTabs.find((t) => t.type === "btw");
+    if (existing) {
+      setWorkbenchOpen(true);
+      setActiveWorkbenchTab(existing.id);
+      return;
+    }
+    addWorkbenchTab({ title: "旁路问答", type: "btw" });
+  };
+
   const handleOpenTool = (toolId: "changes" | "terminal" | "files") => {
     if (toolId === "changes") {
       openDiffInWorkbench();
@@ -299,6 +322,10 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
                 <Terminal size={12.5} className="text-[var(--ui-accent-emerald)] flex-shrink-0" />
               ) : tab.type === "changes" ? (
                 <FileDiff size={12.5} className="text-[var(--ui-accent-amber)] flex-shrink-0" />
+              ) : tab.type === "automation" ? (
+                <Bot size={12.5} className="text-[var(--ui-accent-violet)] flex-shrink-0" />
+              ) : tab.type === "btw" ? (
+                <MessageSquareText size={12.5} className="text-[var(--ui-accent-sky)] flex-shrink-0" />
               ) : (
                 <Globe size={12.5} className="text-[var(--ui-accent-sky)] flex-shrink-0" />
               )}
@@ -361,6 +388,28 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
             title="Git 变更对比 (⌃⇧G)"
           >
             <FileDiff size={13.5} />
+          </button>
+          <button
+            onClick={handleOpenAutomation}
+            className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${
+              activeTab?.type === "automation"
+                ? "text-[var(--ui-accent-violet)] bg-[var(--ui-accent-violet-soft)]"
+                : "hover:bg-[var(--ui-block-hover-bg)] hover:text-[var(--ui-text-primary)]"
+            }`}
+            title="浏览器自动化 (内置 Chromium + 视觉回归)"
+          >
+            <Bot size={13.5} />
+          </button>
+          <button
+            onClick={handleOpenBtw}
+            className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${
+              activeTab?.type === "btw"
+                ? "text-[var(--ui-accent-sky)] bg-[var(--ui-accent-sky-soft)]"
+                : "hover:bg-[var(--ui-block-hover-bg)] hover:text-[var(--ui-text-primary)]"
+            }`}
+            title="旁路问答 (/btw)：不打断主线任务"
+          >
+            <MessageSquareText size={13.5} />
           </button>
           <button
             onClick={() => setAutoOpenHtmlOutputs(!autoOpenHtmlOutputs)}
@@ -522,10 +571,25 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
       {/* ─── 3. 主内容渲染区 (外层带柔和舞台包裹，与左侧会话区视觉统一) ─── */}
       <div className="flex-1 overflow-hidden relative bg-[var(--ui-stage-wrap-bg)] p-2.5 flex flex-col">
         <div className="flex-1 min-h-0 overflow-hidden bg-[var(--ui-stage-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl shadow-[var(--ui-stage-shadow)] flex flex-col">
-          {activeTab?.type === "newtab" ? (
+          {/* 交互终端常驻挂载：切换其他标签页时仅隐藏，避免 Shell 进程被销毁 */}
+          <div
+            className={
+              activeTab?.type === "terminal"
+                ? "flex-1 min-h-0 flex flex-col"
+                : "hidden"
+            }
+          >
+            {workbenchTabs.some((tab) => tab.type === "terminal") && (
+              <IntegratedTerminalView />
+            )}
+          </div>
+
+          {activeTab?.type !== "terminal" && (
+            activeTab?.type === "newtab" ? (
             <BrowserNewTabTools
               onOpenTool={handleOpenTool}
               onOpenUrl={handleNavigate}
+              onOpenAutomation={handleOpenAutomation}
             />
           ) : activeTab?.type === "files" ? (
             <FileExplorerView
@@ -540,8 +604,10 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
               initialFilePath={activeTab.filePath}
               refreshKey={activeTab.refreshKey}
             />
-          ) : activeTab?.type === "terminal" ? (
-            <IntegratedTerminalView />
+          ) : activeTab?.type === "automation" ? (
+            <BrowserAutomationView />
+          ) : activeTab?.type === "btw" ? (
+            <BtwPanel sessionId={activeSessionId || ""} />
           ) : activeTab?.viewMode === "code" && activeTab.filePath ? (
             <div className="flex-1 flex flex-col overflow-hidden bg-[var(--ui-stage-bg)] select-text">
               <div className="h-9 px-3 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between select-none">
@@ -616,7 +682,7 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
                 />
               </div>
             </div>
-          )}
+          ))}
         </div>
       </div>
       </aside>

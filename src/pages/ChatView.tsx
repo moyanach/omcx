@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useChatStore, type ChatAttachment } from '../stores/chatStore';
 import { useStreamChat } from '../hooks/useStreamChat';
+import { useBtwChat } from '../hooks/useBtwChat';
 import { useAppStore } from '../stores/appStore';
 import { readFileAsBase64, type DraftChatAttachment } from '@/lib/chatAttachment';
 import ChatHeader from '@/pages/chat/ChatHeader';
@@ -53,11 +54,14 @@ const ChatView: React.FC = () => {
     removeQueuedPrompt,
     moveQueuedPromptToTop,
     clearPromptQueue,
+    setBtwQuote,
+    openBtwPanel,
   } = useChatStore();
 
   const { activeView } = useAppStore();
   const { isGenerating, sendMessage, retryMessage, cancelMessage, runQueuedPromptNow, steerMessage } =
     useStreamChat();
+  const { askBtw } = useBtwChat();
 
   const [input, setInput] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
@@ -71,6 +75,23 @@ const ChatView: React.FC = () => {
     setToastMsg(msg);
     window.setTimeout(() => setToastMsg(''), duration);
   };
+
+  // 选中主会话文本 → 右键「旁路会话」：写入待引用片段并打开旁路抽屉
+  const handleSideChatSelection = React.useCallback(
+    (payload: { text: string; messageId?: string }) => {
+      if (!activeSessionId) return;
+      const text = String(payload?.text || '').trim();
+      if (!text) return;
+      setBtwQuote(activeSessionId, {
+        text,
+        messageId: payload?.messageId,
+        createdAt: Date.now(),
+      });
+      openBtwPanel(activeSessionId);
+      showToast('已加入旁路引用，在抽屉中提问即可', 2600);
+    },
+    [activeSessionId, setBtwQuote, openBtwPanel]
+  );
 
   useEffect(() => {
     return () => {
@@ -161,6 +182,24 @@ const ChatView: React.FC = () => {
   const handleSend = async () => {
     if (!input.trim() || !activeSessionId) return;
     const text = input;
+
+    // /btw 旁路问答：优先于附件、排队与主 Agent 流程，绝不写入主会话
+    const btwMatch = text.trim().match(/^\/btw(?:\s+([\s\S]*))?$/i);
+    if (btwMatch) {
+      const question = (btwMatch[1] || '').trim();
+      if (!question) {
+        showToast('用法：/btw <问题>');
+        return;
+      }
+      if (attachments.length > 0) {
+        showToast('旁路提问暂不支持附件，请直接发送到主对话');
+        return;
+      }
+      const btwModel = selectedModel || availableChatModels[0]?.id || 'model_chat_default';
+      setInput('');
+      void askBtw(question, { sessionId: activeSessionId, model: btwModel });
+      return;
+    }
 
     let savedAttachments: ChatAttachment[] = [];
     if (attachments.length > 0) {
@@ -343,6 +382,7 @@ const ChatView: React.FC = () => {
           onToggleLeftPanel={() => setInspectorOpen(!inspectorOpen)}
           rightDrawerOpen={workbenchOpen}
           onToggleRightDrawer={() => setWorkbenchOpen(!workbenchOpen)}
+          onNotify={showToast}
         />
 
         {/* 会话内容交互容器 */}
@@ -363,6 +403,7 @@ const ChatView: React.FC = () => {
                   activeTodos={activeTodos}
                   onCopy={handleCopy}
                   onRetry={handleRetry}
+                  onSideChatSelection={handleSideChatSelection}
                 />
 
                 {/* 多场景沙箱与人机协同权限审批卡片 */}

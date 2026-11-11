@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Sparkles,
@@ -13,6 +13,11 @@ import {
   Power,
   Bot,
   Shield,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  MessageSquareText,
+  KeyRound,
 } from 'lucide-react';
 import { useChatStore, SkillItem, SubagentItem } from '@/stores/chatStore';
 
@@ -25,6 +30,18 @@ export const ToolsView: React.FC = () => {
   const [inspectingSkill, setInspectingSkill] = useState<SkillItem | null>(null);
   const [inspectingSubagent, setInspectingSubagent] = useState<SubagentItem | null>(null);
   const [copied, setCopied] = useState(false);
+  const [expandedMcpServer, setExpandedMcpServer] = useState<string | null>(null);
+  const [mcpToolState, setMcpToolState] = useState<
+    Record<string, { loading: boolean; error?: string; tools: any[] }>
+  >({});
+  const [expandedPromptServer, setExpandedPromptServer] = useState<string | null>(null);
+  const [mcpPromptState, setMcpPromptState] = useState<
+    Record<string, { loading: boolean; error?: string; prompts: any[] }>
+  >({});
+  const [promptNotice, setPromptNotice] = useState('');
+  const [oauthState, setOauthState] = useState<Record<string, any>>({});
+  const [oauthBusy, setOauthBusy] = useState('');
+  const [oauthNotices, setOauthNotices] = useState<Record<string, string>>({});
 
   // 技能次级筛选
   const filteredSkills = skills.filter((s) => {
@@ -61,6 +78,182 @@ export const ToolsView: React.FC = () => {
       return;
     }
     await refreshMcpAndSkills(activeSession.workDir);
+    setMcpToolState({});
+  };
+
+  const loadMcpTools = async (serverId: string) => {
+    if (!window.electronAPI?.getMcpTools) return;
+    setMcpToolState((prev) => ({
+      ...prev,
+      [serverId]: { loading: true, tools: prev[serverId]?.tools || [] },
+    }));
+    const res = await window.electronAPI.getMcpTools(serverId, activeSession?.workDir);
+    setMcpToolState((prev) => ({
+      ...prev,
+      [serverId]: {
+        loading: false,
+        tools: res?.success ? res.tools || [] : [],
+        error: res?.success ? undefined : res?.error || '读取工具失败',
+      },
+    }));
+  };
+
+  const handleToggleMcpTool = async (
+    serverId: string,
+    toolName: string,
+    enabled: boolean
+  ) => {
+    if (!window.electronAPI?.toggleMcpTool) return;
+    const res = await window.electronAPI.toggleMcpTool(
+      serverId,
+      toolName,
+      enabled,
+      activeSession?.workDir
+    );
+    if (!res?.success) {
+      console.error('切换 MCP 工具状态失败:', res?.error);
+      return;
+    }
+    setMcpToolState((prev) => ({
+      ...prev,
+      [serverId]: {
+        ...prev[serverId],
+        tools: (prev[serverId]?.tools || []).map((tool: any) =>
+          tool.name === toolName ? { ...tool, enabled } : tool
+        ),
+      },
+    }));
+  };
+
+  const handleExpandMcp = async (serverId: string) => {
+    if (expandedMcpServer === serverId) {
+      setExpandedMcpServer(null);
+      return;
+    }
+    setExpandedMcpServer(serverId);
+    if (!mcpToolState[serverId]?.tools?.length) {
+      await loadMcpTools(serverId);
+    }
+  };
+
+  const loadMcpPrompts = async (serverId: string) => {
+    if (!window.electronAPI?.listMcpPrompts) return;
+    setMcpPromptState((prev) => ({
+      ...prev,
+      [serverId]: { loading: true, prompts: prev[serverId]?.prompts || [] },
+    }));
+    const list = await window.electronAPI.listMcpPrompts(activeSession?.workDir);
+    const item = Array.isArray(list) ? list.find((entry: any) => entry.serverId === serverId) : null;
+    setMcpPromptState((prev) => ({
+      ...prev,
+      [serverId]: {
+        loading: false,
+        prompts: Array.isArray(item?.prompts) ? item.prompts : [],
+        error: item?.error || (item ? undefined : '读取提示词失败'),
+      },
+    }));
+  };
+
+  const handleExpandPrompts = async (serverId: string) => {
+    if (expandedPromptServer === serverId) {
+      setExpandedPromptServer(null);
+      return;
+    }
+    setExpandedPromptServer(serverId);
+    await loadMcpPrompts(serverId);
+  };
+
+  const handleCopyMcpPrompt = async (serverId: string, prompt: any) => {
+    if (!window.electronAPI?.getMcpPrompt) return;
+    setPromptNotice('');
+    const args: Record<string, string> = {};
+    for (const arg of Array.isArray(prompt?.arguments) ? prompt.arguments : []) {
+      if (arg?.name) args[arg.name] = '';
+    }
+    const res = await window.electronAPI.getMcpPrompt(
+      serverId,
+      prompt.name,
+      args,
+      activeSession?.workDir
+    );
+    if (!res?.success) {
+      setPromptNotice(res?.error || '获取提示词失败');
+      return;
+    }
+    const text = res.text || '';
+    if (!text) {
+      setPromptNotice('该提示词没有可复制的文本内容');
+      return;
+    }
+    await navigator.clipboard.writeText(text);
+    setPromptNotice(`已复制提示词「${prompt.name}」到剪贴板`);
+  };
+
+  const refreshOAuthStatus = async () => {
+    if (!window.electronAPI?.getMcpOAuthStatus) return;
+    try {
+      const list = await window.electronAPI.getMcpOAuthStatus(activeSession?.workDir);
+      const map: Record<string, any> = {};
+      for (const item of Array.isArray(list) ? list : []) map[item.serverId] = item;
+      setOauthState(map);
+    } catch {
+      // 状态读取失败不影响服务器列表
+    }
+  };
+
+  useEffect(() => {
+    refreshOAuthStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSession?.workDir, mcpServers.length]);
+
+  const handleAuthorizeOAuth = async (serverId: string) => {
+    if (!window.electronAPI?.authorizeMcpOAuth || oauthBusy) return;
+    setOauthBusy(serverId);
+    setOauthNotices((prev) => ({ ...prev, [serverId]: '' }));
+    try {
+      const res = await window.electronAPI.authorizeMcpOAuth(
+        serverId,
+        activeSession?.workDir
+      );
+      if (!res?.success) {
+        setOauthNotices((prev) => ({
+          ...prev,
+          [serverId]: res?.error || 'OAuth 授权失败',
+        }));
+        return;
+      }
+      setOauthNotices((prev) => ({
+        ...prev,
+        [serverId]: `OAuth 授权成功${res.scope ? `（${res.scope}）` : ''}`,
+      }));
+      await refreshOAuthStatus();
+    } catch (err: any) {
+      setOauthNotices((prev) => ({
+        ...prev,
+        [serverId]: err?.message || String(err),
+      }));
+    } finally {
+      setOauthBusy('');
+    }
+  };
+
+  const handleLogoutOAuth = async (serverId: string) => {
+    if (!window.electronAPI?.logoutMcpOAuth || oauthBusy) return;
+    const confirmed = window.confirm('确认清除该 MCP 服务器的 OAuth 令牌？');
+    if (!confirmed) return;
+    setOauthBusy(serverId);
+    try {
+      await window.electronAPI.logoutMcpOAuth(serverId, activeSession?.workDir);
+      setOauthNotices((prev) => ({ ...prev, [serverId]: '已清除 OAuth 令牌' }));
+      await refreshOAuthStatus();
+    } catch (err: any) {
+      setOauthNotices((prev) => ({
+        ...prev,
+        [serverId]: err?.message || String(err),
+      }));
+    } finally {
+      setOauthBusy('');
+    }
   };
 
   return (
@@ -266,6 +459,28 @@ export const ToolsView: React.FC = () => {
                           )}
                         </div>
 
+                        {/* 权限范围与可执行脚本 */}
+                        {(skill.allowedTools?.length > 0 || skill.scripts?.length > 0) && (
+                          <div className='flex items-center gap-1.5 flex-wrap'>
+                            {skill.allowedTools?.length > 0 && (
+                              <span
+                                className='px-2 py-0.5 rounded-md bg-blue-500/10 border border-blue-500/25 text-[10px] font-mono text-blue-400'
+                                title={`激活此技能时仅允许调用: ${skill.allowedTools.join(', ')}`}
+                              >
+                                允许工具 {skill.allowedTools.length}
+                              </span>
+                            )}
+                            {skill.scripts?.length > 0 && (
+                              <span
+                                className='px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/25 text-[10px] font-mono text-emerald-400'
+                                title={skill.scripts.map((s) => s.name).join(', ')}
+                              >
+                                可执行脚本 {skill.scripts.length}
+                              </span>
+                            )}
+                          </div>
+                        )}
+
                         {/* 路径缩略 */}
                         {skill.filePath && (
                           <div className='text-[10px] font-mono text-neutral-500 truncate' title={skill.filePath}>
@@ -456,6 +671,217 @@ export const ToolsView: React.FC = () => {
                         {server.description || '标准 MCP 服务节点'}
                       </p>
 
+                      {/* OAuth 2.1 授权（仅启用 oauth 的远程 HTTP 服务） */}
+                      {server.url &&
+                        (server.oauth || server.auth?.type === 'oauth') && (
+                        <div className='flex flex-wrap items-center gap-2 rounded-xl bg-[#161616] border border-[#262626] px-2.5 py-1.5'>
+                          <span className='flex items-center gap-1.5 text-[10px] font-mono text-neutral-400'>
+                            <KeyRound size={11} className={oauthState[server.id]?.authorized ? 'text-emerald-400' : 'text-neutral-500'} />
+                            {oauthState[server.id]?.authorized ? (
+                              <span className='text-emerald-400'>
+                                OAuth 已授权
+                                {oauthState[server.id]?.expired ? '（已过期）' : ''}
+                              </span>
+                            ) : (
+                              <span>OAuth 未授权</span>
+                            )}
+                          </span>
+                          {oauthState[server.id]?.scope && (
+                            <span className='text-[9.5px] font-mono text-neutral-600 truncate max-w-[160px]' title={oauthState[server.id].scope}>
+                              {oauthState[server.id].scope}
+                            </span>
+                          )}
+                          <div className='ml-auto flex items-center gap-1.5'>
+                            <button
+                              onClick={() => handleAuthorizeOAuth(server.id)}
+                              disabled={Boolean(oauthBusy)}
+                              className='px-2 py-0.5 rounded-md bg-blue-500/10 border border-blue-500/25 text-[10px] text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 flex items-center gap-1'
+                              title='打开系统浏览器完成 OAuth 授权（授权码 + PKCE）'
+                            >
+                              {oauthBusy === server.id ? (
+                                <Loader2 size={10} className='animate-spin' />
+                              ) : null}
+                              {oauthState[server.id]?.authorized ? '重新授权' : 'OAuth 登录'}
+                            </button>
+                            {oauthState[server.id]?.authorized && (
+                              <button
+                                onClick={() => handleLogoutOAuth(server.id)}
+                                disabled={Boolean(oauthBusy)}
+                                className='px-2 py-0.5 rounded-md bg-[#252525] border border-[#333] text-[10px] text-neutral-400 hover:text-rose-300 disabled:opacity-50'
+                              >
+                                退出
+                              </button>
+                            )}
+                          </div>
+                          {oauthNotices[server.id] && (
+                            <div className='w-full text-[9.5px] text-neutral-400 break-words'>
+                              {oauthNotices[server.id]}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* 工具级权限：展开后按工具独立启停 */}
+                      <button
+                        onClick={() => handleExpandMcp(server.id)}
+                        className='self-start flex items-center gap-1 text-[10.5px] text-neutral-400 hover:text-blue-300 transition-colors'
+                        title='查看并单独启停该 MCP 服务器暴露的工具'
+                      >
+                        {expandedMcpServer === server.id ? (
+                          <ChevronDown size={11} />
+                        ) : (
+                          <ChevronRight size={11} />
+                        )}
+                        <span>工具权限</span>
+                      </button>
+
+                      {expandedMcpServer === server.id && (
+                        <div className='rounded-xl bg-[#161616] border border-[#262626] p-2 flex flex-col gap-1.5'>
+                          {mcpToolState[server.id]?.loading ? (
+                            <div className='flex items-center gap-1.5 text-[10.5px] text-neutral-500 py-1'>
+                              <Loader2 size={11} className='animate-spin' />
+                              正在读取工具清单…
+                            </div>
+                          ) : mcpToolState[server.id]?.error ? (
+                            <div className='text-[10.5px] text-rose-400 py-1 select-text'>
+                              {mcpToolState[server.id].error}
+                            </div>
+                          ) : (mcpToolState[server.id]?.tools || []).length === 0 ? (
+                            <div className='text-[10.5px] text-neutral-500 py-1'>
+                              暂无可用工具（服务器可能尚未启动）
+                            </div>
+                          ) : (
+                            <>
+                              <div className='flex items-center justify-between text-[10px] text-neutral-500'>
+                                <span>已启用 {mcpToolState[server.id].tools.filter((t: any) => t.enabled).length} / {mcpToolState[server.id].tools.length}</span>
+                                <button
+                                  onClick={() => loadMcpTools(server.id)}
+                                  className='text-blue-400 hover:text-blue-300'
+                                >
+                                  刷新
+                                </button>
+                              </div>
+                              <div className='max-h-[190px] overflow-y-auto custom-scrollbar flex flex-col gap-1 pr-1'>
+                                {mcpToolState[server.id].tools.map((tool: any) => (
+                                  <label
+                                    key={tool.name}
+                                    className={`flex items-start gap-2 rounded-lg px-2 py-1.5 cursor-pointer ${
+                                      server.source === 'project'
+                                        ? 'opacity-70 cursor-not-allowed'
+                                        : 'hover:bg-[#202020]'
+                                    }`}
+                                    title={tool.description || tool.name}
+                                  >
+                                    <input
+                                      type='checkbox'
+                                      checked={!!tool.enabled}
+                                      disabled={server.source === 'project'}
+                                      onChange={(e) =>
+                                        handleToggleMcpTool(server.id, tool.name, e.target.checked)
+                                      }
+                                      className='mt-0.5 accent-blue-600'
+                                    />
+                                    <span className='min-w-0'>
+                                      <span className='block text-[11px] font-mono text-neutral-200 truncate'>
+                                        {tool.name}
+                                      </span>
+                                      {tool.description && (
+                                        <span className='block text-[10px] text-neutral-500 truncate'>
+                                          {tool.description}
+                                        </span>
+                                      )}
+                                    </span>
+                                  </label>
+                                ))}
+                              </div>
+                              {server.source === 'project' && (
+                                <div className='text-[9.5px] text-amber-400/80'>
+                                  项目级工具权限请在项目 .omcx/mcp.json 中配置
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {/* 提示词 (MCP prompts)：发现并复制服务器提供的可复用提示模板 */}
+                      <button
+                        onClick={() => handleExpandPrompts(server.id)}
+                        className='self-start flex items-center gap-1 text-[10.5px] text-neutral-400 hover:text-emerald-300 transition-colors'
+                        title='查看并复制该 MCP 服务器暴露的提示词模板 (prompts/list + prompts/get)'
+                      >
+                        {expandedPromptServer === server.id ? (
+                          <ChevronDown size={11} />
+                        ) : (
+                          <ChevronRight size={11} />
+                        )}
+                        <MessageSquareText size={11} />
+                        <span>提示词</span>
+                      </button>
+
+                      {expandedPromptServer === server.id && (
+                        <div className='rounded-xl bg-[#161616] border border-[#262626] p-2 flex flex-col gap-1.5'>
+                          {mcpPromptState[server.id]?.loading ? (
+                            <div className='flex items-center gap-1.5 text-[10.5px] text-neutral-500 py-1'>
+                              <Loader2 size={11} className='animate-spin' />
+                              正在读取提示词…
+                            </div>
+                          ) : mcpPromptState[server.id]?.error ? (
+                            <div className='text-[10.5px] text-rose-400 py-1 select-text'>
+                              {mcpPromptState[server.id].error}
+                            </div>
+                          ) : (mcpPromptState[server.id]?.prompts || []).length === 0 ? (
+                            <div className='text-[10.5px] text-neutral-500 py-1'>
+                              该服务器未提供提示词模板
+                            </div>
+                          ) : (
+                            <>
+                              <div className='flex items-center justify-between text-[10px] text-neutral-500'>
+                                <span>共 {mcpPromptState[server.id].prompts.length} 个提示词</span>
+                                <button
+                                  onClick={() => loadMcpPrompts(server.id)}
+                                  className='text-emerald-400 hover:text-emerald-300'
+                                >
+                                  刷新
+                                </button>
+                              </div>
+                              <div className='max-h-[190px] overflow-y-auto custom-scrollbar flex flex-col gap-1 pr-1'>
+                                {mcpPromptState[server.id].prompts.map((prompt: any) => (
+                                  <button
+                                    key={prompt.name}
+                                    onClick={() => handleCopyMcpPrompt(server.id, prompt)}
+                                    className='text-left rounded-lg px-2 py-1.5 hover:bg-[#202020] transition-colors'
+                                    title={prompt.description || `复制提示词 ${prompt.name}`}
+                                  >
+                                    <span className='flex items-center gap-1.5'>
+                                      <span className='text-[11px] font-mono text-neutral-200 truncate'>
+                                        {prompt.name}
+                                      </span>
+                                      {Array.isArray(prompt.arguments) && prompt.arguments.length > 0 && (
+                                        <span className='text-[9px] px-1 rounded bg-[#2a2a2a] text-neutral-400'>
+                                          {prompt.arguments.length} 参数
+                                        </span>
+                                      )}
+                                      <Copy size={10} className='ml-auto text-neutral-600 flex-shrink-0' />
+                                    </span>
+                                    {prompt.description && (
+                                      <span className='block text-[10px] text-neutral-500 truncate'>
+                                        {prompt.description}
+                                      </span>
+                                    )}
+                                  </button>
+                                ))}
+                              </div>
+                            </>
+                          )}
+                          {promptNotice && (
+                            <div className='text-[9.5px] text-emerald-400/90 break-words'>
+                              {promptNotice}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       {server.requiresTrust && (
                         <div className='flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2'>
                           <Shield size={13} className='text-amber-400 mt-0.5 flex-shrink-0' />
@@ -486,8 +912,19 @@ export const ToolsView: React.FC = () => {
                     {/* 执行配置 */}
                     <div className='bg-[#161616] border border-[#262626] rounded-xl p-2.5 flex items-center justify-between text-xs font-mono text-neutral-400 overflow-hidden'>
                       <div className='truncate pr-2'>
-                        <span className='text-blue-400 font-semibold'>{server.command}</span>{' '}
-                        <span>{server.args.join(' ')}</span>
+                        {server.url ? (
+                          <>
+                            <span className='text-emerald-400 font-semibold'>
+                              {server.transport === 'sse' ? 'SSE' : 'HTTP'}
+                            </span>{' '}
+                            <span>{server.url}</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className='text-blue-400 font-semibold'>{server.command}</span>{' '}
+                            <span>{(server.args || []).join(' ')}</span>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>

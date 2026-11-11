@@ -4,7 +4,15 @@
 @tailwind utilities;
 
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  --omcx-ui-font: Inter, system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", Avenir, Helvetica, Arial, sans-serif;
+  --omcx-terminal-font: "SFMono-Regular", "JetBrains Mono", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Maple Mono NF", "MesloLGS NF", "JetBrainsMono Nerd Font",
+    "Hack Nerd Font", "FiraCode Nerd Font", "CaskaydiaCove Nerd Font",
+    "Symbols Nerd Font", "Apple Symbols", "Arial Unicode MS", "Apple Color Emoji",
+    monospace;
+  --omcx-terminal-font-size: 12px;
+  font-family: var(--omcx-ui-font);
   line-height: 1.5;
   font-weight: 400;
 
@@ -12,6 +20,11 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* 让 Tailwind 的 font-sans 工具类跟随「界面字体」设置 */
+.font-sans {
+  font-family: var(--omcx-ui-font);
 }
 
 /* ─── 暗色主题（默认） ─── */

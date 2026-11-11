@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Session } from "../../stores/chatStore";
-import { PanelLeft, Compass } from "lucide-react";
+import { PanelLeft, Compass, MoreHorizontal, GitFork, Download, Loader2 } from "lucide-react";
+import { useChatStore } from "@/stores/chatStore";
 
 interface Props {
   session: Session | undefined;
@@ -9,6 +10,7 @@ interface Props {
   rightDrawerOpen: boolean;
   onToggleRightDrawer: () => void;
   compact?: boolean;
+  onNotify?: (message: string) => void;
 }
 
 const ChatHeader: React.FC<Props> = ({
@@ -18,7 +20,49 @@ const ChatHeader: React.FC<Props> = ({
   rightDrawerOpen,
   onToggleRightDrawer,
   compact = false,
+  onNotify,
 }) => {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [busy, setBusy] = useState<"" | "fork" | "export">("");
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpen]);
+
+  const handleFork = async () => {
+    if (!session || busy) return;
+    setBusy("fork");
+    setMenuOpen(false);
+    try {
+      const id = await useChatStore.getState().forkSession(session.id);
+      onNotify?.(id ? "已创建会话分支" : "创建会话分支失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleExport = async () => {
+    if (!session || busy) return;
+    setBusy("export");
+    setMenuOpen(false);
+    try {
+      const result = await window.electronAPI?.exportSession?.(session.id);
+      if (result?.success) onNotify?.(`会话已导出：${result.filePath}`);
+      else if (!result?.canceled) onNotify?.(result?.error || "导出会话失败");
+    } catch (err: any) {
+      onNotify?.(err?.message || "导出会话失败");
+    } finally {
+      setBusy("");
+    }
+  };
   if (!session) return null;
 
   return (
@@ -43,6 +87,35 @@ const ChatHeader: React.FC<Props> = ({
 
       {/* 顶部右上角：两个控制图标（固定不换行、不收缩） */}
       <div className="flex items-center gap-1.5 titlebar-no-drag flex-shrink-0">
+        <div className="relative" ref={menuRef}>
+          <button
+            onClick={() => setMenuOpen((v) => !v)}
+            disabled={Boolean(busy)}
+            title="会话操作：分支 / 导出"
+            className="h-7 w-7 flex items-center justify-center rounded-lg border border-[color:var(--ui-border-hairline)] bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)] transition-all disabled:opacity-50"
+          >
+            {busy ? <Loader2 size={13.5} className="animate-spin" /> : <MoreHorizontal size={14} />}
+          </button>
+          {menuOpen && (
+            <div className="absolute right-0 top-8 z-[200] w-44 rounded-xl bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-[var(--ui-popover-shadow)] p-1 select-none">
+              <button
+                onClick={handleFork}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)] transition-colors"
+              >
+                <GitFork size={12} className="text-[var(--ui-accent-sky)]" />
+                分支当前会话
+              </button>
+              <button
+                onClick={handleExport}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)] transition-colors"
+              >
+                <Download size={12} className="text-[var(--ui-accent-emerald)]" />
+                导出为 Markdown
+              </button>
+            </div>
+          )}
+        </div>
+
         <button
           onClick={onToggleLeftPanel}
           className={`h-7 px-2 flex items-center gap-1.5 rounded-lg border text-xs font-medium transition-all flex-shrink-0 whitespace-nowrap ${

@@ -412,6 +412,27 @@ function buildCustomSystemPromptSection(customPrompt) {
   ].join("\n");
 }
 
+function buildRepoMapSection(repoMap) {
+  if (!repoMap || !String(repoMap).trim()) return "";
+  return [
+    "【仓库符号地图 (Repo Map)】",
+    "以下地图由本地索引自动生成，按目录列出高价值源码文件及其符号与行号。请优先据此定位模块；需要精确符号位置时调用 `search_symbols`，需要全文检索时调用 `search_code`。",
+    String(repoMap).trim(),
+  ].join("\n");
+}
+
+function buildRepoWikiSection(repoWiki, repoWikiPath = "") {
+  if (!repoWiki || !String(repoWiki).trim()) return "";
+  return [
+    "【Repo Wiki（仓库级架构文档摘要）】",
+    repoWikiPath ? `完整文档路径：${repoWikiPath}（需要细节时可用 read_file 查看）` : "",
+    "以下内容由仓库索引、README 与构建清单自动生成，适合快速理解模块职责与数据流；如与代码事实冲突，以代码为准。",
+    String(repoWiki).trim(),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function buildSystemContext({
   workDir = null,
   matchedWorkspace = null,
@@ -419,6 +440,9 @@ function buildSystemContext({
   memories = [],
   memoryIndex = [],
   projectRules = [],
+  repoMap = "",
+  repoWiki = "",
+  repoWikiPath = "",
   todos = [],
   toolDocs = [],
   model = "",
@@ -440,6 +464,8 @@ function buildSystemContext({
   push("sandbox", buildPermissionSandboxSection(permissionMode));
   push("custom_prompt", buildCustomSystemPromptSection(customSystemPrompt));
   push("rules", buildRulesSection(projectRules));
+  push("repo_map", buildRepoMapSection(repoMap));
+  push("repo_wiki", buildRepoWikiSection(repoWiki, repoWikiPath));
   push("skills", buildSkillsSection(skills));
   push("memory", buildMemorySection(memories, memoryIndex));
   push("todos", buildTodoSection(todos));

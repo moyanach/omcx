@@ -1,0 +1,296 @@
+/**
+ * CheckpointService — 会话级文件检查点与一键回滚
+ *
+ * 设计原则：
+ * 1. 仅对 Agent 即将写入/编辑的文件做「写前快照」，不触碰用户手工修改；
+ * 2. 同一回合内同一文件只记录第一次的原始内容，回滚即回到该回合开始前；
+ * 3. 新建文件记录 existed=false，回滚时直接删除；
+ * 4. 单文件超过 2MB 不做内容备份，仅记录元数据并在回滚时明确提示；
+ * 5. 所有数据落盘至 ~/.omcx/checkpoints/<sessionId>/<turnId>/，与消息库解耦。
+ */
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const crypto = require("crypto");
+
+const CHECKPOINT_ROOT = path.join(
+  process.env.OMCX_HOME || path.join(os.homedir(), ".omcx"),
+  "checkpoints"
+);
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_FILES_PER_TURN = 300;
+const MAX_TURNS_PER_SESSION = 80;
+
+function safeSegment(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .slice(0, 120);
+}
+
+function toPosix(p) {
+  return String(p || "").replace(/\\/g, "/");
+}
+
+function isInside(parent, target) {
+  if (!parent || !target) return false;
+  const rel = path.relative(path.resolve(parent), path.resolve(target));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function sessionDir(sessionId) {
+  return path.join(CHECKPOINT_ROOT, safeSegment(sessionId));
+}
+
+function turnDir(sessionId, turnId) {
+  return path.join(sessionDir(sessionId), safeSegment(turnId));
+}
+
+function manifestPath(sessionId, turnId) {
+  return path.join(turnDir(sessionId, turnId), "manifest.json");
+}
+
+function readJson(filePath, fallback = null) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonAtomic(filePath, data) {
+  const tmp = `${filePath}.tmp_${process.pid}_${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+  fs.renameSync(tmp, filePath);
+}
+
+function normalizeFileRecord(absPath, workDir) {
+  const resolved = path.resolve(absPath);
+  const relative = workDir && isInside(workDir, resolved)
+    ? toPosix(path.relative(workDir, resolved))
+    : toPosix(resolved);
+  return { absPath: resolved, relative };
+}
+
+function readManifest(sessionId, turnId) {
+  return readJson(manifestPath(sessionId, turnId), null);
+}
+
+function listTurns(sessionId) {
+  const dir = sessionDir(sessionId);
+  if (!fs.existsSync(dir)) return [];
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => readManifest(sessionId, entry.name))
+      .filter(Boolean)
+      .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+  } catch {
+    return [];
+  }
+}
+
+function pruneSession(sessionId) {
+  const turns = listTurns(sessionId);
+  if (turns.length <= MAX_TURNS_PER_SESSION) return;
+  for (const turn of turns.slice(MAX_TURNS_PER_SESSION)) {
+    try {
+      fs.rmSync(turnDir(sessionId, turn.id), { recursive: true, force: true });
+    } catch {
+      // 清理失败不影响主流程
+    }
+  }
+}
+
+/**
+ * 写前记录文件快照（幂等：同一回合同一文件只记录一次）
+ * @param {object} params
+ * @param {string} params.sessionId
+ * @param {string} params.turnId
+ * @param {string} params.filePath 绝对路径或相对 workDir 的路径
+ * @param {string|null} params.workDir
+ * @param {string} [params.tool]
+ * @returns {{recorded:boolean, reason?:string, existed?:boolean}}
+ */
+function recordFile({ sessionId, turnId, filePath, workDir = null, tool = "" } = {}) {
+  if (!sessionId || !turnId || !filePath) {
+    return { recorded: false, reason: "missing_arguments" };
+  }
+
+  const absPath = path.isAbsolute(filePath)
+    ? path.resolve(filePath)
+    : path.resolve(workDir || process.cwd(), filePath);
+
+  // 禁止把检查点写进设备/管道等特殊文件
+  let stat = null;
+  try {
+    stat = fs.statSync(absPath);
+    if (!stat.isFile()) return { recorded: false, reason: "not_a_regular_file" };
+  } catch {
+    stat = null;
+  }
+
+  fs.mkdirSync(turnDir(sessionId, turnId), { recursive: true });
+  const mPath = manifestPath(sessionId, turnId);
+  const now = Date.now();
+  const manifest = readJson(mPath, null) || {
+    id: turnId,
+    sessionId,
+    workDir: workDir ? path.resolve(workDir) : null,
+    createdAt: now,
+    updatedAt: now,
+    files: [],
+  };
+
+  const normalized = normalizeFileRecord(absPath, workDir);
+  const existedEntry = manifest.files.find((item) => item.absPath === normalized.absPath);
+  if (existedEntry) {
+    return {
+      recorded: false,
+      reason: "already_recorded",
+      existed: existedEntry.existed,
+    };
+  }
+
+  if (manifest.files.length >= MAX_FILES_PER_TURN) {
+    return { recorded: false, reason: "turn_file_limit" };
+  }
+
+  const record = {
+    absPath: normalized.absPath,
+    relative: normalized.relative,
+    existed: Boolean(stat),
+    mode: stat ? stat.mode & 0o777 : null,
+    size: stat ? stat.size : 0,
+    tool: String(tool || ""),
+    recordedAt: now,
+    backup: null,
+    skipped: false,
+  };
+
+  if (stat && stat.size <= MAX_FILE_BYTES) {
+    const digest = crypto
+      .createHash("sha1")
+      .update(normalized.absPath)
+      .digest("hex")
+      .slice(0, 16);
+    const backupName = `${digest}.bak`;
+    const backupsDir = path.join(turnDir(sessionId, turnId), "files");
+    fs.mkdirSync(backupsDir, { recursive: true });
+    try {
+      fs.copyFileSync(absPath, path.join(backupsDir, backupName));
+      record.backup = `files/${backupName}`;
+    } catch (err) {
+      record.skipped = true;
+      record.skipReason = `快照复制失败: ${err.message}`;
+    }
+  } else if (stat) {
+    record.skipped = true;
+    record.skipReason = `文件超过 ${Math.round(MAX_FILE_BYTES / 1024 / 1024)}MB，未备份内容`;
+  }
+
+  manifest.files.push(record);
+  manifest.updatedAt = now;
+  writeJsonAtomic(mPath, manifest);
+  pruneSession(sessionId);
+  return { recorded: true, existed: record.existed, skipped: record.skipped };
+}
+
+function getCheckpoint(sessionId, turnId) {
+  return readManifest(sessionId, turnId);
+}
+
+function listCheckpoints(sessionId) {
+  return listTurns(sessionId).map((manifest) => ({
+    id: manifest.id,
+    sessionId: manifest.sessionId,
+    workDir: manifest.workDir,
+    createdAt: manifest.createdAt,
+    updatedAt: manifest.updatedAt,
+    fileCount: Array.isArray(manifest.files) ? manifest.files.length : 0,
+    files: (manifest.files || []).slice(0, 30).map((item) => ({
+      path: item.relative,
+      existed: item.existed,
+      skipped: item.skipped,
+      tool: item.tool,
+    })),
+    truncatedFiles: Math.max(0, (manifest.files || []).length - 30),
+  }));
+}
+
+/**
+ * 回滚某个回合：按记录逆序恢复。返回逐文件结果，便于前端提示。
+ */
+function restoreCheckpoint(sessionId, turnId) {
+  const manifest = readManifest(sessionId, turnId);
+  if (!manifest) {
+    return { success: false, error: "检查点不存在或已损坏" };
+  }
+
+  const results = [];
+  const files = [...(manifest.files || [])].reverse();
+  for (const record of files) {
+    try {
+      const absPath = record.absPath;
+      if (record.skipped || (record.existed && !record.backup)) {
+        results.push({
+          path: record.relative,
+          success: false,
+          error: record.skipReason || "缺少备份内容，无法回滚",
+        });
+        continue;
+      }
+      if (record.existed) {
+        const backupPath = path.join(turnDir(sessionId, turnId), record.backup);
+        if (!fs.existsSync(backupPath)) {
+          results.push({ path: record.relative, success: false, error: "备份文件已丢失" });
+          continue;
+        }
+        fs.mkdirSync(path.dirname(absPath), { recursive: true });
+        fs.copyFileSync(backupPath, absPath);
+        if (record.mode !== null && record.mode !== undefined) {
+          try {
+            fs.chmodSync(absPath, record.mode);
+          } catch {}
+        }
+        results.push({ path: record.relative, success: true, action: "restored" });
+      } else {
+        if (fs.existsSync(absPath)) {
+          fs.unlinkSync(absPath);
+          results.push({ path: record.relative, success: true, action: "removed" });
+        } else {
+          results.push({ path: record.relative, success: true, action: "already_absent" });
+        }
+      }
+    } catch (err) {
+      results.push({ path: record.relative, success: false, error: err.message });
+    }
+  }
+
+  const failed = results.filter((item) => !item.success);
+  return {
+    success: failed.length === 0,
+    restored: results.filter((item) => item.action === "restored").length,
+    removed: results.filter((item) => item.action === "removed").length,
+    failed,
+    results,
+  };
+}
+
+function deleteCheckpoint(sessionId, turnId) {
+  const dir = turnDir(sessionId, turnId);
+  if (!fs.existsSync(dir)) return { success: false, error: "检查点不存在" };
+  fs.rmSync(dir, { recursive: true, force: true });
+  return { success: true };
+}
+
+module.exports = {
+  CHECKPOINT_ROOT,
+  recordFile,
+  getCheckpoint,
+  listCheckpoints,
+  restoreCheckpoint,
+  deleteCheckpoint,
+};

@@ -33,7 +33,30 @@ const { buildMentionContext } = require("./utils/tools/mentionResolver");
 const { isUnderFolder, isBuiltinTrustedPath, DEFAULT_ROOT } = require("./utils/tools/pathResolver");
 const { buildSystemContext, getGitSnapshotAsync } = require("./utils/contextBuilder");
 const { mcpClientService } = require("./services/mcpClientService");
+const mcpOAuthService = require("./services/mcpOAuthService");
 const subagentService = require("./services/subagentService");
+const checkpointService = require("./services/checkpointService");
+const { terminalPtyService } = require("./services/terminalPtyService");
+const repoIndexService = require("./services/repoIndexService");
+const repoWikiService = require("./services/repoWikiService");
+const { getSystemFonts } = require("./services/fontService");
+const commandService = require("./services/commandService");
+const specService = require("./services/specService");
+const btwService = require("./services/btwService");
+const hookService = require("./services/hookService");
+const gitHunkService = require("./services/gitHunkService");
+const gitWorktreeService = require("./services/gitWorktreeService");
+const diagnosticsService = require("./services/diagnosticsService");
+const sessionTransferService = require("./services/sessionTransferService");
+const telemetryService = require("./services/telemetryService");
+const evalService = require("./services/evalService");
+const browserAutomationService = require("./services/browserAutomationService");
+const {
+  isAnthropicProvider,
+  streamAnthropicMessage,
+  completeAnthropicMessage,
+  normalizeAnthropicUsage,
+} = require("./services/anthropicClient");
 const {
   PERMISSION_MODES,
   normalizePermissionMode,
@@ -426,12 +449,93 @@ function getModelConfig(model, defaultModelId = "gpt-4o") {
   const provider = matched?.provider || "openai";
   const apiModelId = matched?.model_id || model || defaultModelId;
   const contextLimit = matched?.context_limit || 128000;
+  const maxOutputTokens = Number(matched?.max_output_tokens) || 8192;
   const supportsVision =
     typeof matched?.supports_vision === "boolean"
       ? matched.supports_vision
       : storageService.inferVisionSupport(apiModelId);
 
-  return { modelBaseUrl, modelApiKey, provider, apiModelId, contextLimit, supportsVision };
+  return {
+    modelBaseUrl,
+    modelApiKey,
+    provider,
+    apiModelId,
+    contextLimit,
+    maxOutputTokens,
+    supportsVision,
+    inputPrice: Number(matched?.input_price) || 0,
+    outputPrice: Number(matched?.output_price) || 0,
+    cacheReadPrice: Number(matched?.cache_read_price) || 0,
+    cacheWritePrice: Number(matched?.cache_write_price) || 0,
+  };
+}
+
+/**
+ * 统一 Usage 归一化：兼容 OpenAI 与 Anthropic 两套字段命名。
+ */
+function normalizeUsage(usage, provider) {
+  if (!usage || typeof usage !== "object") return null;
+  if (provider === "anthropic") return normalizeAnthropicUsage(usage);
+
+  const prompt = Number(usage.prompt_tokens ?? usage.input_tokens) || 0;
+  const completion = Number(usage.completion_tokens ?? usage.output_tokens) || 0;
+  const cached =
+    Number(usage.prompt_tokens_details?.cached_tokens) ||
+    Number(usage.cached_tokens) ||
+    Number(usage.cache_read_input_tokens) ||
+    0;
+  const cacheCreation = Number(usage.cache_creation_input_tokens) || 0;
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: Number(usage.total_tokens) || prompt + completion,
+    cached_tokens: cached,
+    cache_creation_tokens: cacheCreation,
+    raw: usage,
+  };
+}
+
+function mergeUsage(total, usage) {
+  if (!usage) return total;
+  const base = total || {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    cached_tokens: 0,
+    cache_creation_tokens: 0,
+  };
+  return {
+    prompt_tokens: base.prompt_tokens + (Number(usage.prompt_tokens) || 0),
+    completion_tokens: base.completion_tokens + (Number(usage.completion_tokens) || 0),
+    total_tokens: base.total_tokens + (Number(usage.total_tokens) || 0),
+    cached_tokens: base.cached_tokens + (Number(usage.cached_tokens) || 0),
+    cache_creation_tokens:
+      base.cache_creation_tokens + (Number(usage.cache_creation_tokens) || 0),
+  };
+}
+
+function computeUsageCost(usage, pricing = {}) {
+  if (!usage) return 0;
+  const inputPrice = Number(pricing.inputPrice) || 0;
+  const outputPrice = Number(pricing.outputPrice) || 0;
+  const cacheReadPrice =
+    Number(pricing.cacheReadPrice) || (inputPrice > 0 ? inputPrice * 0.1 : 0);
+  const cacheWritePrice =
+    Number(pricing.cacheWritePrice) || (inputPrice > 0 ? inputPrice * 1.25 : 0);
+
+  const prompt = Number(usage.prompt_tokens) || 0;
+  const cached = Math.min(Number(usage.cached_tokens) || 0, prompt);
+  const cacheCreation = Number(usage.cache_creation_tokens) || 0;
+  const normalPrompt = Math.max(0, prompt - cached - cacheCreation);
+  const completion = Number(usage.completion_tokens) || 0;
+
+  const cost =
+    (normalPrompt * inputPrice +
+      cached * cacheReadPrice +
+      cacheCreation * cacheWritePrice +
+      completion * outputPrice) /
+    1_000_000;
+  return Math.round(cost * 100_000_000) / 100_000_000;
 }
 
 const LITE_MODEL_HINTS = [
@@ -614,7 +718,10 @@ async function generateSessionTitleSidecar(sessionId, userPrompt, currentModelId
     };
 
     // 优先使用当前正在调用的会话模型配置 (既然用户刚成功发送，说明该模型 100% 可用且密钥有效)
-    let { modelBaseUrl, modelApiKey, apiModelId } = getModelConfig(currentModelId, "gpt-4o");
+    let { modelBaseUrl, modelApiKey, apiModelId, provider } = getModelConfig(
+      currentModelId,
+      "gpt-4o"
+    );
     if (!modelBaseUrl || (!modelApiKey && currentModelId !== "ollama")) {
       const liteChoice = pickLiteModel(currentModelId);
       const liteCfg = getModelConfig(liteChoice, "gpt-4o");
@@ -622,6 +729,7 @@ async function generateSessionTitleSidecar(sessionId, userPrompt, currentModelId
         modelBaseUrl = liteCfg.modelBaseUrl;
         modelApiKey = liteCfg.modelApiKey;
         apiModelId = liteCfg.apiModelId;
+        provider = liteCfg.provider;
       } else {
         applyLocalFallbackTitle();
         return;
@@ -631,48 +739,73 @@ async function generateSessionTitleSidecar(sessionId, userPrompt, currentModelId
     const controller = new AbortController();
     const timeoutTimer = setTimeout(() => controller.abort(), 6000);
 
-    const headers = {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    };
-    if (modelApiKey) {
-      headers["Authorization"] = `Bearer ${modelApiKey}`;
+    let rawTitle = "";
+    try {
+      if (isAnthropicProvider(provider, modelBaseUrl)) {
+        const anthropicTitle = await completeAnthropicMessage({
+          baseUrl: modelBaseUrl,
+          apiKey: modelApiKey,
+          model: apiModelId,
+          system:
+            "你是会话命名助手。根据用户提问的核心意图，提炼出一个简短、精准的中文标题（4到10个汉字）。禁止回答问题，禁止输出任何标点符号、引号、书名号或“标题：”等前缀，直接输出纯文本标题本身。",
+          messages: [
+            {
+              role: "user",
+              content: `<message>\n${cleanPrompt.slice(0, 400)}\n</message>`,
+            },
+          ],
+          maxTokens: 40,
+          temperature: 0.2,
+          signal: controller.signal,
+        });
+        rawTitle = String(anthropicTitle.content || "").trim();
+      } else {
+        const headers = {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        };
+        if (modelApiKey) {
+          headers["Authorization"] = `Bearer ${modelApiKey}`;
+        }
+
+        // 纯净标准的命名请求体，严禁附带非法的 reasoning_effort 避免 400 阻断
+        const response = await fetch(`${modelBaseUrl}/chat/completions`, {
+          method: "POST",
+          headers,
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: apiModelId,
+            messages: [
+              {
+                role: "system",
+                content:
+                  "你是会话命名助手。根据用户提问的核心意图，提炼出一个简短、精准的中文标题（4到10个汉字）。禁止回答问题，禁止输出任何标点符号、引号、书名号或“标题：”等前缀，直接输出纯文本标题本身。",
+              },
+              {
+                role: "user",
+                content: `<message>\n${cleanPrompt.slice(0, 400)}\n</message>`,
+              },
+            ],
+            max_tokens: 30,
+            temperature: 0.2,
+            stream: false,
+          }),
+        });
+
+        if (!response.ok) {
+          console.warn(`[title-sidecar] AI 标题接口返回 HTTP ${response.status}，切换本地规则提纯命名`);
+          clearTimeout(timeoutTimer);
+          applyLocalFallbackTitle();
+          return;
+        }
+
+        const data = await response.json();
+        rawTitle = data?.choices?.[0]?.message?.content?.trim() || "";
+      }
+    } finally {
+      clearTimeout(timeoutTimer);
     }
 
-    // 纯净标准的命名请求体，严禁附带非法的 reasoning_effort 避免 400 阻断
-    const response = await fetch(`${modelBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: apiModelId,
-        messages: [
-          {
-            role: "system",
-            content:
-              "你是会话命名助手。根据用户提问的核心意图，提炼出一个简短、精准的中文标题（4到10个汉字）。禁止回答问题，禁止输出任何标点符号、引号、书名号或“标题：”等前缀，直接输出纯文本标题本身。",
-          },
-          {
-            role: "user",
-            content: `<message>\n${cleanPrompt.slice(0, 400)}\n</message>`,
-          },
-        ],
-        max_tokens: 30,
-        temperature: 0.2,
-        stream: false,
-      }),
-    });
-
-    clearTimeout(timeoutTimer);
-
-    if (!response.ok) {
-      console.warn(`[title-sidecar] AI 标题接口返回 HTTP ${response.status}，切换本地规则提纯命名`);
-      applyLocalFallbackTitle();
-      return;
-    }
-
-    const data = await response.json();
-    let rawTitle = data?.choices?.[0]?.message?.content?.trim();
     if (!rawTitle) {
       applyLocalFallbackTitle();
       return;
@@ -782,6 +915,11 @@ function createWindow() {
       shell.openExternal(url);
     }
     return { action: "deny" };
+  });
+
+  const windowWebContents = mainWindow.webContents;
+  windowWebContents.on("destroyed", () => {
+    terminalPtyService.disposeBySender(windowWebContents);
   });
 
   mainWindow.on("closed", () => {
@@ -1002,6 +1140,12 @@ app.whenReady().then(() => {
   ipcMain.handle(
     "set-config",
     safeHandler((event, key, value) => storageService.setConfig(key, value))
+  );
+
+  // --- 系统字体枚举（供设置页选择界面/终端字体） ---
+  ipcMain.handle(
+    "get-system-fonts",
+    safeHandler((event, { refresh } = {}) => getSystemFonts({ force: Boolean(refresh) }))
   );
 
   ipcMain.handle(
@@ -1322,6 +1466,11 @@ app.whenReady().then(() => {
           command: server.command,
           args: server.args,
           env: server.env,
+          url: server.url,
+          transport: server.transport,
+          headers: server.headers,
+          authToken: server.authToken,
+          disabledTools: server.disabledTools,
           description: server.description,
           enabled: server.id === id ? Boolean(enabled) : server.enabled,
         };
@@ -1330,6 +1479,122 @@ app.whenReady().then(() => {
       storageService.saveGlobalMcpServers(nextMap);
       mcpClientService.reloadClients();
       return { success: true };
+    })
+  );
+
+  ipcMain.handle(
+    "get-mcp-tools",
+    safeHandler((event, { serverId, workDir } = {}) =>
+      mcpClientService.getServerTools(serverId, workDir)
+    )
+  );
+
+  // 工具级启停：仅改写全局 MCP 配置，项目级配置保持文件托管
+  ipcMain.handle(
+    "toggle-mcp-tool",
+    safeHandler((event, { serverId, toolName, enabled, workDir } = {}) => {
+      if (!serverId || !toolName) {
+        return { success: false, error: "缺少服务器或工具名称" };
+      }
+      const allServers = storageService.getMcpServers(workDir);
+      const target = allServers.find((server) => server.id === serverId);
+      if (!target) return { success: false, error: "未找到该 MCP 服务器" };
+      if (target.source === "project") {
+        return {
+          success: false,
+          error: "项目级 MCP 的工具权限请直接编辑项目 .omcx/mcp.json",
+        };
+      }
+
+      const globalServers = storageService.getMcpServers(null);
+      const nextMap = {};
+      for (const server of globalServers) {
+        const disabled = new Set(
+          Array.isArray(server.disabledTools) ? server.disabledTools : []
+        );
+        if (server.id === serverId) {
+          if (enabled) disabled.delete(toolName);
+          else disabled.add(toolName);
+        }
+        nextMap[server.id] = {
+          command: server.command,
+          args: server.args,
+          env: server.env,
+          url: server.url,
+          transport: server.transport,
+          headers: server.headers,
+          authToken: server.authToken,
+          disabledTools: Array.from(disabled),
+          description: server.description,
+          enabled: server.enabled,
+        };
+      }
+      storageService.saveGlobalMcpServers(nextMap);
+      mcpClientService.reloadClients();
+      return { success: true, disabledTools: nextMap[serverId]?.disabledTools || [] };
+    })
+  );
+
+  ipcMain.handle(
+    "list-mcp-resources",
+    safeHandler((event, workDir) => mcpClientService.listResources(workDir))
+  );
+
+  ipcMain.handle(
+    "read-mcp-resource",
+    safeHandler((event, { uri, workDir } = {}) =>
+      mcpClientService.readResource(uri, workDir)
+    )
+  );
+
+  ipcMain.handle(
+    "list-mcp-prompts",
+    safeHandler((event, { workDir } = {}) => mcpClientService.listPrompts(workDir))
+  );
+  ipcMain.handle(
+    "get-mcp-prompt",
+    safeHandler((event, { serverId, promptName, args, workDir } = {}) =>
+      mcpClientService.getPrompt(serverId, promptName, args, workDir)
+    )
+  );
+
+  // --- P0: MCP OAuth 2.1 授权（授权码 + PKCE + 动态客户端注册） ---
+  ipcMain.handle(
+    "mcp-oauth-status",
+    safeHandler((event, { workDir } = {}) =>
+      storageService
+        .getMcpServers(workDir)
+        .filter((server) => server.url)
+        .map((server) => ({
+          serverId: server.id,
+          ...mcpOAuthService.getStatus(server),
+        }))
+    )
+  );
+  ipcMain.handle(
+    "mcp-oauth-authorize",
+    safeHandler(async (event, { serverId, workDir } = {}) => {
+      const server = storageService
+        .getMcpServers(workDir)
+        .find((item) => item.id === serverId);
+      if (!server) return { success: false, error: `MCP 服务器不存在: ${serverId}` };
+      const result = await mcpOAuthService.authorize(server, {
+        openExternal: (url) => shell.openExternal(url),
+      });
+      if (result.success) mcpClientService.reloadClients();
+      return result;
+    })
+  );
+  ipcMain.handle(
+    "mcp-oauth-logout",
+    safeHandler((event, { serverId, workDir } = {}) => {
+      const server = storageService
+        .getMcpServers(workDir)
+        .find((item) => item.id === serverId);
+      if (!server) return { success: false, error: `MCP 服务器不存在: ${serverId}` };
+      const result = mcpOAuthService.logout(server);
+      mcpClientService.reloadClients();
+      return result;
     })
   );
 
@@ -1351,6 +1616,90 @@ app.whenReady().then(() => {
   ipcMain.handle(
     "get-session-outputs",
     safeHandler((event, sessionId) => storageService.getSessionOutputsAsync(sessionId))
+  );
+
+  // --- 会话文件检查点与一键回滚 ---
+  ipcMain.handle(
+    "get-session-checkpoints",
+    safeHandler((event, sessionId) => checkpointService.listCheckpoints(sessionId))
+  );
+
+  ipcMain.handle(
+    "get-session-checkpoint",
+    safeHandler((event, { sessionId, checkpointId } = {}) =>
+      checkpointService.getCheckpoint(sessionId, checkpointId)
+    )
+  );
+
+  ipcMain.handle(
+    "restore-checkpoint",
+    safeHandler((event, { sessionId, checkpointId } = {}) => {
+      if (!sessionId || !checkpointId) {
+        return { success: false, error: "缺少会话或检查点 ID" };
+      }
+      return checkpointService.restoreCheckpoint(sessionId, checkpointId);
+    })
+  );
+
+  ipcMain.handle(
+    "delete-checkpoint",
+    safeHandler((event, { sessionId, checkpointId } = {}) =>
+      checkpointService.deleteCheckpoint(sessionId, checkpointId)
+    )
+  );
+
+  // --- 仓库索引与 Repo Wiki ---
+  ipcMain.handle(
+    "get-repo-index-stats",
+    safeHandler((event, { workDir, refresh } = {}) =>
+      repoIndexService.getRepoStats(workDir, { force: Boolean(refresh) })
+    )
+  );
+
+  ipcMain.handle(
+    "get-repo-map",
+    safeHandler((event, { workDir, maxChars, refresh } = {}) =>
+      repoIndexService.buildRepoMap(workDir, {
+        maxChars: Number(maxChars) || 6000,
+        force: Boolean(refresh),
+      })
+    )
+  );
+
+  ipcMain.handle(
+    "search-repo-symbols",
+    safeHandler((event, { workDir, query, limit } = {}) =>
+      repoIndexService.searchSymbols(workDir, query, { limit: Number(limit) || 40 })
+    )
+  );
+
+  ipcMain.handle(
+    "get-repo-wiki",
+    safeHandler((event, workDir) => repoWikiService.getRepoWiki(workDir))
+  );
+
+  ipcMain.handle(
+    "generate-repo-wiki",
+    safeHandler(async (event, { workDir, model } = {}) => {
+      const session = storageService
+        .getSessions()
+        .find((item) => item.workDir === workDir || item.work_dir === workDir);
+      const modelId = model || session?.model || storageService.getConfig("default_model");
+      const cfg = getModelConfig(modelId, "gpt-4o");
+      if (!cfg.modelApiKey && cfg.provider !== "ollama") {
+        return { success: false, error: "请先在【设置】中为当前模型配置 API Key" };
+      }
+      return repoWikiService.generateRepoWiki({
+        workDir,
+        modelConfig: {
+          provider: cfg.provider,
+          base_url: cfg.modelBaseUrl,
+          api_key: cfg.modelApiKey,
+          model_id: cfg.apiModelId,
+          max_output_tokens: cfg.maxOutputTokens,
+        },
+      });
+    })
   );
 
   ipcMain.handle(
@@ -1394,6 +1743,7 @@ app.whenReady().then(() => {
         const customSystemPrompt = storageService.getConfig("custom_system_prompt") || "";
         const gitInfo = await getGitSnapshotAsync(targetWorkDir);
         const initialTodos = session?.todos || [];
+        const wikiInfo = targetWorkDir ? repoWikiService.getRepoWiki(targetWorkDir) : null;
 
         const modelId =
           params.model ||
@@ -1414,6 +1764,8 @@ app.whenReady().then(() => {
           memories,
           memoryIndex,
           projectRules,
+          repoWiki: wikiInfo?.exists ? String(wikiInfo.content || "").slice(0, 3500) : "",
+          repoWikiPath: wikiInfo?.path || "",
           todos: initialTodos,
           toolDocs,
           model: modelId,
@@ -1464,6 +1816,288 @@ app.whenReady().then(() => {
     safeHandler((event, { workDir, branchName, createNew }) =>
       checkoutWorkspaceBranch(workDir, branchName, createNew)
     )
+  );
+
+  // --- P1: 斜杠命令 ---
+  ipcMain.handle(
+    "get-slash-commands",
+    safeHandler((event, { workDir } = {}) => commandService.listCommands(workDir))
+  );
+
+  // --- P1: Quest / 规格模式文档 ---
+  ipcMain.handle(
+    "spec-list",
+    safeHandler((event, { workDir } = {}) => specService.listSpecs(workDir))
+  );
+  ipcMain.handle(
+    "spec-read",
+    safeHandler((event, { workDir, id } = {}) => specService.readSpec(workDir, id))
+  );
+  ipcMain.handle(
+    "spec-save",
+    safeHandler((event, payload = {}) =>
+      specService.saveSpec(payload.workDir, payload)
+    )
+  );
+  ipcMain.handle(
+    "spec-update-status",
+    safeHandler((event, { workDir, id, status } = {}) =>
+      specService.updateSpecStatus(workDir, id, status)
+    )
+  );
+  ipcMain.handle(
+    "spec-delete",
+    safeHandler((event, { workDir, id } = {}) => specService.deleteSpec(workDir, id))
+  );
+
+  // --- P1: Git Hunk 级暂存与 PR ---
+  ipcMain.handle(
+    "git-get-file-hunks",
+    safeHandler((event, { workDir, filePath, staged } = {}) =>
+      gitHunkService.getFileHunks(workDir, filePath, Boolean(staged))
+    )
+  );
+  ipcMain.handle(
+    "git-apply-hunks",
+    safeHandler((event, { workDir, filePath, hunkIds, staged, reverse, target } = {}) =>
+      gitHunkService.applyHunks(workDir, filePath, hunkIds, {
+        staged: Boolean(staged),
+        reverse: Boolean(reverse),
+        target: target === "worktree" ? "worktree" : "index",
+      })
+    )
+  );
+  ipcMain.handle(
+    "git-discard-hunks",
+    safeHandler((event, { workDir, filePath, hunkIds } = {}) =>
+      gitHunkService.applyHunks(workDir, filePath, hunkIds, {
+        target: "worktree",
+        reverse: true,
+      })
+    )
+  );
+  ipcMain.handle(
+    "git-discard-file",
+    safeHandler((event, { workDir, filePath, staged } = {}) =>
+      gitHunkService.discardFile(workDir, filePath, { staged: Boolean(staged) })
+    )
+  );
+  ipcMain.handle(
+    "git-stage-file",
+    safeHandler((event, { workDir, filePath } = {}) =>
+      gitHunkService.stageFile(workDir, filePath)
+    )
+  );
+  ipcMain.handle(
+    "git-unstage-file",
+    safeHandler((event, { workDir, filePath } = {}) =>
+      gitHunkService.unstageFile(workDir, filePath)
+    )
+  );
+  ipcMain.handle(
+    "git-stage-all",
+    safeHandler((event, { workDir } = {}) => gitHunkService.stageAll(workDir))
+  );
+  ipcMain.handle(
+    "git-create-pr",
+    safeHandler((event, payload = {}) => gitHunkService.createPullRequest(payload.workDir, payload))
+  );
+
+  // --- P1: Git Worktree 隔离 ---
+  ipcMain.handle(
+    "git-worktree-list",
+    safeHandler((event, { workDir } = {}) => gitWorktreeService.listWorktrees(workDir))
+  );
+  ipcMain.handle(
+    "git-worktree-create",
+    safeHandler((event, payload = {}) =>
+      gitWorktreeService.createWorktree(payload.workDir, payload)
+    )
+  );
+  ipcMain.handle(
+    "git-worktree-remove",
+    safeHandler((event, { workDir, targetPath, force } = {}) =>
+      gitWorktreeService.removeWorktree(workDir, targetPath, { force: Boolean(force) })
+    )
+  );
+
+  // --- P1: 项目诊断与测试运行 ---
+  ipcMain.handle(
+    "get-project-tasks",
+    safeHandler((event, { workDir } = {}) => diagnosticsService.detectTasks(workDir))
+  );
+  ipcMain.handle(
+    "run-project-task",
+    safeHandler((event, { workDir, taskId, timeoutMs } = {}) =>
+      diagnosticsService.runTask(workDir, taskId, { timeoutMs })
+    )
+  );
+
+  // --- P1: 生命周期 Hooks ---
+  ipcMain.handle(
+    "get-project-hooks",
+    safeHandler((event, { workDir } = {}) => {
+      const info = hookService.listHooks(workDir, {
+        projectTrusted: storageService.isProjectHooksTrusted(workDir),
+      });
+      return {
+        ...info,
+        enabled: storageService.getConfig("hooks_enabled") !== "false",
+        globalExists: fs.existsSync(info.globalPath),
+      };
+    })
+  );
+  ipcMain.handle(
+    "create-hooks-template",
+    safeHandler(() => {
+      const target = hookService.hooksFilePath(null, "global");
+      if (!fs.existsSync(target)) {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(
+          target,
+          JSON.stringify(
+            {
+              hooks: {
+                UserPromptSubmit: [],
+                PreToolUse: [],
+                PostToolUse: [],
+                Stop: [],
+              },
+              _readme:
+                "Hook 配置：command 通过 stdin 接收 JSON，退出码 0 继续，2 阻断；也可输出 {decision:'block',reason,additionalContext}。项目级 hooks 位于 <workDir>/.omcx/hooks.json，需在设置中显式信任。",
+            },
+            null,
+            2
+          ),
+          "utf-8"
+        );
+      }
+      return { success: true, filePath: target };
+    })
+  );
+  ipcMain.handle(
+    "set-project-hooks-trust",
+    safeHandler((event, { workDir, trusted } = {}) =>
+      storageService.setProjectHooksTrust(workDir, Boolean(trusted))
+    )
+  );
+
+  // --- P2: 运行观测（trace / 成本 / 成功率）---
+  ipcMain.handle(
+    "telemetry-get-stats",
+    safeHandler((event, { sinceMs, source } = {}) =>
+      telemetryService.getStats({ sinceMs, source })
+    )
+  );
+  ipcMain.handle(
+    "telemetry-list-runs",
+    safeHandler((event, { limit, offset, source, sinceMs } = {}) =>
+      telemetryService.listRuns({ limit, offset, source, sinceMs })
+    )
+  );
+  ipcMain.handle(
+    "telemetry-get-run",
+    safeHandler((event, { id } = {}) => telemetryService.getRun(id))
+  );
+  ipcMain.handle(
+    "telemetry-clear",
+    safeHandler(() => telemetryService.clearAll())
+  );
+
+  // --- P2: 评测集 ---
+  const resolveEvalModelConfig = (modelId) => {
+    const cfg = getModelConfig(modelId, "gpt-4o");
+    return {
+      baseUrl: cfg.modelBaseUrl,
+      apiKey: cfg.modelApiKey,
+      provider: cfg.provider,
+      model: cfg.apiModelId,
+      inputPrice: cfg.inputPrice,
+      outputPrice: cfg.outputPrice,
+      cacheReadPrice: cfg.cacheReadPrice,
+      cacheWritePrice: cfg.cacheWritePrice,
+    };
+  };
+  ipcMain.handle(
+    "evals-list",
+    safeHandler(() => evalService.listEvals())
+  );
+  ipcMain.handle(
+    "eval-run",
+    safeHandler((event, { evalId, model, maxRounds } = {}) =>
+      evalService.runEval(evalId, {
+        modelConfig: resolveEvalModelConfig(model),
+        maxRounds,
+      })
+    )
+  );
+  ipcMain.handle(
+    "eval-run-all",
+    safeHandler((event, { model, ids, maxRounds } = {}) =>
+      evalService.runAll({
+        modelConfig: resolveEvalModelConfig(model),
+        ids,
+        maxRounds,
+      })
+    )
+  );
+
+  // --- P2: 内置浏览器自动化 ---
+  ipcMain.handle(
+    "browser-auto-open",
+    safeHandler((event, { url } = {}) => browserAutomationService.open({ url }))
+  );
+  ipcMain.handle(
+    "browser-auto-interact",
+    safeHandler((event, payload = {}) => browserAutomationService.interact(payload))
+  );
+  ipcMain.handle(
+    "browser-auto-snapshot",
+    safeHandler((event, payload = {}) => browserAutomationService.snapshot(payload))
+  );
+  ipcMain.handle(
+    "browser-auto-save-baseline",
+    safeHandler((event, payload = {}) => browserAutomationService.saveBaseline(payload))
+  );
+  ipcMain.handle(
+    "browser-auto-state",
+    safeHandler(() => browserAutomationService.getState())
+  );
+  ipcMain.handle(
+    "browser-auto-back",
+    safeHandler(() => browserAutomationService.back())
+  );
+  ipcMain.handle(
+    "browser-auto-forward",
+    safeHandler(() => browserAutomationService.forward())
+  );
+  ipcMain.handle(
+    "browser-auto-close",
+    safeHandler(() => browserAutomationService.close())
+  );
+
+  // --- P1: 会话分支与导出 ---
+  ipcMain.handle(
+    "fork-session",
+    safeHandler((event, { sessionId, upToMessageId } = {}) =>
+      sessionTransferService.forkSession(sessionId, { upToMessageId })
+    )
+  );
+  ipcMain.handle(
+    "export-session",
+    safeHandler(async (event, { sessionId } = {}) => {
+      const built = sessionTransferService.buildSessionMarkdown(sessionId);
+      if (!built.success) return built;
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const result = await dialog.showSaveDialog(win, {
+        title: "导出会话为 Markdown",
+        defaultPath: built.suggestedFileName,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (result.canceled || !result.filePath) return { success: false, canceled: true };
+      fs.writeFileSync(result.filePath, built.markdown, "utf-8");
+      return { success: true, filePath: result.filePath };
+    })
   );
 
   ipcMain.handle(
@@ -1726,6 +2360,34 @@ app.whenReady().then(() => {
     })
   );
 
+  // --- 原生 PTY 交互式终端 (支持 REPL/vim/ssh/Ctrl+C 与窗口尺寸联动) ---
+  ipcMain.handle(
+    "terminal-create",
+    safeHandler((event, params = {}) => {
+      const result = terminalPtyService.create(params);
+      if (result.success) {
+        terminalPtyService.bindSender(result.terminalId, event.sender);
+      }
+      return result;
+    })
+  );
+
+  ipcMain.on("terminal-input", (event, { terminalId, data } = {}) => {
+    terminalPtyService.write(terminalId, data);
+  });
+
+  ipcMain.handle(
+    "terminal-resize",
+    safeHandler((event, { terminalId, cols, rows } = {}) =>
+      terminalPtyService.resize(terminalId, cols, rows)
+    )
+  );
+
+  ipcMain.handle(
+    "terminal-dispose",
+    safeHandler((event, terminalId) => terminalPtyService.dispose(terminalId))
+  );
+
   ipcMain.handle(
     "terminal-run-command",
     safeHandler(async (event, { cmdId, command, cwd, workDir }) => {
@@ -1888,7 +2550,13 @@ app.whenReady().then(() => {
   );
 
   // 直接工具执行通道：仅开放只读工具，写文件/执行命令等高危能力必须走完整的 Agent 会话链路
-  const DIRECT_READONLY_TOOLS = new Set(["read_file", "list_directory", "search_code"]);
+  const DIRECT_READONLY_TOOLS = new Set([
+    "read_file",
+    "list_directory",
+    "search_code",
+    "search_symbols",
+    "repo_map",
+  ]);
   ipcMain.handle(
     "execute-tool",
     safeHandler(async (event, { name, args, workDir } = {}) => {
@@ -1986,12 +2654,24 @@ app.whenReady().then(() => {
       }
 
       const headers = {};
+      const isAnthropicEndpoint =
+        params.provider === "anthropic" ||
+        /anthropic\.com|claude/i.test(activeBaseUrl);
       if (activeApiKey) {
-        headers["Authorization"] = `Bearer ${activeApiKey}`;
+        if (isAnthropicEndpoint) {
+          headers["x-api-key"] = activeApiKey;
+          headers["anthropic-version"] = "2023-06-01";
+        } else {
+          headers["Authorization"] = `Bearer ${activeApiKey}`;
+        }
       }
 
       try {
-        const fetchUrl = `${activeBaseUrl}/models`;
+        const fetchUrl = isAnthropicEndpoint
+          ? /\/v1$/i.test(activeBaseUrl)
+            ? `${activeBaseUrl}/models`
+            : `${activeBaseUrl}/v1/models`
+          : `${activeBaseUrl}/models`;
         const response = await fetch(fetchUrl, {
           headers,
           signal: AbortSignal.timeout(10000), // 10秒超时
@@ -2091,6 +2771,223 @@ app.whenReady().then(() => {
     }
   }
 
+  // ─── 旁路问答 (/btw) ────────────────────────────────────────
+  // 与 chat-request 完全隔离：独立事件总线、独立 AbortController、不写会话、不触发压缩/标题/产物。
+  const activeBtwSessions = new Map();
+  const BTW_READONLY_TOOL_NAMES = new Set([
+    "read_file",
+    "search_code",
+    "find_references",
+    "repo_map",
+  ]);
+
+  function sendBtwEvent(sender, envelope, type, data) {
+    if (!sender || (sender.isDestroyed && sender.isDestroyed())) return;
+    try {
+      sender.send("btw-stream-event", { ...envelope, type, data });
+    } catch (e) {
+      // 忽略已关闭窗口异常
+    }
+  }
+
+  ipcMain.handle("btw-request", async (event, payload = {}) => {
+    const sessionId = String(payload.sessionId || "").trim();
+    const btwId = String(payload.btwId || "").trim();
+    const runId = String(payload.runId || "").trim();
+    const question = String(payload.question || "").trim();
+
+    if (!sessionId || !btwId || !question) {
+      return { ok: false, error: "旁路请求参数不完整" };
+    }
+
+    // 同一会话只保留一条旁路请求：新请求先中断旧请求（与主任务完全无关）
+    for (const [existingId, existing] of activeBtwSessions) {
+      if (existing.sessionId !== sessionId) continue;
+      try {
+        existing.controller.abort();
+      } catch {}
+      activeBtwSessions.delete(existingId);
+      sendBtwEvent(existing.sender, existing.envelope, "end", {
+        cancelled: true,
+        superseded: true,
+        content: "",
+      });
+    }
+
+    const {
+      modelBaseUrl,
+      modelApiKey,
+      provider,
+      apiModelId,
+      maxOutputTokens,
+    } = getModelConfig(payload.model, "gpt-4o");
+
+    if (!modelApiKey && provider !== "ollama") {
+      return { ok: false, error: "请先在【设置】中配置该模型的 API Key" };
+    }
+
+    const session = storageService.getSessions().find((s) => s.id === sessionId);
+    let workDir =
+      payload.workDir && typeof payload.workDir === "string" && payload.workDir.trim()
+        ? payload.workDir.trim()
+        : session?.work_dir || null;
+    if (workDir && !fs.existsSync(workDir)) workDir = null;
+
+    const { allowedFolders } = getWorkspaceFolders(workDir);
+
+    // @file / @dir 内联：仅允许工作空间内路径；无审批 UI，越界引用直接跳过
+    let userContent = question;
+    if (workDir) {
+      try {
+        const mention = buildMentionContext(question, workDir, allowedFolders, {
+          skills: [],
+          mcpServers: [],
+        });
+        if (mention?.block) {
+          userContent = `${mention.block}\n\n【旁路问题】\n${question}`;
+        }
+        if (Array.isArray(mention?.skipped) && mention.skipped.length > 0) {
+          console.log(`[btw] 跳过 ${mention.skipped.length} 个无法解析的 @ 引用`);
+        }
+      } catch (err) {
+        console.warn("[btw] @ 引用解析失败，回退原始问题:", err.message);
+      }
+    }
+
+    // 主会话选中片段：只作为旁路问题的只读引用，永不写回主会话
+    const quotedText = String(payload.quotedText || "").trim().slice(0, 8000);
+
+    const controller = new AbortController();
+    const envelope = { sessionId, btwId, runId };    const entry = {
+      sessionId,
+      btwId,
+      runId,
+      controller,
+      sender: event.sender,
+      envelope,
+    };
+    activeBtwSessions.set(btwId, entry);
+
+    const abortTimer = setTimeout(() => {
+      try {
+        controller.abort();
+      } catch {}
+    }, 6 * 60 * 1000);
+
+    const onSenderDestroyed = () => {
+      try {
+        controller.abort();
+      } catch {}
+    };
+    try {
+      event.sender.once("destroyed", onSenderDestroyed);
+    } catch {}
+
+    const toolDefinitions = toolRegistry.getToolDefinitions(
+      [],
+      BTW_READONLY_TOOL_NAMES,
+      { permissionMode: PERMISSION_MODES.PLAN }
+    );
+
+    const toolContext = {
+      sessionId: `${sessionId}::btw::${btwId}`,
+      workDir,
+      allowedFolders,
+      writableFolders: [],
+      permissionMode: PERMISSION_MODES.PLAN,
+      // 旁路通道没有权限审批弹窗：外部路径读取直接拒绝，工具会返回明确错误
+      checkPermission: null,
+      allowedToolNames: BTW_READONLY_TOOL_NAMES,
+      abortSignal: controller.signal,
+      mcpTools: [],
+      modelConfig: {
+        baseUrl: modelBaseUrl,
+        apiKey: modelApiKey,
+        provider,
+        modelName: apiModelId,
+      },
+    };
+
+    void (async () => {
+      try {
+        const result = await btwService.runBtw({
+          question: userContent,
+          quotedText,
+          digest: payload.contextDigest,
+          history: Array.isArray(payload.history) ? payload.history : [],
+          workDir,
+          modelConfig: {
+            baseUrl: modelBaseUrl,
+            apiKey: modelApiKey,
+            provider,
+            modelName: apiModelId,
+            maxOutputTokens,
+          },
+          toolDefinitions,
+          toolContext,
+          allowedToolNames: BTW_READONLY_TOOL_NAMES,
+          toolRegistry,
+          abortSignal: controller.signal,
+          onDelta: (delta) => sendBtwEvent(event.sender, envelope, "data", delta),
+          onToolStatus: (status) =>
+            sendBtwEvent(event.sender, envelope, "tool_status", status),
+        });
+
+        if (controller.signal.aborted || result.cancelled) {
+          sendBtwEvent(event.sender, envelope, "end", {
+            cancelled: true,
+            content: result.content || "",
+            usage: result.usage || null,
+            rounds: result.rounds,
+          });
+        } else {
+          sendBtwEvent(event.sender, envelope, "end", {
+            cancelled: false,
+            content: result.content || "",
+            usage: result.usage || null,
+            rounds: result.rounds,
+            hitRoundLimit: Boolean(result.hitRoundLimit),
+          });
+        }
+        console.log(
+          `[btw] ${btwId} 完成：${result.rounds} 轮，${result.content?.length || 0} 字符`
+        );
+      } catch (err) {
+        const cancelled = controller.signal.aborted;
+        if (cancelled) {
+          sendBtwEvent(event.sender, envelope, "end", {
+            cancelled: true,
+            content: "",
+          });
+        } else {
+          console.error("[btw] 请求失败:", err?.message || err);
+          sendBtwEvent(event.sender, envelope, "error", {
+            message: err?.message || String(err),
+          });
+        }
+      } finally {
+        clearTimeout(abortTimer);
+        try {
+          event.sender.removeListener("destroyed", onSenderDestroyed);
+        } catch {}
+        if (activeBtwSessions.get(btwId) === entry) {
+          activeBtwSessions.delete(btwId);
+        }
+      }
+    })();
+
+    return { ok: true, btwId };
+  });
+
+  ipcMain.handle("btw-cancel", async (_event, { btwId } = {}) => {
+    const entry = activeBtwSessions.get(String(btwId || "").trim());
+    if (!entry) return { ok: true, alreadyEnded: true };
+    try {
+      entry.controller.abort();
+    } catch {}
+    return { ok: true };
+  });
+
   // --- 流式聊天与 Agent 执行循环 ---
   ipcMain.on(
     "chat-request",
@@ -2126,8 +3023,19 @@ app.whenReady().then(() => {
         } catch (e) {}
       };
 
-      const { modelBaseUrl, modelApiKey, provider, apiModelId, contextLimit, supportsVision } =
-        getModelConfig(model, "gpt-4o");
+      const {
+        modelBaseUrl,
+        modelApiKey,
+        provider,
+        apiModelId,
+        contextLimit,
+        maxOutputTokens,
+        supportsVision,
+        inputPrice,
+        outputPrice,
+        cacheReadPrice,
+        cacheWritePrice,
+      } = getModelConfig(model, "gpt-4o");
 
       if (!modelApiKey && provider !== "ollama") {
         replyStream("error", "请先在【设置】中配置该模型的 API Key");
@@ -2289,6 +3197,19 @@ app.whenReady().then(() => {
       const partialMessageId =
         assistantMsgId || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const runStartedAt = Date.now();
+
+      // P2 运行观测：记录 trace / token / 成本 / 成功率（仅本地 JSONL，不联网）
+      const telemetryRun = telemetryService.startRun({
+        sessionId,
+        runId,
+        model: apiModelId,
+        provider,
+        source: "chat",
+      });
+
+      // 回合累计用量与成本（声明在 try 之外，确保 catch/finally 的观测收尾可安全读取）
+      let turnUsage = null;
+      let turnCostUsd = 0;
       const PARTIAL_PERSIST_INTERVAL_MS = 1200;
       let lastPartialPersistAt = 0;
 
@@ -2388,6 +3309,7 @@ app.whenReady().then(() => {
         writableFolders,
         permissionMode: resolvedPermissionMode,
         checkPermission: checkPermissionFn,
+        allowedToolNames: null,
         onTodosUpdate: null,
         abortSignal: sessionAbort.abortController.signal,
         sessionAbort,
@@ -2424,9 +3346,74 @@ app.whenReady().then(() => {
         }
 
         let apiMessages = [...messages];
+        // 斜杠命令展开：仅在最后一条用户消息以 /command 开头时替换为完整提示词
+        let slashCommandInfo = null;
+        try {
+          const lastUserIndex = (() => {
+            for (let i = apiMessages.length - 1; i >= 0; i--) {
+              if (apiMessages[i]?.role === "user") return i;
+            }
+            return -1;
+          })();
+          if (lastUserIndex >= 0) {
+            const rawText = extractTextContent(apiMessages[lastUserIndex].content);
+            // /btw 必须走独立的旁路通道，绝不能被主 Agent 当作普通任务执行
+            if (/^\/btw(?:\s|$)/i.test(rawText.trim())) {
+              replyStream(
+                "error",
+                "旁路提问请直接在主输入框发送 /btw <问题>：它不会打断主任务，也不会写入主会话。"
+              );
+              return;
+            }
+            const expanded = await commandService.expandCommand(rawText, sessionWorkDir);
+            if (expanded) {
+              slashCommandInfo = {
+                command: expanded.command,
+                scope: expanded.scope,
+                builtin: expanded.builtin,
+                original: rawText,
+              };
+              apiMessages[lastUserIndex] = {
+                ...apiMessages[lastUserIndex],
+                content: expanded.prompt,
+              };
+              if (expanded.allowedTools?.length) {
+                sessionToolContext.allowedToolNames = new Set([
+                  ...expanded.allowedTools,
+                  "todo_write",
+                  "run_skill_script",
+                ]);
+              }
+              console.log(`[slash-command] 已展开 /${expanded.command} (${expanded.scope})`);
+            }
+          }
+        } catch (slashErr) {
+          console.warn("[slash-command] 展开失败，回退原文:", slashErr.message);
+        }
         let compactionSummary = "";
         const compactionStats = { count: 0, beforeTokens: 0, afterTokens: 0 };
         let lastProviderUsage = null;
+        const modelPricing = {
+          inputPrice,
+          outputPrice,
+          cacheReadPrice,
+          cacheWritePrice,
+        };
+
+        const recordUsage = (usage) => {
+          if (!usage) return;
+          const normalized = usage.raw ? usage : normalizeUsage(usage, provider);
+          if (!normalized) return;
+          lastProviderUsage = normalized;
+          turnUsage = mergeUsage(turnUsage, normalized);
+          turnCostUsd += computeUsageCost(normalized, modelPricing);
+        };
+
+        const withUsageMetrics = (metrics) => ({
+          ...metrics,
+          usage: turnUsage,
+          costUsd: Math.round(turnCostUsd * 100_000_000) / 100_000_000,
+        });
         let consecutiveCompactFailures = 0;
         let turnCompactionCount = 0;
         const compactCfg = {
@@ -2502,6 +3489,52 @@ app.whenReady().then(() => {
                 (mentionContext.skipped.length > 0 ? ` / skipped ${mentionContext.skipped.length}` : "")
             );
           }
+          // 技能声明 allowed-tools 时收敛本轮可用工具（所有激活技能都声明才生效）
+          if (Array.isArray(mentionContext.allowedTools) && mentionContext.allowedTools.length > 0) {
+            sessionToolContext.allowedToolNames = new Set([
+              ...mentionContext.allowedTools,
+              "todo_write",
+              "run_skill_script",
+            ]);
+            console.log(
+              `[skill-permission] 本轮工具白名单: ${[...sessionToolContext.allowedToolNames].join(", ")}`
+            );
+          }
+        }
+
+        // 生命周期 Hooks：UserPromptSubmit（项目级 hooks 必须由用户显式信任）
+        const hooksEnabled = storageService.getConfig("hooks_enabled") !== "false";
+        const hooksTrusted = storageService.isProjectHooksTrusted(sessionWorkDir);
+        const hookOptions = {
+          workDir: sessionWorkDir,
+          sessionId,
+          projectTrusted: hooksTrusted,
+          enabled: hooksEnabled,
+        };
+        if (hooksEnabled) {
+          try {
+            const promptHook = await hookService.runHooks(
+              "UserPromptSubmit",
+              {
+                prompt: mentionText,
+                slash_command: slashCommandInfo?.command || null,
+                session_id: sessionId,
+                cwd: sessionWorkDir,
+              },
+              hookOptions
+            );
+            if (promptHook.blocked) {
+              replyStream("error", `Hook 阻断了本次请求：${promptHook.reason}`);
+              return;
+            }
+            if (promptHook.additionalContext) {
+              mentionBlock = mentionBlock
+                ? `${mentionBlock}\n\n【Hooks 注入的额外上下文】\n${promptHook.additionalContext}`
+                : `【Hooks 注入的额外上下文】\n${promptHook.additionalContext}`;
+            }
+          } catch (hookErr) {
+            console.warn("[hook] UserPromptSubmit 执行异常:", hookErr.message);
+          }
         }
 
         const [gitInfo, mcpTools] = await Promise.all([
@@ -2519,6 +3552,31 @@ app.whenReady().then(() => {
 
         const globalCustomSystemPrompt = storageService.getConfig("custom_system_prompt") || "";
 
+        // 仓库符号地图：默认开启，可通过设置关闭；内部带 45s 缓存，避免每轮全量扫描
+        let repoMapText = "";
+        if (
+          sessionWorkDir &&
+          storageService.getConfig("repo_map_enabled") !== "false"
+        ) {
+          try {
+            repoMapText = repoIndexService.buildRepoMap(sessionWorkDir, {
+              maxChars: Number(storageService.getConfig("repo_map_max_chars")) || 6000,
+            });
+          } catch (repoErr) {
+            console.warn(`[repo-map] 生成失败: ${repoErr.message}`);
+          }
+        }
+
+        // Repo Wiki：若用户已在 Inspector 生成过，则注入摘要（完整文档保留路径）
+        let wikiInfo = null;
+        if (sessionWorkDir) {
+          try {
+            wikiInfo = repoWikiService.getRepoWiki(sessionWorkDir);
+          } catch (wikiErr) {
+            console.warn(`[repo-wiki] 读取失败: ${wikiErr.message}`);
+          }
+        }
+
         const buildInstruction = () =>
           buildSystemContext({
             workDir: sessionWorkDir,
@@ -2527,6 +3585,9 @@ app.whenReady().then(() => {
             memories,
             memoryIndex,
             projectRules,
+            repoMap: repoMapText,
+            repoWiki: wikiInfo?.exists ? String(wikiInfo.content || "").slice(0, 3500) : "",
+            repoWikiPath: wikiInfo?.path || "",
             todos: initialTodos,
             toolDocs: getActiveToolPromptDocs(),
             model: `${provider}/${apiModelId}`,
@@ -2583,9 +3644,13 @@ app.whenReady().then(() => {
 
         const getActiveToolDefs = () =>
           enableTools
-            ? toolRegistry.getToolDefinitions(mcpTools, null, {
-                permissionMode: sessionToolContext.permissionMode,
-              })
+            ? toolRegistry.getToolDefinitions(
+                mcpTools,
+                sessionToolContext.allowedToolNames || null,
+                {
+                  permissionMode: sessionToolContext.permissionMode,
+                }
+              )
             : [];
 
         // 工具 Schema 同样占用上下文预算，必须计入阈值判断，否则会持续低估真实占用
@@ -2710,7 +3775,7 @@ app.whenReady().then(() => {
           });
 
         const initMetrics = computeContextMetrics();
-        replyStream("metrics", initMetrics);
+        replyStream("metrics", withUsageMetrics(initMetrics));
 
         const MAX_TOOL_ROUNDS = Number(storageService.getConfig("max_tool_rounds")) || 5000;
 
@@ -2760,6 +3825,45 @@ app.whenReady().then(() => {
         }
 
         async function doStreamRequestOnce(requestMessages, requestBody) {
+          // Anthropic 原生 Messages API：独立协议分支，输出结构与 OpenAI 分支完全一致
+          if (isAnthropicProvider(provider, modelBaseUrl)) {
+            let inThinkingBlock = false;
+            const anthropicResult = await streamAnthropicMessage({
+              baseUrl: modelBaseUrl,
+              apiKey: modelApiKey,
+              model: apiModelId,
+              messages: requestMessages,
+              tools: requestBody.tools || [],
+              maxTokens: maxOutputTokens,
+              temperature: 0.2,
+              signal: sessionAbort.abortController.signal,
+              onText: (delta) => {
+                if (!delta) return;
+                if (inThinkingBlock) {
+                  inThinkingBlock = false;
+                  sendData("</think>\n\n");
+                }
+                sendData(delta);
+              },
+              onReasoning: (delta) => {
+                if (!delta) return;
+                if (!inThinkingBlock) {
+                  inThinkingBlock = true;
+                  sendData("<think>");
+                }
+                sendData(delta);
+              },
+            });
+            if (inThinkingBlock) {
+              inThinkingBlock = false;
+              sendData("</think>\n\n");
+            }
+            if (anthropicResult.usage) {
+              lastProviderUsage = anthropicResult.usage;
+            }
+            return anthropicResult;
+          }
+
           const reasoningSpec = buildReasoningPayload(apiModelId, provider, sessionReasoningEffort);
           let requestBodyFinal = {
             model: apiModelId,
@@ -2909,7 +4013,7 @@ app.whenReady().then(() => {
                   const json = JSON.parse(payload);
                   if (json.usage) {
                     usage = json.usage;
-                    lastProviderUsage = json.usage;
+                    lastProviderUsage = normalizeUsage(json.usage, provider);
                   }
                   const choice = json.choices?.[0];
                   if (!choice) continue;
@@ -3088,6 +4192,8 @@ app.whenReady().then(() => {
             }
           })();
 
+          recordUsage(result.usage);
+
           if (sessionAbort.cancelled) break;
 
           if (!enableTools || result.toolCalls.length === 0) {
@@ -3211,6 +4317,8 @@ app.whenReady().then(() => {
             "read_file",
             "list_directory",
             "search_code",
+            "search_symbols",
+            "repo_map",
             "web_search",
             "web_fetch",
           ]);
@@ -3237,8 +4345,94 @@ app.whenReady().then(() => {
           }
 
           const executeSingleCall = async ({ tc, callId, args }) => {
+            const toolStartedAt = Date.now();
+            const recordToolTrace = (status, detail = "") =>
+              telemetryService.recordToolCall(telemetryRun.id, {
+                name: tc.function.name,
+                status,
+                durationMs: Date.now() - toolStartedAt,
+                args,
+                summary: detail,
+              });
+
             if (sessionAbort.cancelled) {
+              recordToolTrace("cancelled", "运行已取消");
               return { tc, callId, args, execResult: { success: false, error: "已取消" } };
+            }
+
+            // 技能 allowed-tools 白名单：硬性阻断白名单外的工具调用
+            if (
+              sessionToolContext.allowedToolNames &&
+              !sessionToolContext.allowedToolNames.has(tc.function.name)
+            ) {
+              recordToolTrace("blocked", "技能工具白名单拦截");
+              return {
+                tc,
+                callId,
+                args,
+                execResult: {
+                  success: false,
+                  error: `当前激活的技能限制了可用工具范围，已拒绝调用 ${tc.function.name}`,
+                },
+              };
+            }
+
+            // PreToolUse Hook：可阻断工具执行
+            if (hooksEnabled) {
+              try {
+                const preHook = await hookService.runHooks(
+                  "PreToolUse",
+                  {
+                    tool_name: tc.function.name,
+                    tool_input: args,
+                    session_id: sessionId,
+                    cwd: sessionWorkDir,
+                  },
+                  hookOptions
+                );
+                if (preHook.blocked) {
+                  const blockedResult = {
+                    success: false,
+                    error: `Hook 阻断了工具 ${tc.function.name}：${preHook.reason}`,
+                  };
+                  recordToolTrace("blocked", `Hook 阻断: ${preHook.reason || ""}`);
+                  executedToolSteps.push({
+                    tool: tc.function.name,
+                    status: "done",
+                    args,
+                    result: blockedResult,
+                    callId,
+                  });
+                  replyStream("tool_status", {
+                    tool: tc.function.name,
+                    status: "done",
+                    args,
+                    result: blockedResult,
+                    callId,
+                  });
+                  return { tc, callId, args, execResult: blockedResult };
+                }
+              } catch (hookErr) {
+                console.warn("[hook] PreToolUse 执行异常:", hookErr.message);
+              }
+            }
+
+            // 写前检查点：仅记录 Agent 即将修改文件的原始内容，供用户一键回滚
+            if (tc.function.name === "write_file" || tc.function.name === "edit_file") {
+              const targetPath = typeof args?.path === "string" ? args.path : "";
+              if (targetPath) {
+                try {
+                  checkpointService.recordFile({
+                    sessionId,
+                    turnId: runId,
+                    filePath: targetPath,
+                    workDir: sessionWorkDir,
+                    tool: tc.function.name,
+                  });
+                } catch (checkpointErr) {
+                  console.warn(`[checkpoint] 记录 ${targetPath} 失败: ${checkpointErr.message}`);
+                }
+              }
             }
 
             let currentSubSteps = [];
@@ -3265,6 +4459,29 @@ app.whenReady().then(() => {
               callScopedContext,
               mcpTools
             );
+            recordToolTrace(
+              execResult?.success ? "ok" : "error",
+              execResult?.success ? "" : execResult?.error || ""
+            );
+
+            // PostToolUse Hook：用于审计、格式化、补充上下文；不改变本次工具结果
+            if (hooksEnabled) {
+              try {
+                await hookService.runHooks(
+                  "PostToolUse",
+                  {
+                    tool_name: tc.function.name,
+                    tool_input: args,
+                    tool_response: execResult,
+                    session_id: sessionId,
+                    cwd: sessionWorkDir,
+                  },
+                  hookOptions
+                );
+              } catch (hookErr) {
+                console.warn("[hook] PostToolUse 执行异常:", hookErr.message);
+              }
+            }
 
             if (
               (tc.function.name === "write_file" || tc.function.name === "edit_file") &&
@@ -3372,7 +4589,7 @@ app.whenReady().then(() => {
 
           // 每轮后更新 Context 计量
           const updatedMetrics = computeContextMetrics();
-          replyStream("metrics", updatedMetrics);
+          replyStream("metrics", withUsageMetrics(updatedMetrics));
         }
 
         // 提取剥离了 <think> 思考块与合成占位符后的可见正文
@@ -3399,6 +4616,7 @@ app.whenReady().then(() => {
             if (!compacted) throw err;
             finalResult = await doStreamRequest(apiMessages, { reasoning_effort: "low" });
           }
+          if (finalResult) recordUsage(finalResult.usage);
         }
 
         // 若任务正常结束（非用户取消），将仍遗留在 in_progress 的 Todo 自动收敛为 completed
@@ -3411,9 +4629,37 @@ app.whenReady().then(() => {
           replyStream("todos", initialTodos);
         }
 
+        // Stop Hook：任务收尾钩子（用于通知、审计、清理，不阻断最终结果）
+        if (hooksEnabled) {
+          try {
+            await hookService.runHooks(
+              "Stop",
+              {
+                session_id: sessionId,
+                cwd: sessionWorkDir,
+                tool_rounds: toolRound,
+                cancelled: !!sessionAbort.cancelled,
+                response: fullGeneratedText,
+              },
+              hookOptions
+            );
+          } catch (hookErr) {
+            console.warn("[hook] Stop 执行异常:", hookErr.message);
+          }
+        }
+
         // 最终推送一次 Context
         const finalMetrics = computeContextMetrics();
-        replyStream("metrics", finalMetrics);
+        replyStream("metrics", withUsageMetrics(finalMetrics));
+
+        telemetryService.finishRun(telemetryRun.id, {
+          success: !sessionAbort.cancelled,
+          cancelled: !!sessionAbort.cancelled,
+          rounds: toolRound,
+          contentChars: (fullGeneratedText || "").length,
+          usage: turnUsage,
+          costUsd: turnCostUsd,
+        });
 
         // 结束时通知前端，由前端单源原子落盘 (消除主进程重复双写导致的消息被覆盖Bug)
         replyStream("end", {
@@ -3429,6 +4675,10 @@ app.whenReady().then(() => {
               beforeTokens: compactionStats.beforeTokens,
               afterTokens: compactionStats.afterTokens,
             },
+            usage: turnUsage,
+            costUsd: Math.round(turnCostUsd * 100_000_000) / 100_000_000,
+            model: apiModelId,
+            provider,
           },
         });
 
@@ -3453,6 +4703,14 @@ app.whenReady().then(() => {
       } catch (err) {
         if (err.name === "AbortError" || sessionAbort.cancelled) {
           console.log(`[chat-stream] session ${sessionId} cancelled by user`);
+          telemetryService.finishRun(telemetryRun.id, {
+            success: false,
+            cancelled: true,
+            rounds: toolRound,
+            contentChars: (fullGeneratedText || "").length,
+            usage: turnUsage,
+            costUsd: turnCostUsd,
+          });
           try {
             replyStream("end", {
               content: fullGeneratedText,
@@ -3462,6 +4720,8 @@ app.whenReady().then(() => {
                 toolSteps: executedToolSteps,
                 todos: initialTodos,
                 pendingSteers: Array.isArray(sessionAbort.steerQueue) ? sessionAbort.steerQueue.slice() : [],
+                usage: turnUsage,
+                costUsd: Math.round(turnCostUsd * 100_000_000) / 100_000_000,
               },
             });
           } catch (e) {
@@ -3469,6 +4729,14 @@ app.whenReady().then(() => {
           }
         } else {
           console.error(`[chat-stream error ${sessionId}]`, err);
+          telemetryService.finishRun(telemetryRun.id, {
+            success: false,
+            error: err.message,
+            rounds: toolRound,
+            contentChars: (fullGeneratedText || "").length,
+            usage: turnUsage,
+            costUsd: turnCostUsd,
+          });
           replyStream("error", err.message);
         }
       } finally {
@@ -3528,9 +4796,19 @@ app.on("before-quit", () => {
     console.warn("[before-quit] 中断快照统一落盘异常（已忽略）:", err.message);
   }
   try {
+    terminalPtyService.disposeAll();
+  } catch (err) {
+    console.warn("[before-quit] 关闭 PTY 终端异常（已忽略）:", err.message);
+  }
+  try {
     mcpClientService.closeAll();
   } catch (err) {
     console.warn("[before-quit] 关闭 MCP 客户端异常（已忽略，不阻断退出）:", err.message);
+  }
+  try {
+    browserAutomationService.close();
+  } catch (err) {
+    console.warn("[before-quit] 关闭自动化浏览器异常（已忽略）:", err.message);
   }
 });
 

@@ -2,6 +2,8 @@ const { spawn } = require("child_process");
 const path = require("path");
 const { StringDecoder } = require("string_decoder");
 const storageService = require("./storageService");
+const { McpHttpClient } = require("./mcpHttpClient");
+const mcpOAuthService = require("./mcpOAuthService");
 
 const MCP_TOOL_PREFIX = "mcp__";
 const HANDSHAKE_TIMEOUT_MS = 12000;
@@ -16,6 +18,34 @@ function sanitizeSegment(str) {
 
 function formatMcpToolName(serverId, toolName) {
   return `${MCP_TOOL_PREFIX}${sanitizeSegment(serverId)}__${sanitizeSegment(toolName)}`;
+}
+
+/**
+ * 将 MCP prompts/get 返回的多模态消息合并为可复制/可读的纯文本。
+ */
+function promptMessagesToText(result) {
+  const messages = Array.isArray(result?.messages) ? result.messages : [];
+  return messages
+    .map((message) => {
+      const content = message?.content;
+      if (typeof content === "string") return content;
+      // MCP PromptMessage.content 既可能是单个 ContentBlock，也可能是数组
+      const blocks = Array.isArray(content) ? content : content ? [content] : [];
+      return blocks
+        .map((item) => {
+          if (!item) return "";
+          if (item.type === "text") return item.text || "";
+          if (item.type === "image") return "[图片内容]";
+          if (item.type === "resource") {
+            return `[资源: ${item.resource?.uri || ""}]`;
+          }
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function buildEnhancedEnv(customEnv = {}) {
@@ -300,7 +330,11 @@ class McpClientManager {
   _getClientKey(server) {
     const envKeys = Object.keys(server.env || {}).sort();
     const envSig = envKeys.map((k) => `${k}=${server.env[k]}`).join("\u0001");
-    return `${server.id}::${server.command}::${JSON.stringify(server.args || [])}::${envSig}::${server.cwd || ""}`;
+    const headerKeys = Object.keys(server.headers || {}).sort();
+    const headerSig = headerKeys
+      .map((k) => `${k}=${server.headers[k]}`)
+      .join("\u0001");
+    return `${server.id}::${server.command || ""}::${JSON.stringify(server.args || [])}::${envSig}::${server.cwd || ""}::${server.url || ""}::${server.transport || ""}::${headerSig}::${server.authToken ? "auth" : ""}::${mcpOAuthService.isOAuthEnabled(server) ? "oauth" : ""}`;
   }
 
   _getOrCreateClient(server) {
@@ -313,7 +347,14 @@ class McpClientManager {
       existing.close();
       this.clients.delete(server.id);
     }
-    const client = new McpStdioClient(server);
+    const client = server.url
+      ? new McpHttpClient({
+          ...server,
+          tokenProvider: mcpOAuthService.isOAuthEnabled(server)
+            ? () => mcpOAuthService.getAccessToken(server)
+            : null,
+        })
+      : new McpStdioClient(server);
     client._configKey = desiredKey;
     this.clients.set(server.id, client);
     return client;
@@ -323,7 +364,12 @@ class McpClientManager {
     const servers = storageService
       .getMcpServers(workDir)
       // 安全加固：项目级 MCP 配置必须经用户显式信任后才允许拉起子进程
-      .filter((s) => s.enabled !== false && s.command && (s.source !== "project" || s.trusted === true));
+      .filter(
+        (s) =>
+          s.enabled !== false &&
+          (s.command || s.url) &&
+          (s.source !== "project" || s.trusted === true)
+      );
 
     if (servers.length === 0) {
       return [];
@@ -335,8 +381,10 @@ class McpClientManager {
         try {
           const client = this._getOrCreateClient(server);
           const rawTools = await client.listTools();
+          const disabledTools = new Set(Array.isArray(server.disabledTools) ? server.disabledTools : []);
           for (const rawTool of rawTools) {
             if (!rawTool || !rawTool.name) continue;
+            if (disabledTools.has(rawTool.name)) continue;
             const fullName = formatMcpToolName(server.id, rawTool.name);
             const parameters =
               rawTool.inputSchema && typeof rawTool.inputSchema === "object"
@@ -400,6 +448,161 @@ class McpClientManager {
     return result;
   }
 
+  async getServerTools(serverId, workDir = null) {
+    const server = storageService
+      .getMcpServers(workDir)
+      .find((item) => item.id === serverId);
+    if (!server) {
+      return { success: false, error: `未找到 MCP 服务器: ${serverId}` };
+    }
+    if (server.source === "project" && server.trusted !== true) {
+      return { success: false, error: "项目级 MCP 尚未获得信任授权" };
+    }
+    if (!server.command && !server.url) {
+      return { success: false, error: "该 MCP 服务器缺少 command 或 url 配置" };
+    }
+    try {
+      const client = this._getOrCreateClient(server);
+      const rawTools = await client.listTools();
+      const disabled = new Set(Array.isArray(server.disabledTools) ? server.disabledTools : []);
+      return {
+        success: true,
+        serverId,
+        source: server.source,
+        transport: server.url ? server.transport || "http" : "stdio",
+        tools: rawTools
+          .filter((tool) => tool && tool.name)
+          .map((tool) => ({
+            name: tool.name,
+            description: tool.description || "",
+            enabled: !disabled.has(tool.name),
+            inputSchema: tool.inputSchema || null,
+          })),
+      };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  async listResources(workDir = null) {
+    const servers = storageService
+      .getMcpServers(workDir)
+      .filter(
+        (server) =>
+          server.enabled !== false &&
+          (server.command || server.url) &&
+          (server.source !== "project" || server.trusted === true)
+      );
+    const result = [];
+    await Promise.allSettled(
+      servers.map(async (server) => {
+        try {
+          const client = this._getOrCreateClient(server);
+          await client.ensureConnected();
+          const res = await client.request("resources/list", {}, HANDSHAKE_TIMEOUT_MS);
+          result.push({
+            serverId: server.id,
+            source: server.source,
+            resources: Array.isArray(res?.resources) ? res.resources : [],
+          });
+        } catch (err) {
+          result.push({ serverId: server.id, source: server.source, resources: [], error: err.message });
+        }
+      })
+    );
+    return result;
+  }
+
+  async readResource(uri, workDir = null) {
+    const servers = storageService
+      .getMcpServers(workDir)
+      .filter(
+        (server) =>
+          server.enabled !== false &&
+          (server.command || server.url) &&
+          (server.source !== "project" || server.trusted === true)
+      );
+    for (const server of servers) {
+      try {
+        const client = this._getOrCreateClient(server);
+        await client.ensureConnected();
+        const res = await client.request("resources/read", { uri }, CALL_TIMEOUT_MS);
+        return { success: true, serverId: server.id, result: res };
+      } catch {
+        // 继续尝试其他服务器
+      }
+    }
+    return { success: false, error: `没有 MCP 服务器能够读取资源: ${uri}` };
+  }
+
+  async listPrompts(workDir = null) {
+    const servers = storageService
+      .getMcpServers(workDir)
+      .filter(
+        (server) =>
+          server.enabled !== false &&
+          (server.command || server.url) &&
+          (server.source !== "project" || server.trusted === true)
+      );
+    const result = [];
+    await Promise.allSettled(
+      servers.map(async (server) => {
+        try {
+          const client = this._getOrCreateClient(server);
+          await client.ensureConnected();
+          const res = await client.request("prompts/list", {}, HANDSHAKE_TIMEOUT_MS);
+          result.push({
+            serverId: server.id,
+            source: server.source,
+            prompts: Array.isArray(res?.prompts) ? res.prompts : [],
+          });
+        } catch (err) {
+          result.push({
+            serverId: server.id,
+            source: server.source,
+            prompts: [],
+            error: err.message,
+          });
+        }
+      })
+    );
+    return result;
+  }
+
+  async getPrompt(serverId, promptName, args = {}, workDir = null) {
+    if (!serverId || !promptName) {
+      return { success: false, error: "缺少 serverId 或 promptName" };
+    }
+    const server = storageService
+      .getMcpServers(workDir)
+      .find(
+        (item) =>
+          item.id === serverId &&
+          item.enabled !== false &&
+          (item.source !== "project" || item.trusted === true)
+      );
+    if (!server) {
+      return { success: false, error: `MCP 服务器不存在或未启用: ${serverId}` };
+    }
+    try {
+      const client = this._getOrCreateClient(server);
+      await client.ensureConnected();
+      const res = await client.request(
+        "prompts/get",
+        { name: promptName, arguments: args || {} },
+        CALL_TIMEOUT_MS
+      );
+      return {
+        success: true,
+        serverId,
+        result: res,
+        text: promptMessagesToText(res),
+      };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
   reloadClients() {
     this.closeAll();
   }
@@ -418,4 +621,5 @@ const mcpClientService = new McpClientManager();
 module.exports = {
   mcpClientService,
   MCP_TOOL_PREFIX,
+  promptMessagesToText,
 };

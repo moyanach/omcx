@@ -35,6 +35,7 @@ import { Message, useChatStore } from '../../stores/chatStore';
 import MarkdownContent, { ThinkingBlock } from '@/components/common/MarkdownContent';
 import CodeBlock, { DiffViewer, SplitDiffViewer } from '@/components/common/CodeBlock';
 import TodoListCard, { TodoItem } from '@/components/agent/TodoListCard';
+import BtwSelectionMenu, { BtwSelectionPayload } from '@/pages/chat/BtwSelectionMenu';
 import { parseMessageContent } from '@/lib/messageParser';
 import { isImageAttachment, classifyAttachment, formatFileSize } from '@/lib/chatAttachment';
 import Anser from 'anser';
@@ -63,6 +64,8 @@ interface Props {
   activeTodos?: TodoItem[];
   onCopy: (text: string) => void;
   onRetry: (msg: Message) => void;
+  /** 选中主会话文本后右键「旁路会话」：把选中内容作为只读引用带入旁路问答 */
+  onSideChatSelection?: (payload: BtwSelectionPayload) => void;
 }
 
 function getBaseName(p?: string) {
@@ -1945,9 +1948,83 @@ export const MessageList: React.FC<Props> = ({
   activeTodos = [],
   onCopy,
   onRetry,
+  onSideChatSelection,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
+
+  // ─── 选中文本 → 右键「旁路会话」 ───
+  const selectionCacheRef = useRef<{ text: string; messageId?: string; at: number } | null>(null);
+  const [selectionMenu, setSelectionMenu] = useState<{
+    x: number;
+    y: number;
+    text: string;
+    messageId?: string;
+  } | null>(null);
+
+  const captureSelection = useCallback((): { text: string; messageId?: string } | null => {
+    const container = scrollRef.current;
+    if (!container) return null;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+    const text = selection.toString().replace(/\r\n/g, '\n').trim();
+    if (!text) return null;
+
+    const range = selection.getRangeAt(0);
+    const common = range.commonAncestorContainer;
+    const node =
+      common.nodeType === Node.ELEMENT_NODE
+        ? (common as HTMLElement)
+        : common.parentElement;
+    if (!node || !container.contains(node)) return null;
+
+    // 跨消息选择时 commonAncestor 是滚动容器本身，此时不归属单条消息
+    const bubble = node.closest('[id^="msg-bubble-"]') as HTMLElement | null;
+    const messageId = bubble?.id.replace('msg-bubble-', '') || undefined;
+    return { text, messageId };
+  }, []);
+
+  const rememberSelection = useCallback(() => {
+    const captured = captureSelection();
+    if (captured) selectionCacheRef.current = { ...captured, at: Date.now() };
+  }, [captureSelection]);
+
+  const handleContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!onSideChatSelection) return;
+      const fresh = captureSelection();
+      const cached = selectionCacheRef.current;
+      const targetBubble = (event.target as HTMLElement)?.closest?.(
+        '[id^="msg-bubble-"]'
+      ) as HTMLElement | null;
+      const targetMessageId = targetBubble?.id.replace('msg-bubble-', '') || undefined;
+      // 部分平台右键会清空选区：5 秒内且仍落在同一消息上时复用缓存的选区
+      const usableCache =
+        cached && Date.now() - cached.at < 5000 && (!cached.messageId || cached.messageId === targetMessageId)
+          ? cached
+          : null;
+      const selection = fresh || usableCache;
+      if (!selection) return;
+
+      event.preventDefault();
+      selectionCacheRef.current = { ...selection, at: Date.now() };
+      setSelectionMenu({
+        x: event.clientX,
+        y: event.clientY,
+        text: selection.text,
+        messageId: selection.messageId,
+      });
+    },
+    [captureSelection, onSideChatSelection]
+  );
+
+  const handleSideChat = useCallback(
+    (payload: BtwSelectionPayload) => {
+      window.getSelection()?.removeAllRanges();
+      onSideChatSelection?.(payload);
+    },
+    [onSideChatSelection]
+  );
 
   // 智能防抢焦滚动：用户是否处于底部偏差范围内
   const [isPinnedToBottom, setIsPinnedToBottom] = useState(true);
@@ -2204,6 +2281,8 @@ export const MessageList: React.FC<Props> = ({
         ref={scrollRef}
         onScroll={handleScroll}
         onWheel={handleWheel}
+        onMouseUp={rememberSelection}
+        onContextMenu={handleContextMenu}
         className='flex-1 overflow-y-auto pl-6 pr-3 pt-2 pb-2.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
       >
         {(() => {
@@ -2280,6 +2359,18 @@ export const MessageList: React.FC<Props> = ({
           />
         )}
       </div>
+
+      {/* 2.5 选中文本后的自定义右键菜单（旁路会话 / 复制） */}
+      {selectionMenu && (
+        <BtwSelectionMenu
+          x={selectionMenu.x}
+          y={selectionMenu.y}
+          text={selectionMenu.text}
+          messageId={selectionMenu.messageId}
+          onClose={() => setSelectionMenu(null)}
+          onSideChat={handleSideChat}
+        />
+      )}
 
       {/* 3. 智能平滑回到底部悬浮小按钮 (当用户向上查看且离开底部时浮现) */}
       {showScrollBottomBtn && (

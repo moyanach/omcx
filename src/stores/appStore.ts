@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 export type View = "chat" | "settings";
-export type NavTab = "sessions" | "tools" | "workspaces" | "settings";
+export type NavTab = "sessions" | "tools" | "workspaces" | "insights" | "settings";
 export type ThemeMode = "light" | "dark" | "system";
 
 interface AppState {

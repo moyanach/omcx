@@ -25,6 +25,9 @@ import {
   ExternalLink,
   AlertCircle,
   ArrowUpCircle,
+  Type,
+  RotateCw,
+  Webhook,
 } from "lucide-react";
 import {
   loadTheme,
@@ -36,6 +39,16 @@ import {
   type ThemeMode,
   type AppearanceConfig,
 } from "../theme";
+import {
+  getFontSettings,
+  loadFontSettings,
+  resetFontSettings,
+  setFontSettings,
+  isMonospaceLike,
+  buildUiFontFamily,
+  buildTerminalFontFamily,
+  type FontSettings,
+} from "../lib/fontSettings";
 import { useAppStore } from "../stores/appStore";
 import { useChatStore } from "../stores/chatStore";
 
@@ -55,6 +68,12 @@ const PROVIDER_PRESETS: Record<
     baseUrl: "https://api.openai.com/v1",
     needKey: true,
     defaultContext: 128000,
+  },
+  anthropic: {
+    name: "Anthropic (Claude 原生协议)",
+    baseUrl: "https://api.anthropic.com",
+    needKey: true,
+    defaultContext: 200000,
   },
   siliconflow: {
     name: "硅基流动 (SiliconFlow)",
@@ -120,6 +139,9 @@ export interface ModelDraftRow {
   contextLimit: number;
   supportsVision: boolean;
   isManual: boolean;
+  maxOutputTokens?: number;
+  inputPrice?: number;
+  outputPrice?: number;
 }
 
 /**
@@ -240,6 +262,9 @@ const createEmptyRow = (defaultContext = 128000): ModelDraftRow => ({
   contextLimit: defaultContext,
   supportsVision: false,
   isManual: false,
+  maxOutputTokens: 8192,
+  inputPrice: 0,
+  outputPrice: 0,
 });
 
 const SettingsView: React.FC = () => {
@@ -487,6 +512,55 @@ const SettingsView: React.FC = () => {
   const [appearance, setAppearanceState] = useState<AppearanceConfig>(getAppearance());
   const { setTheme: setStoreTheme, setActiveNavTab } = useAppStore();
 
+  // 字体设置（界面字体 / 终端字体 / 终端字号）
+  const [fontSettings, setFontSettingsState] = useState<FontSettings>(getFontSettings());
+  const [systemFonts, setSystemFonts] = useState<string[]>([]);
+  const [fontsLoading, setFontsLoading] = useState(false);
+
+  // Hooks 管理（全局 + 当前会话项目级）
+  const settingsSessions = useChatStore((s) => s.sessions);
+  const settingsActiveSessionId = useChatStore((s) => s.activeSessionId);
+  const hooksWorkDir =
+    settingsSessions.find((s) => s.id === settingsActiveSessionId)?.workDir || "";
+  const [hooksInfo, setHooksInfo] = useState<any>(null);
+  const [hooksBusy, setHooksBusy] = useState(false);
+
+  const loadHooksInfo = async (workDir = hooksWorkDir) => {
+    if (!window.electronAPI?.getProjectHooks) return;
+    try {
+      const info = await window.electronAPI.getProjectHooks(workDir || null);
+      setHooksInfo(info);
+    } catch {
+      setHooksInfo(null);
+    }
+  };
+
+  const monospaceFonts = systemFonts.filter((f) => isMonospaceLike(f));
+  const otherFonts = systemFonts.filter((f) => !isMonospaceLike(f));
+  const nerdFonts = systemFonts.filter((f) =>
+    /nerd|\bNF\b|NF$|powerline/i.test(f)
+  );
+
+  const handleFontChange = async (patch: Partial<FontSettings>) => {
+    const next = await setFontSettings(patch);
+    setFontSettingsState(next);
+  };
+
+  const handleReloadSystemFonts = async (refresh = false) => {
+    if (!window.electronAPI?.getSystemFonts) return;
+    setFontsLoading(true);
+    try {
+      const result = await window.electronAPI.getSystemFonts(refresh);
+      const list = Array.isArray(result?.fonts) ? result.fonts : [];
+      setSystemFonts(list);
+      if (refresh) showToast(`已重新扫描系统字体，共 ${list.length} 款`);
+    } catch {
+      showToast("读取系统字体失败");
+    } finally {
+      setFontsLoading(false);
+    }
+  };
+
   const handleUpdateAppearance = async (patch: Partial<AppearanceConfig>) => {
     const next = { ...appearance, ...patch };
     setAppearanceState(next);
@@ -541,6 +615,9 @@ const SettingsView: React.FC = () => {
         contextLimit: model.context_limit || model.contextLimit || 128000,
         supportsVision: !!model.supports_vision,
         isManual: true,
+        maxOutputTokens: model.max_output_tokens || 8192,
+        inputPrice: model.input_price || 0,
+        outputPrice: model.output_price || 0,
       },
     ]);
   };
@@ -586,6 +663,7 @@ const SettingsView: React.FC = () => {
         const list = await window.electronAPI.apiGetModels({
           baseUrl: newModelBaseUrl.trim(),
           apiKey: newModelApiKey.trim(),
+          provider: newModelProvider,
         });
         if (Array.isArray(list) && list.length > 0) {
           setFetchedRemoteModels(list);
@@ -665,6 +743,9 @@ const SettingsView: React.FC = () => {
         apiKey: newModelApiKey.trim(),
         context_limit: row.contextLimit,
         supports_vision: row.supportsVision,
+        max_output_tokens: row.maxOutputTokens || 8192,
+        input_price: row.inputPrice || 0,
+        output_price: row.outputPrice || 0,
       };
       await window.electronAPI.dbAddModel(modelPayload as any);
     }
@@ -724,10 +805,19 @@ const SettingsView: React.FC = () => {
 
       const savedAppearance = await loadAppearance();
       setAppearanceState(savedAppearance);
+
+      const savedFonts = await loadFontSettings();
+      setFontSettingsState(savedFonts);
+      handleReloadSystemFonts(false);
+      loadHooksInfo();
     };
     loadConfigs();
     loadModels();
   }, []);
+
+  useEffect(() => {
+    loadHooksInfo(hooksWorkDir);
+  }, [hooksWorkDir]);
 
   const handleSelectPath = async () => {
     if (!window.electronAPI) return;
@@ -1149,6 +1239,61 @@ const SettingsView: React.FC = () => {
                                 </label>
                               </div>
                             </div>
+
+                            {/* 第 3 行：最大输出 Token 与成本计量 (原生 Anthropic 与成本看板使用) */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+                              <div className="space-y-1">
+                                <label className="text-xs font-medium text-neutral-300">
+                                  8. 单次最大输出 Tokens
+                                </label>
+                                <input
+                                  type="number"
+                                  min={256}
+                                  step={256}
+                                  value={row.maxOutputTokens ?? 8192}
+                                  onChange={(e) =>
+                                    updateRow(row.rowId, {
+                                      maxOutputTokens: Number(e.target.value) || 8192,
+                                    })
+                                  }
+                                  className="w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 font-mono"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-xs font-medium text-neutral-300">
+                                  9. 输入价格 ($/1M tokens)
+                                </label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step={0.01}
+                                  value={row.inputPrice ?? 0}
+                                  onChange={(e) =>
+                                    updateRow(row.rowId, {
+                                      inputPrice: Number(e.target.value) || 0,
+                                    })
+                                  }
+                                  className="w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 font-mono"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-xs font-medium text-neutral-300">
+                                  10. 输出价格 ($/1M tokens)
+                                </label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step={0.01}
+                                  value={row.outputPrice ?? 0}
+                                  onChange={(e) =>
+                                    updateRow(row.rowId, {
+                                      outputPrice: Number(e.target.value) || 0,
+                                    })
+                                  }
+                                  className="w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 font-mono"
+                                />
+                              </div>
+                            </div>
                           </div>
                         );
                       })}
@@ -1522,6 +1667,322 @@ const SettingsView: React.FC = () => {
                       </span>
                     </div>
                   )}
+                </div>
+
+                {/* 字体设置卡片：界面字体 / 终端字体 / 终端字号 */}
+                <div className="bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl p-6 shadow-sm space-y-5">
+                  <div className="flex items-center justify-between border-b border-[#282828] pb-3 gap-3">
+                    <div>
+                      <h3 className="text-xs font-bold text-neutral-100 tracking-wide flex items-center gap-2">
+                        <Type size={13} className="text-emerald-400" />
+                        <span>字体设置</span>
+                      </h3>
+                      <p className="text-[11px] text-neutral-500 mt-0.5">
+                        从系统已安装字体中选择界面与终端字体。终端图标（Powerline / Nerd Font 符号）需要所选字体包含对应字形，推荐使用等宽 Nerd Font
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleReloadSystemFonts(true)}
+                        disabled={fontsLoading}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#252525] hover:bg-[#303030] text-neutral-300 text-[11px] font-medium border border-[#353535] flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <RotateCw size={12} className={fontsLoading ? "animate-spin" : ""} />
+                        <span>{fontsLoading ? "扫描中…" : "重新扫描"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const next = await resetFontSettings();
+                          setFontSettingsState(next);
+                          showToast("已恢复默认字体设置");
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#252525] hover:bg-[#303030] text-neutral-300 text-[11px] font-medium border border-[#353535] flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <RotateCcw size={12} />
+                        <span>恢复默认</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* 界面字体 */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-neutral-200">界面字体</span>
+                        <span className="text-[10px] text-neutral-500">
+                          {systemFonts.length ? `已识别 ${systemFonts.length} 款系统字体` : "读取中…"}
+                        </span>
+                      </div>
+                      <select
+                        value={fontSettings.uiFamily}
+                        onChange={(e) => handleFontChange({ uiFamily: e.target.value })}
+                        className="w-full bg-[#171717] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 cursor-pointer"
+                      >
+                        <option value="">系统默认（Inter / 系统 UI 字体）</option>
+                        {fontSettings.uiFamily &&
+                          !systemFonts.includes(fontSettings.uiFamily) && (
+                            <option value={fontSettings.uiFamily}>
+                              {fontSettings.uiFamily}（当前）
+                            </option>
+                          )}
+                        {monospaceFonts.length > 0 && (
+                          <optgroup label="等宽 / 编程字体">
+                            {monospaceFonts.map((family) => (
+                              <option key={`ui-mono-${family}`} value={family}>
+                                {family}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {otherFonts.length > 0 && (
+                          <optgroup label="其他系统字体">
+                            {otherFonts.map((family) => (
+                              <option key={`ui-other-${family}`} value={family}>
+                                {family}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </select>
+                      <p
+                        className="text-[11px] text-neutral-500 truncate"
+                        style={{ fontFamily: buildUiFontFamily(fontSettings.uiFamily) }}
+                      >
+                        预览：OMCX Desktop · 自主工程研发工作台 · Agent 123
+                      </p>
+                    </div>
+
+                    {/* 终端字体 */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-neutral-200">终端字体</span>
+                        <span className="text-[10px] text-neutral-500">作用于集成 PTY 终端</span>
+                      </div>
+                      <select
+                        value={fontSettings.terminalFamily}
+                        onChange={(e) => handleFontChange({ terminalFamily: e.target.value })}
+                        className="w-full bg-[#171717] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-emerald-500 cursor-pointer"
+                      >
+                        <option value="">系统默认（SF Mono / Menlo 等）</option>
+                        {fontSettings.terminalFamily &&
+                          !systemFonts.includes(fontSettings.terminalFamily) && (
+                            <option value={fontSettings.terminalFamily}>
+                              {fontSettings.terminalFamily}（当前）
+                            </option>
+                          )}
+                        {nerdFonts.length > 0 && (
+                          <optgroup label="Nerd Font（终端图标完整，推荐）">
+                            {nerdFonts.map((family) => (
+                              <option key={`term-nerd-${family}`} value={family}>
+                                {family}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {monospaceFonts.length > 0 && (
+                          <optgroup label="等宽 / 编程字体（推荐）">
+                            {monospaceFonts.map((family) => (
+                              <option key={`term-mono-${family}`} value={family}>
+                                {family}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {otherFonts.length > 0 && (
+                          <optgroup label="其他系统字体">
+                            {otherFonts.map((family) => (
+                              <option key={`term-other-${family}`} value={family}>
+                                {family}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </select>
+                      <div className="rounded-xl bg-[#0e0e0e] border border-[#262626] px-3 py-2 overflow-hidden">
+                        <div
+                          className="text-[12px] text-neutral-200 truncate"
+                          style={{
+                            fontFamily: buildTerminalFontFamily(fontSettings.terminalFamily),
+                            fontSize: `${fontSettings.terminalFontSize}px`,
+                          }}
+                        >
+                          ➜ ~/omcx ❯ git status ✓ ● ▲ 󰂄 你好
+                        </div>
+                      </div>
+                      {nerdFonts.length > 0 && fontSettings.terminalFamily !== nerdFonts[0] && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleFontChange({ terminalFamily: nerdFonts[0] });
+                            showToast(`已应用 Nerd Font：${nerdFonts[0]}`);
+                          }}
+                          className="text-[11px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors cursor-pointer"
+                        >
+                          <CheckCircle2 size={12} />
+                          <span>检测到 Nerd Font：{nerdFonts[0]}，一键应用以显示终端图标</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 终端字号 */}
+                  <div className="pt-2 border-t border-[#262626] space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-neutral-200">终端字号</span>
+                      <span className="text-[11px] font-mono text-emerald-400">
+                        {fontSettings.terminalFontSize}px
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={9}
+                      max={24}
+                      step={1}
+                      value={fontSettings.terminalFontSize}
+                      onChange={(e) =>
+                        handleFontChange({ terminalFontSize: Number(e.target.value) })
+                      }
+                      className="w-full accent-emerald-500 cursor-pointer"
+                    />
+                    <div className="flex justify-between text-[10px] text-neutral-500">
+                      <span>9px (紧凑)</span>
+                      <span>12px (默认)</span>
+                      <span>24px (大字号)</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[#171717] border border-[#2b2b2b] text-[11px] text-neutral-400 leading-relaxed">
+                    <Sparkles size={13} className="flex-shrink-0 mt-0.5 text-emerald-400" />
+                    <span>
+                      终端提示符中的 Nerd Font 私有区图标无法由系统普通字体渲染，会显示为方块。安装并选择
+                      <span className="text-neutral-200 font-semibold"> MesloLGS NF / JetBrainsMono Nerd Font / Hack Nerd Font </span>
+                      后即可正常显示；普通符号已自动回退到 Apple Symbols 与 Apple Color Emoji。
+                    </span>
+                  </div>
+                </div>
+
+                {/* Hooks 生命周期钩子 */}
+                <div className="bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl p-6 shadow-sm space-y-4">
+                  <div className="flex items-center justify-between border-b border-[#282828] pb-3 gap-3">
+                    <div>
+                      <h3 className="text-xs font-bold text-neutral-100 tracking-wide flex items-center gap-2">
+                        <Webhook size={13} className="text-sky-400" />
+                        <span>Hooks（Agent 生命周期钩子）</span>
+                      </h3>
+                      <p className="text-[11px] text-neutral-500 mt-0.5">
+                        在 UserPromptSubmit / PreToolUse / PostToolUse / Stop 阶段执行外部命令。命令通过 stdin 接收 JSON；退出码 0 继续、2 阻断，或输出
+                        <code className="mx-1 font-mono text-neutral-400">{`{"decision":"block","reason":"..."}`}</code>
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const result = await window.electronAPI?.createHooksTemplate?.();
+                          if (result?.filePath) {
+                            window.electronAPI?.showInFolder?.(result.filePath);
+                            showToast("已生成全局 hooks.json 模板");
+                            loadHooksInfo();
+                          }
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#252525] hover:bg-[#303030] text-neutral-300 text-[11px] font-medium border border-[#353535] flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <FolderOpen size={12} />
+                        <span>打开配置</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => loadHooksInfo()}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#252525] hover:bg-[#303030] text-neutral-300 text-[11px] font-medium border border-[#353535] flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <RefreshCw size={12} />
+                        <span>刷新</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl bg-[#171717] border border-[#2b2b2b] cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={hooksInfo?.enabled !== false}
+                      onChange={async (e) => {
+                        const next = e.target.checked;
+                        await window.electronAPI?.setConfig?.(
+                          "hooks_enabled",
+                          next ? "true" : "false"
+                        );
+                        setHooksInfo((prev: any) => (prev ? { ...prev, enabled: next } : prev));
+                        showToast(next ? "已启用 Hooks" : "已禁用全部 Hooks");
+                      }}
+                      className="mt-0.5 accent-sky-500 cursor-pointer"
+                    />
+                    <span className="flex flex-col gap-0.5">
+                      <span className="text-xs font-medium text-neutral-200">启用 Hooks 执行引擎</span>
+                      <span className="text-[11px] text-neutral-500">
+                        全局配置：{hooksInfo?.globalPath || "~/.omcx/hooks.json"}
+                      </span>
+                    </span>
+                  </label>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"].map((event) => (
+                      <div
+                        key={event}
+                        className="rounded-xl bg-[#171717] border border-[#2b2b2b] px-3 py-2"
+                      >
+                        <div className="text-[10px] font-mono text-neutral-400 truncate">{event}</div>
+                        <div className="text-lg font-semibold text-neutral-100 font-mono">
+                          {hooksInfo?.counts?.[event] ?? 0}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="rounded-xl bg-[#171717] border border-[#2b2b2b] p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-semibold text-neutral-200">项目级 Hooks</div>
+                        <div className="text-[10px] font-mono text-neutral-500 truncate">
+                          {hooksWorkDir
+                            ? hooksInfo?.projectPath || `${hooksWorkDir}/.omcx/hooks.json`
+                            : "当前没有绑定工作目录的会话"}
+                        </div>
+                      </div>
+                      {hooksWorkDir && hooksInfo?.hasProjectHooks && (
+                        <label className="flex items-center gap-2 text-[11px] text-neutral-300 cursor-pointer select-none flex-shrink-0">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(hooksInfo?.projectTrusted)}
+                            disabled={hooksBusy}
+                            onChange={async (e) => {
+                              setHooksBusy(true);
+                              try {
+                                const result = await window.electronAPI?.setProjectHooksTrust?.(
+                                  hooksWorkDir,
+                                  e.target.checked
+                                );
+                                if (result?.success) {
+                                  showToast(
+                                    e.target.checked ? "已信任并启用项目 Hooks" : "已撤销项目 Hooks 信任"
+                                  );
+                                }
+                                await loadHooksInfo();
+                              } finally {
+                                setHooksBusy(false);
+                              }
+                            }}
+                            className="accent-emerald-500 cursor-pointer"
+                          />
+                          信任并启用
+                        </label>
+                      )}
+                    </div>
+                    <p className="text-[10.5px] text-neutral-500 leading-relaxed">
+                      项目 hooks 会执行仓库内声明的命令，默认完全禁用；仅在你确认来源可信后手动开启。配置内容变更不会自动重新授权。
+                    </p>
+                  </div>
                 </div>
 
                 {/* 最大工具调用轮次 (Max Tool Rounds) 设置卡片 */}

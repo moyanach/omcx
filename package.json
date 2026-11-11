@@ -1,18 +1,22 @@
 {
   "name": "omcx-desktop",
-  "version": "2.1.7",
+  "version": "2.1.8",
   "description": "OMCX - Professional AI Coding Agent Desktop Client",
   "main": "main.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "pack": "vite build && electron-builder --mac",
-    "start": "electron ."
+    "start": "electron .",
+    "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper node_modules/node-pty/prebuilds/darwin-x64/spawn-helper 2>/dev/null || true"
   },
   "dependencies": {
     "@langchain/community": "^1.1.29",
     "@langchain/core": "^1.1.48",
     "@langchain/openai": "^1.4.7",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
     "anser": "^2.3.5",
     "better-sqlite3": "^9.6.0",
     "cheerio": "^1.2.0",
@@ -23,6 +27,7 @@
     "lucide-react": "^0.344.0",
     "marked": "^18.0.5",
     "mermaid": "^12.3.0",
+    "node-pty": "^1.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",
@@ -61,6 +66,9 @@
       "services/**/*",
       "utils/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**"
     ],
     "mac": {
       "icon": "build/icon.icns",

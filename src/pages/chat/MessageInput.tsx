@@ -27,6 +27,9 @@ import {
 } from "lucide-react";
 import { useChatStore, type PermissionMode, type ReasoningEffort, type QueuedPrompt } from "@/stores/chatStore";
 import MentionPopover, { type MentionPosition } from "@/pages/chat/MentionPopover";
+import SlashCommandPopover, {
+  type SlashCommandItem,
+} from "@/pages/chat/SlashCommandPopover";
 import PromptQueueBar from "@/pages/chat/PromptQueueBar";
 import {
   MAX_CHAT_ATTACHMENTS,
@@ -291,6 +294,39 @@ const MessageInput: React.FC<Props> = ({
     listMaxHeight: 260,
   });
 
+  // 斜杠命令补全
+  const [slash, setSlash] = useState<{ start: number; query: string } | null>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashCommands, setSlashCommands] = useState<SlashCommandItem[]>([]);
+
+  const filteredSlashCommands = useMemo(() => {
+    const query = (slash?.query || "").toLowerCase();
+    return slashCommands
+      .filter(
+        (cmd) =>
+          !query ||
+          cmd.name.toLowerCase().includes(query) ||
+          (cmd.description || "").toLowerCase().includes(query)
+      )
+      .slice(0, 12);
+  }, [slash?.query, slashCommands]);
+
+  useEffect(() => {
+    let alive = true;
+    if (!window.electronAPI?.getSlashCommands) return;
+    window.electronAPI
+      .getSlashCommands(workDir || null)
+      .then((list: SlashCommandItem[]) => {
+        if (alive) setSlashCommands(Array.isArray(list) ? list : []);
+      })
+      .catch(() => {
+        if (alive) setSlashCommands([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [workDir]);
+
   // 匹配绑定的多目录工作空间项目名称
   const matchedWs = workspaces.find((w) =>
     w.folders.some((f) => f.path === workDir) || w.id === workDir
@@ -489,18 +525,67 @@ const MessageInput: React.FC<Props> = ({
 
     const caret = el.selectionStart ?? nextValue.length;
     const match = nextValue.slice(0, caret).match(MENTION_TRIGGER);
+    const slashMatch = nextValue.slice(0, caret).match(/^\/([a-zA-Z0-9_-]*)$/);
+
+    if (slashMatch) {
+      setSlash({ start: 0, query: slashMatch[1] });
+      setSlashIndex(0);
+      setMention(null);
+      updateMentionPosition(el, caret);
+    } else if (slash) {
+      setSlash(null);
+    }
 
     if (match) {
       const query = match[1];
       setMention({ start: caret - query.length - 1, query });
       setMentionIndex(0);
+      setSlash(null);
       updateMentionPosition(el, caret);
     } else if (mention) {
       setMention(null);
     }
   };
 
+  const selectSlashCommand = (item: SlashCommandItem) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const caret = el.selectionStart ?? value.length;
+    const inserted = `/${item.name} `;
+    const nextValue = inserted + value.slice(caret);
+    onChange(nextValue);
+    setSlash(null);
+    setSlashIndex(0);
+    requestAnimationFrame(() => {
+      const node = textareaRef.current;
+      if (!node) return;
+      node.focus();
+      node.setSelectionRange(inserted.length, inserted.length);
+      resizeTextarea(node);
+    });
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (slash && filteredSlashCommands.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((i) => (i + 1) % filteredSlashCommands.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex(
+          (i) => (i - 1 + filteredSlashCommands.length) % filteredSlashCommands.length
+        );
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        selectSlashCommand(filteredSlashCommands[slashIndex]);
+        return;
+      }
+    }
+
     if (mention && mentionItems.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -529,9 +614,10 @@ const MessageInput: React.FC<Props> = ({
       return;
     }
 
-    if (e.key === "Escape" && mention) {
+    if (e.key === "Escape" && (mention || slash)) {
       e.preventDefault();
       setMention(null);
+      setSlash(null);
       return;
     }
 
@@ -1092,6 +1178,17 @@ const MessageInput: React.FC<Props> = ({
           </div>
         </div>
       </div>
+
+      {slash && (
+        <SlashCommandPopover
+          items={filteredSlashCommands}
+          activeIndex={Math.min(slashIndex, Math.max(0, filteredSlashCommands.length - 1))}
+          query={slash.query}
+          position={mentionPos}
+          onSelect={selectSlashCommand}
+          onHover={setSlashIndex}
+        />
+      )}
 
       {mention && (mentionItems.length > 0 || !mention.query) && (
         <MentionPopover

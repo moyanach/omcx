@@ -13,6 +13,7 @@ import {
   Settings,
   Check,
   Loader2,
+  BarChart3,
 } from "lucide-react";
 import { useChatStore, type Session } from "@/stores/chatStore";
 import { useAppStore } from "@/stores/appStore";
@@ -333,7 +334,7 @@ const LeftSidebar: React.FC = () => {
     );
   };
 
-  const navClass = (tab: "workspaces" | "tools") =>
+  const navClass = (tab: "workspaces" | "tools" | "insights") =>
     `w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-colors ${
       activeNavTab === tab
         ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)]"
@@ -365,6 +366,11 @@ const LeftSidebar: React.FC = () => {
         <button onClick={() => setActiveNavTab("tools")} className={navClass("tools")}>
           <Wrench size={15} />
           <span className="text-xs font-medium">工具与技能</span>
+        </button>
+
+        <button onClick={() => setActiveNavTab("insights")} className={navClass("insights")}>
+          <BarChart3 size={15} />
+          <span className="text-xs font-medium">用量与评测</span>
         </button>
       </div>
 

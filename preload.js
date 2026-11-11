@@ -57,6 +57,39 @@ ipcRenderer.on("chat-stream-event", (event, envelope) => {
   }
 });
 
+// ─── 旁路问答独立流式总线 (btw-stream-event) ───────────────
+// 与主对话总线完全隔离：按 btwId 路由，旧 run 的迟到事件不会污染新请求。
+const activeBtwRequests = new Map();
+
+ipcRenderer.on("btw-stream-event", (event, envelope) => {
+  if (!envelope || !envelope.btwId) return;
+  const entry = activeBtwRequests.get(envelope.btwId);
+  if (!entry) return;
+  if (envelope.runId && entry.runId !== envelope.runId) return;
+
+  const callbacks = entry.callbacks || {};
+  switch (envelope.type) {
+    case "data":
+      callbacks.onData?.(envelope.data);
+      break;
+    case "tool_status":
+      callbacks.onToolStatus?.(envelope.data);
+      break;
+    case "end":
+      if (activeBtwRequests.get(envelope.btwId) === entry) {
+        activeBtwRequests.delete(envelope.btwId);
+      }
+      callbacks.onEnd?.(envelope.data);
+      break;
+    case "error":
+      if (activeBtwRequests.get(envelope.btwId) === entry) {
+        activeBtwRequests.delete(envelope.btwId);
+      }
+      callbacks.onError?.(envelope.data);
+      break;
+  }
+});
+
 contextBridge.exposeInMainWorld("electronAPI", {
   // ─── 文件系统与工作区 ──────────────────────────────
   showInFolder: (filePath) => ipcRenderer.send("show-in-folder", filePath),
@@ -66,6 +99,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   dialogSelectWorkDirectory: () => ipcRenderer.invoke("dialog-select-work-directory"),
   getConfig: (key) => ipcRenderer.invoke("get-config", key),
   setConfig: (key, value) => ipcRenderer.invoke("set-config", key, value),
+  getSystemFonts: (refresh = false) => ipcRenderer.invoke("get-system-fonts", { refresh }),
   getUserInfo: () => ipcRenderer.invoke("get-user-info"),
 
   // ─── 模型配置 ──────────────────────────────────────
@@ -100,10 +134,38 @@ contextBridge.exposeInMainWorld("electronAPI", {
   trustProjectMcp: (workDir, trusted) =>
     ipcRenderer.invoke("trust-project-mcp", { workDir, trusted }),
   toggleMcpServer: (id, enabled) => ipcRenderer.invoke("toggle-mcp-server", { id, enabled }),
+  getMcpTools: (serverId, workDir) => ipcRenderer.invoke("get-mcp-tools", { serverId, workDir }),
+  toggleMcpTool: (serverId, toolName, enabled, workDir) =>
+    ipcRenderer.invoke("toggle-mcp-tool", { serverId, toolName, enabled, workDir }),
+  listMcpResources: (workDir) => ipcRenderer.invoke("list-mcp-resources", workDir),
+  readMcpResource: (uri, workDir) => ipcRenderer.invoke("read-mcp-resource", { uri, workDir }),
+  listMcpPrompts: (workDir) => ipcRenderer.invoke("list-mcp-prompts", { workDir }),
+  getMcpPrompt: (serverId, promptName, args, workDir) =>
+    ipcRenderer.invoke("get-mcp-prompt", { serverId, promptName, args, workDir }),
+  getMcpOAuthStatus: (workDir) => ipcRenderer.invoke("mcp-oauth-status", { workDir }),
+  authorizeMcpOAuth: (serverId, workDir) =>
+    ipcRenderer.invoke("mcp-oauth-authorize", { serverId, workDir }),
+  logoutMcpOAuth: (serverId, workDir) =>
+    ipcRenderer.invoke("mcp-oauth-logout", { serverId, workDir }),
   getSkills: (workDir) => ipcRenderer.invoke("get-skills", workDir),
   getSubagents: (workDir) => ipcRenderer.invoke("get-subagents", workDir),
   getMemories: (workDir) => ipcRenderer.invoke("get-memories", workDir),
   getSessionOutputs: (sessionId) => ipcRenderer.invoke("get-session-outputs", sessionId),
+  getSessionCheckpoints: (sessionId) => ipcRenderer.invoke("get-session-checkpoints", sessionId),
+  getSessionCheckpoint: (sessionId, checkpointId) =>
+    ipcRenderer.invoke("get-session-checkpoint", { sessionId, checkpointId }),
+  restoreCheckpoint: (sessionId, checkpointId) =>
+    ipcRenderer.invoke("restore-checkpoint", { sessionId, checkpointId }),
+  deleteCheckpoint: (sessionId, checkpointId) =>
+    ipcRenderer.invoke("delete-checkpoint", { sessionId, checkpointId }),
+  getRepoIndexStats: (workDir, refresh = false) =>
+    ipcRenderer.invoke("get-repo-index-stats", { workDir, refresh }),
+  getRepoMap: (workDir, maxChars = 6000, refresh = false) =>
+    ipcRenderer.invoke("get-repo-map", { workDir, maxChars, refresh }),
+  searchRepoSymbols: (workDir, query, limit = 40) =>
+    ipcRenderer.invoke("search-repo-symbols", { workDir, query, limit }),
+  getRepoWiki: (workDir) => ipcRenderer.invoke("get-repo-wiki", workDir),
+  generateRepoWiki: (workDir, model) => ipcRenderer.invoke("generate-repo-wiki", { workDir, model }),
   getContextMetrics: (params) => ipcRenderer.invoke("get-context-metrics", params),
   getWorkspaceGitStatus: (workDir) => ipcRenderer.invoke("get-workspace-git-status", workDir),
   getWorkspaceBranches: (workDir) => ipcRenderer.invoke("workspace-get-branches", workDir),
@@ -113,6 +175,70 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("workspace-git-diff", { workDir, filePath }),
   commitWorkspaceChanges: (workDir, message) =>
     ipcRenderer.invoke("workspace-git-commit", { workDir, message }),
+  getGitFileHunks: (workDir, filePath, staged = false) =>
+    ipcRenderer.invoke("git-get-file-hunks", { workDir, filePath, staged }),
+  applyGitHunks: (workDir, filePath, hunkIds, options = {}) =>
+    ipcRenderer.invoke("git-apply-hunks", {
+      workDir,
+      filePath,
+      hunkIds,
+      staged: Boolean(options.staged),
+      reverse: Boolean(options.reverse),
+      target: options.target,
+    }),
+  discardGitHunks: (workDir, filePath, hunkIds) =>
+    ipcRenderer.invoke("git-discard-hunks", { workDir, filePath, hunkIds }),
+  discardGitFile: (workDir, filePath, staged = false) =>
+    ipcRenderer.invoke("git-discard-file", { workDir, filePath, staged }),
+  stageGitFile: (workDir, filePath) =>
+    ipcRenderer.invoke("git-stage-file", { workDir, filePath }),
+  unstageGitFile: (workDir, filePath) =>
+    ipcRenderer.invoke("git-unstage-file", { workDir, filePath }),
+  stageAllGitChanges: (workDir) => ipcRenderer.invoke("git-stage-all", { workDir }),
+  createGitPullRequest: (params) => ipcRenderer.invoke("git-create-pr", params),
+  listGitWorktrees: (workDir) => ipcRenderer.invoke("git-worktree-list", { workDir }),
+  createGitWorktree: (params) => ipcRenderer.invoke("git-worktree-create", params),
+  removeGitWorktree: (workDir, targetPath, force = false) =>
+    ipcRenderer.invoke("git-worktree-remove", { workDir, targetPath, force }),
+
+  // ─── P1: 斜杠命令 / 诊断 / Hooks / 会话导出 ──────────
+  getSlashCommands: (workDir) => ipcRenderer.invoke("get-slash-commands", { workDir }),
+  listSpecs: (workDir) => ipcRenderer.invoke("spec-list", { workDir }),
+  readSpec: (workDir, id) => ipcRenderer.invoke("spec-read", { workDir, id }),
+  saveSpec: (payload) => ipcRenderer.invoke("spec-save", payload),
+  updateSpecStatus: (workDir, id, status) =>
+    ipcRenderer.invoke("spec-update-status", { workDir, id, status }),
+  deleteSpec: (workDir, id) => ipcRenderer.invoke("spec-delete", { workDir, id }),
+  getProjectTasks: (workDir) => ipcRenderer.invoke("get-project-tasks", { workDir }),
+  runProjectTask: (workDir, taskId, timeoutMs) =>
+    ipcRenderer.invoke("run-project-task", { workDir, taskId, timeoutMs }),
+  getProjectHooks: (workDir) => ipcRenderer.invoke("get-project-hooks", { workDir }),
+  createHooksTemplate: () => ipcRenderer.invoke("create-hooks-template"),
+  setProjectHooksTrust: (workDir, trusted) =>
+    ipcRenderer.invoke("set-project-hooks-trust", { workDir, trusted }),
+  forkSession: (sessionId, upToMessageId) =>
+    ipcRenderer.invoke("fork-session", { sessionId, upToMessageId }),
+  exportSession: (sessionId) => ipcRenderer.invoke("export-session", { sessionId }),
+
+  // ─── P2: 运行观测 / 评测 / 浏览器自动化 ───────────────
+  telemetryGetStats: (params = {}) => ipcRenderer.invoke("telemetry-get-stats", params),
+  telemetryListRuns: (params = {}) => ipcRenderer.invoke("telemetry-list-runs", params),
+  telemetryGetRun: (id) => ipcRenderer.invoke("telemetry-get-run", { id }),
+  telemetryClear: () => ipcRenderer.invoke("telemetry-clear"),
+  listEvals: () => ipcRenderer.invoke("evals-list"),
+  runEval: (evalId, model, maxRounds) =>
+    ipcRenderer.invoke("eval-run", { evalId, model, maxRounds }),
+  runAllEvals: (model, ids, maxRounds) =>
+    ipcRenderer.invoke("eval-run-all", { model, ids, maxRounds }),
+  browserAutoOpen: (url) => ipcRenderer.invoke("browser-auto-open", { url }),
+  browserAutoInteract: (payload) => ipcRenderer.invoke("browser-auto-interact", payload),
+  browserAutoSnapshot: (payload = {}) => ipcRenderer.invoke("browser-auto-snapshot", payload),
+  browserAutoSaveBaseline: (payload = {}) =>
+    ipcRenderer.invoke("browser-auto-save-baseline", payload),
+  browserAutoState: () => ipcRenderer.invoke("browser-auto-state"),
+  browserAutoBack: () => ipcRenderer.invoke("browser-auto-back"),
+  browserAutoForward: () => ipcRenderer.invoke("browser-auto-forward"),
+  browserAutoClose: () => ipcRenderer.invoke("browser-auto-close"),
   listWorkspaceDir: (workDir, dirPath) =>
     ipcRenderer.invoke("workspace-list-dir", { workDir, dirPath }),
   readWorkspaceFile: (workDir, filePath, maxChars) =>
@@ -135,6 +261,24 @@ contextBridge.exposeInMainWorld("electronAPI", {
       });
   },
   killTerminalCommand: (cmdId) => ipcRenderer.invoke("terminal-kill-command", cmdId),
+
+  // ─── 原生 PTY 交互式终端 ──────────────────────────
+  createTerminalSession: (params) => ipcRenderer.invoke("terminal-create", params),
+  writeTerminalSession: (terminalId, data) =>
+    ipcRenderer.send("terminal-input", { terminalId, data }),
+  resizeTerminalSession: (terminalId, cols, rows) =>
+    ipcRenderer.invoke("terminal-resize", { terminalId, cols, rows }),
+  disposeTerminalSession: (terminalId) => ipcRenderer.invoke("terminal-dispose", terminalId),
+  onTerminalPtyData: (callback) => {
+    const handler = (event, payload) => callback(payload);
+    ipcRenderer.on("terminal-pty-data", handler);
+    return () => ipcRenderer.removeListener("terminal-pty-data", handler);
+  },
+  onTerminalPtyExit: (callback) => {
+    const handler = (event, payload) => callback(payload);
+    ipcRenderer.on("terminal-pty-exit", handler);
+    return () => ipcRenderer.removeListener("terminal-pty-exit", handler);
+  },
   getWorkspaceFileIndex: (workDir) => ipcRenderer.invoke("get-workspace-file-index", workDir),
   getRecentProjects: () => ipcRenderer.invoke("get-recent-projects"),
   addRecentProject: (proj) => ipcRenderer.invoke("add-recent-project", proj),
@@ -209,6 +353,28 @@ contextBridge.exposeInMainWorld("electronAPI", {
       reasoningEffort,
     });
   },
+
+  // ─── 旁路问答 (/btw)：独立请求与取消，不写会话、不打断主任务 ──
+  btwChat: (payload = {}, callbacks = {}) => {
+    const btwId = payload.btwId || `btw_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const runId = payload.runId || `bwrun_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    activeBtwRequests.set(btwId, { runId, callbacks });
+    return ipcRenderer
+      .invoke("btw-request", { ...payload, btwId, runId })
+      .then((res) => {
+        // 主进程在启动阶段直接拒绝（如缺少 API Key）时不会产生任何流式事件，需主动释放监听表
+        if (res && res.ok === false) activeBtwRequests.delete(btwId);
+        return res;
+      })
+      .catch((err) => {
+        activeBtwRequests.delete(btwId);
+        try {
+          callbacks.onError?.({ message: err?.message || String(err) });
+        } catch {}
+        return { ok: false, error: err?.message || String(err) };
+      });
+  },
+  cancelBtw: (btwId) => ipcRenderer.invoke("btw-cancel", { btwId }),
 
   // ─── 纠偏注入被拒绝监听（会话已结束时回退为排队）────
   onSteerRejected: (callback) => {

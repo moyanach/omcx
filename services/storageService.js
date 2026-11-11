@@ -479,6 +479,11 @@ function addModel(model) {
     api_key: model.api_key || "",
     supports_vision: model.supports_vision ?? inferVisionSupport(model.model_id || model.id),
     context_limit: Number(model.context_limit) || 128000,
+    max_output_tokens: Number(model.max_output_tokens) || 8192,
+    input_price: Number(model.input_price) || 0,
+    output_price: Number(model.output_price) || 0,
+    cache_read_price: Number(model.cache_read_price) || 0,
+    cache_write_price: Number(model.cache_write_price) || 0,
   };
 
   if (idx >= 0) {
@@ -1036,6 +1041,31 @@ function setProjectMcpTrust(workDir, trusted) {
   return { success: true, trusted: Boolean(trusted) };
 }
 
+// ─────────────────────────────────────────────────────────────
+// 项目级 Hooks 信任（与项目 MCP 一致：显式信任后方可执行项目 hooks）
+// ─────────────────────────────────────────────────────────────
+
+function isProjectHooksTrusted(workDir) {
+  if (!workDir || typeof workDir !== "string" || !workDir.trim()) return false;
+  const map = getConfig("hooks_project_trust");
+  return Boolean(map && map[path.resolve(workDir.trim())] === true);
+}
+
+function setProjectHooksTrust(workDir, trusted) {
+  if (!workDir || typeof workDir !== "string" || !workDir.trim()) {
+    return { success: false, error: "缺少工作目录" };
+  }
+  const map = { ...(getConfig("hooks_project_trust") || {}) };
+  const key = path.resolve(workDir.trim());
+  if (trusted) {
+    map[key] = true;
+  } else {
+    delete map[key];
+  }
+  setConfig("hooks_project_trust", map);
+  return { success: true, trusted: Boolean(trusted) };
+}
+
 function getMcpServers(workDir = null) {
   let globalServers = {};
   if (fs.existsSync(MCP_FILE)) {
@@ -1058,6 +1088,13 @@ function getMcpServers(workDir = null) {
       command: item.command,
       args: item.args || [],
       env: item.env || {},
+      url: item.url,
+      transport: item.transport || (item.url ? "http" : "stdio"),
+      headers: item.headers || {},
+      authToken: item.authToken || "",
+      oauth: item.oauth || null,
+      auth: item.auth && typeof item.auth === "object" ? item.auth : null,
+      disabledTools: Array.isArray(item.disabledTools) ? item.disabledTools : [],
       description: item.description || "",
       enabled: item.enabled !== false,
       source: isProject ? "project" : "global",
@@ -1085,6 +1122,55 @@ function saveGlobalMcpServers(serversMap) {
     const clean = {};
     if (typeof item.command === "string") clean.command = item.command;
     if (Array.isArray(item.args)) clean.args = item.args;
+    if (typeof item.url === "string" && item.url.trim()) clean.url = item.url.trim();
+    if (typeof item.transport === "string") clean.transport = item.transport;
+    if (item.headers && typeof item.headers === "object") {
+      clean.headers = Object.fromEntries(
+        Object.entries(item.headers).filter(
+          ([key, value]) => key && (typeof value === "string" || typeof value === "number")
+        )
+      );
+    }
+    if (typeof item.authToken === "string" && item.authToken.trim()) {
+      clean.authToken = item.authToken.trim();
+    }
+    // OAuth 配置（布尔开关或包含 endpoints / clientId / scopes 的对象）
+    if (typeof item.oauth === "boolean") {
+      clean.oauth = item.oauth;
+    } else if (item.oauth && typeof item.oauth === "object" && !Array.isArray(item.oauth)) {
+      const oauthKeys = [
+        "scopes",
+        "clientId",
+        "clientSecret",
+        "clientAuthMethod",
+        "authorizationEndpoint",
+        "tokenEndpoint",
+        "registrationEndpoint",
+        "issuer",
+        "redirectPort",
+      ];
+      clean.oauth = Object.fromEntries(
+        Object.entries(item.oauth).filter(([key, value]) => {
+          if (!oauthKeys.includes(key)) return false;
+          return (
+            typeof value === "string" ||
+            typeof value === "number" ||
+            typeof value === "boolean" ||
+            Array.isArray(value)
+          );
+        })
+      );
+    }
+    if (item.auth && typeof item.auth === "object" && !Array.isArray(item.auth)) {
+      if (typeof item.auth.type === "string") {
+        clean.auth = { type: item.auth.type };
+      }
+    }
+    if (Array.isArray(item.disabledTools)) {
+      clean.disabledTools = item.disabledTools
+        .map((name) => String(name || "").trim())
+        .filter(Boolean);
+    }
     const incomingEnv = item.env && typeof item.env === "object" ? item.env : null;
     if (incomingEnv && Object.keys(incomingEnv).length > 0) {
       clean.env = incomingEnv;
@@ -1113,6 +1199,8 @@ function parseSkillMarkdown(filePath, scope = "global", defaultName = null) {
     let name = defaultName || (isSkillIndex ? parentDirName : filename.replace(/\.md$/i, ""));
     let description = "";
     let tools = [];
+    let allowedTools = [];
+    let declaredScripts = [];
     let version = "";
     let promptBody = content;
 
@@ -1138,6 +1226,68 @@ function parseSkillMarkdown(filePath, scope = "global", defaultName = null) {
           .map((t) => t.trim().replace(/^['"]|['"]$/g, ""))
           .filter(Boolean);
       }
+
+      const allowedToolsMatch = yaml.match(/^allowed-tools:\s*(?:\[(.*?)\]|(.+))$/m);
+      if (allowedToolsMatch) {
+        const rawAllowed =
+          allowedToolsMatch[1] !== undefined ? allowedToolsMatch[1] : allowedToolsMatch[2];
+        allowedTools = (rawAllowed || "")
+          .split(",")
+          .map((t) => t.trim().replace(/^['"]|['"]$/g, ""))
+          .filter(Boolean);
+      }
+
+      const scriptsMatch = yaml.match(/^scripts:\s*(?:\[(.*?)\]|(.+))$/m);
+      if (scriptsMatch) {
+        const rawScripts = scriptsMatch[1] !== undefined ? scriptsMatch[1] : scriptsMatch[2];
+        declaredScripts = (rawScripts || "")
+          .split(",")
+          .map((t) => t.trim().replace(/^['"]|['"]$/g, ""))
+          .filter(Boolean);
+      }
+    }
+
+    // 扫描技能目录下的 scripts/ 脚本，供 run_skill_script 工具安全执行
+    const skillDir = path.dirname(filePath);
+    let scripts = [];
+    const scriptsDir = path.join(skillDir, "scripts");
+    if (fs.existsSync(scriptsDir)) {
+      try {
+        const entries = fs.readdirSync(scriptsDir, { withFileTypes: true });
+        for (const entry of entries.slice(0, 60)) {
+          if (!entry.isFile() || entry.name.startsWith(".")) continue;
+          const ext = path.extname(entry.name).toLowerCase();
+          if (![".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".rb"].includes(ext)) {
+            continue;
+          }
+          scripts.push({
+            name: entry.name,
+            path: path.join(scriptsDir, entry.name),
+            ext,
+          });
+        }
+      } catch {}
+    }
+    if (declaredScripts.length > 0) {
+      scripts = scripts.filter((s) =>
+        declaredScripts.some((declared) => declared === s.name || declared === path.basename(declared))
+      );
+      if (scripts.length === 0) {
+        for (const declared of declaredScripts) {
+          const candidate = path.resolve(skillDir, declared);
+          if (
+            candidate.startsWith(skillDir + path.sep) &&
+            fs.existsSync(candidate) &&
+            fs.statSync(candidate).isFile()
+          ) {
+            scripts.push({
+              name: path.basename(candidate),
+              path: candidate,
+              ext: path.extname(candidate).toLowerCase(),
+            });
+          }
+        }
+      }
     }
 
     return {
@@ -1145,6 +1295,9 @@ function parseSkillMarkdown(filePath, scope = "global", defaultName = null) {
       name,
       description,
       tools,
+      allowedTools,
+      scripts,
+      dir: skillDir,
       prompt: promptBody,
       scope,
       filePath,
@@ -1368,6 +1521,8 @@ module.exports = {
   saveGlobalMcpServers,
   setProjectMcpTrust,
   isProjectMcpTrusted,
+  isProjectHooksTrusted,
+  setProjectHooksTrust,
   readProjectMcpConfig,
   getSkills,
   getMemories,

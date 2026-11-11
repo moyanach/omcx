@@ -8,17 +8,20 @@ import {
   FileText,
   FileCode,
   FolderOpen,
+  Bot,
 } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 
 interface BrowserNewTabToolsProps {
   onOpenTool: (toolId: "changes" | "terminal" | "files") => void;
   onOpenUrl: (url: string, title?: string, filePath?: string) => void;
+  onOpenAutomation?: () => void;
 }
 
 export const BrowserNewTabTools: React.FC<BrowserNewTabToolsProps> = ({
   onOpenTool,
   onOpenUrl,
+  onOpenAutomation,
 }) => {
   const {
     sessions,
@@ -160,6 +163,29 @@ export const BrowserNewTabTools: React.FC<BrowserNewTabToolsProps> = ({
           </div>
           <span className="px-2 py-0.5 rounded-md bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] font-mono text-[11px] border border-[color:var(--ui-border-hairline)]">
             ^⇧G
+          </span>
+        </div>
+
+        {/* 卡片 4: 浏览器自动化 (内置 Chromium + 视觉回归) */}
+        <div
+          onClick={() => onOpenAutomation?.()}
+          className="flex items-center justify-between p-3.5 rounded-xl bg-[var(--ui-card-bg)] hover:bg-[var(--ui-block-hover-bg)] border border-[color:var(--ui-border-hairline)] cursor-pointer transition-all duration-150 group"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-[var(--ui-accent-violet-soft)] flex items-center justify-center text-[var(--ui-accent-violet)] border border-[color:var(--ui-accent-violet-border)]">
+              <Bot size={16} />
+            </div>
+            <div className="flex flex-col">
+              <span className="font-semibold text-xs text-[var(--ui-text-primary)]">
+                浏览器自动化
+              </span>
+              <span className="text-[11px] text-[var(--ui-text-muted)]">
+                内置 Chromium 隐藏窗口 · 页面操作、截图与像素级视觉回归
+              </span>
+            </div>
+          </div>
+          <span className="px-2 py-0.5 rounded-md bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] font-mono text-[11px] border border-[color:var(--ui-border-hairline)]">
+            Agent
           </span>
         </div>
       </div>

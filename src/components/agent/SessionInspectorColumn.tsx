@@ -3,6 +3,11 @@ import WorkspaceCard from './WorkspaceCard';
 import ContextCard from './ContextCard';
 import ConnectorsCard from './ConnectorsCard';
 import ChangesCard from './ChangesCard';
+import ChecksCard from './ChecksCard';
+import CheckpointsCard from './CheckpointsCard';
+import RepoWikiCard from './RepoWikiCard';
+import WorktreeCard from './WorktreeCard';
+import SpecCard from './SpecCard';
 
 interface SessionInspectorColumnProps {
   isOpen: boolean;
@@ -30,6 +35,21 @@ export const SessionInspectorColumn: React.FC<SessionInspectorColumnProps> = ({ 
 
         {/* 4. Changes 代码变更卡片 (实时 Git 增删行 + 文件列表) */}
         <ChangesCard />
+
+        {/* 5. Checks 诊断与测试运行卡片 */}
+        <ChecksCard />
+
+        {/* 6. Checkpoints 文件检查点卡片 (按回合回滚 Agent 修改) */}
+        <CheckpointsCard />
+
+        {/* 7. Repo Wiki 仓库级文档 (基于符号索引生成并缓存) */}
+        <RepoWikiCard />
+
+        {/* 8. 隔离工作树 (高风险任务在独立 Git worktree 中执行) */}
+        <WorktreeCard />
+
+        {/* 9. Quest 规格文档 (需求/方案/验收/实施步骤) */}
+        <SpecCard />
       </div>
     </aside>
   );
