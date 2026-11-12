@@ -686,11 +686,11 @@ const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) => {
   };
 
   return (
-    <div className='mb-1.5 w-full max-w-full bg-[var(--ui-block-bg)] border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] rounded-xl overflow-hidden select-none transition-colors'>
-      {/* 1. 单行高密度汇总顶栏 (34px) */}
+    <div className='mb-1.5 w-full max-w-full select-none'>
+      {/* 1. 单行高密度汇总顶栏 */}
       <div
         onClick={() => setIsExpanded((v) => !v)}
-        className='px-3 py-1.5 flex items-center justify-between gap-2 cursor-pointer hover:bg-[var(--ui-block-hover-bg)] transition-colors'
+        className='py-1 flex items-center justify-between gap-2 cursor-pointer text-[var(--ui-text-muted)] hover:text-[var(--ui-text-secondary)] transition-colors'
       >
         <div className='flex items-center gap-2 min-w-0 flex-wrap'>
           {isAnyRunning ? (
@@ -706,29 +706,29 @@ const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) => {
           </span>
 
           {/* 分类统计胶囊 */}
-          <div className='flex items-center gap-1 flex-wrap'>
+          <div className="flex items-center gap-1.5 flex-wrap [&>*+*]:before:content-['·'] [&>*+*]:before:mr-1.5 [&>*+*]:before:text-[var(--ui-text-faint)]">
             {stats.read > 0 && (
-              <span className='text-[10px] font-mono px-1.5 py-0.2 rounded bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border border-[color:var(--ui-border-hairline)]'>
+              <span className='text-[10px] font-mono text-[var(--ui-text-muted)]'>
                 读取 {stats.read}
               </span>
             )}
             {stats.search > 0 && (
-              <span className='text-[10px] font-mono px-1.5 py-0.2 rounded bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border border-[color:var(--ui-border-hairline)]'>
+              <span className='text-[10px] font-mono text-[var(--ui-text-muted)]'>
                 搜索 {stats.search}
               </span>
             )}
             {stats.edit > 0 && (
-              <span className='text-[10px] font-mono px-1.5 py-0.2 rounded bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border border-[color:var(--ui-accent-blue-border)]'>
+              <span className='text-[10px] font-mono text-[var(--ui-accent-blue)]'>
                 修改 {stats.edit}
               </span>
             )}
             {stats.command > 0 && (
-              <span className='text-[10px] font-mono px-1.5 py-0.2 rounded bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border border-[color:var(--ui-accent-emerald-border)]'>
+              <span className='text-[10px] font-mono text-[var(--ui-accent-emerald)]'>
                 命令 {stats.command}
               </span>
             )}
             {stats.subagent > 0 && (
-              <span className='text-[10px] font-mono px-1.5 py-0.2 rounded bg-[var(--ui-accent-sky-soft)] text-[var(--ui-accent-sky)] border border-[color:var(--ui-accent-sky-border)]'>
+              <span className='text-[10px] font-mono text-[var(--ui-accent-sky)]'>
                 子代理 {stats.subagent}
               </span>
             )}
@@ -743,7 +743,7 @@ const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) => {
 
       {/* 2. 执行中的紧凑实时滚动视窗（最多展示最近 2 步，不撑高页面） */}
       {liveWindowEvents.length > 0 && (
-        <div className='px-3 py-1.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] flex flex-col gap-1'>
+        <div className='px-0 py-1 border-t border-[color:var(--ui-divider-hairline)] flex flex-col gap-1'>
           {liveWindowEvents.map((ev, i) => {
             const { title, subtitle } = getToolStepSummary(ev.tool, ev.args);
             const isRunning = ev.status === 'running';
@@ -798,7 +798,7 @@ const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) => {
 
       {/* 3. 点击展开后的聚合步骤列表（内部限高 max-h-64 滚动，连续只读步骤横向胶囊聚合） */}
       {isExpanded && (
-        <div className='p-2 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] max-h-64 overflow-y-auto custom-scrollbar flex flex-col gap-1 divide-y ui-divide-hairline'>
+        <div className='py-1 border-t border-[color:var(--ui-divider-hairline)] max-h-64 overflow-y-auto custom-scrollbar flex flex-col gap-1 divide-y ui-divide-hairline'>
           {groupedItems.map((group, gIdx) => {
             if (group.kind === 'read-group') {
               const activeInGroup = group.events.find((item) => item.originalIndex === selectedStepIdx);
@@ -871,7 +871,7 @@ const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) => {
 
                   <div className='flex items-center gap-2 flex-shrink-0'>
                     {outputSummary && !isStepOpen && (
-                      <span className='text-[10px] font-mono text-[var(--ui-text-muted)] bg-[var(--ui-chip-bg)] px-1.5 py-0.2 rounded border border-[color:var(--ui-border-hairline)] truncate max-w-[160px]'>
+                      <span className='text-[10px] font-mono text-[var(--ui-text-muted)] truncate max-w-[160px]'>
                         {outputSummary}
                       </span>
                     )}
@@ -1228,8 +1228,8 @@ const ModifiedFilesBar: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) =
   const activeItem = activeId ? modItems.find((m) => m.id === activeId) || null : null;
 
   return (
-    <div className='mb-1.5 w-full max-w-full bg-[var(--ui-block-bg)] border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] rounded-xl px-3 py-2 select-none transition-colors'>
-      <div className='flex items-center gap-2 flex-wrap'>
+    <div className='mb-1.5 w-full max-w-full select-none'>
+      <div className='flex items-center gap-2 flex-wrap py-1'>
         <div className='flex items-center gap-1.5 text-xs text-[var(--ui-text-secondary)] flex-shrink-0 mr-0.5'>
           <FileDiff size={13} className='text-[var(--ui-accent-amber)]' />
           <span className='font-semibold'>文件变更</span>
@@ -1410,11 +1410,6 @@ const AgentLiveStatusBar: React.FC<{
   };
 
   const [elapsedSec, setElapsedSec] = useState<number>(computeElapsedSec);
-  const barRef = useRef<HTMLDivElement>(null);
-  const [barDimensions, setBarDimensions] = useState<{ width: number; height: number }>({
-    width: 0,
-    height: 0,
-  });
 
   useEffect(() => {
     setElapsedSec(computeElapsedSec());
@@ -1423,27 +1418,6 @@ const AgentLiveStatusBar: React.FC<{
     }, 1000);
     return () => clearInterval(timer);
   }, [sessionStartTime]);
-
-  // 动态测量物理像素宽高，让 SVG 边框光晕 100% 贴合卡片四边与圆角，自适应任何卡片伸缩
-  useEffect(() => {
-    if (!barRef.current) return;
-    const updateSize = () => {
-      if (barRef.current) {
-        const nextW = Math.max(0, barRef.current.offsetWidth - 2);
-        const nextH = Math.max(0, barRef.current.offsetHeight - 2);
-        setBarDimensions((prev) => {
-          if (Math.abs(prev.width - nextW) < 1 && Math.abs(prev.height - nextH) < 1) {
-            return prev;
-          }
-          return { width: nextW, height: nextH };
-        });
-      }
-    };
-    updateSize();
-    const observer = new ResizeObserver(() => updateSize());
-    observer.observe(barRef.current);
-    return () => observer.disconnect();
-  }, []);
 
   const visibleSteps = activeToolCalls.filter((t) => t.tool !== 'todo_write');
   const runningStep = visibleSteps.slice().reverse().find((t) => t.status === 'running');
@@ -1474,53 +1448,7 @@ const AgentLiveStatusBar: React.FC<{
 
   return (
     <div className='sticky bottom-0 z-10 pt-1 pb-0.5 w-full pointer-events-none'>
-      <div
-        ref={barRef}
-        className='relative w-full px-3.5 py-2 rounded-xl backdrop-blur-md shadow-sm border border-[color:var(--ui-border-hairline)] bg-[var(--ui-livebar-bg)] flex items-center justify-between gap-3 text-xs select-none overflow-hidden'
-      >
-        {/* 一圈光晕紧贴 border 边框顺时针匀速巡航流光 (自适应物理像素贴边) */}
-        {barDimensions.width > 0 && barDimensions.height > 0 && (
-          <svg
-            className='absolute inset-0 w-full h-full pointer-events-none overflow-visible'
-            xmlns='http://www.w3.org/2000/svg'
-          >
-            <defs>
-              <linearGradient id='livebar-beam-grad' x1='0%' y1='0%' x2='100%' y2='100%'>
-                <stop offset='0%' stopColor='#38bdf8' stopOpacity='0' />
-                <stop offset='25%' stopColor='#60a5fa' stopOpacity='0.4' />
-                <stop offset='70%' stopColor='#93c5fd' stopOpacity='1' />
-                <stop offset='100%' stopColor='#38bdf8' stopOpacity='0' />
-              </linearGradient>
-            </defs>
-            {/* 底层高斯光晕 (沿边框发散) */}
-            <rect
-              x='1'
-              y='1'
-              width={barDimensions.width}
-              height={barDimensions.height}
-              rx='12'
-              fill='none'
-              stroke='url(#livebar-beam-grad)'
-              strokeWidth='3'
-              pathLength='100'
-              className='omcx-border-beam-glow'
-            />
-            {/* 顶层高亮细线光核 (精准贴边顺时针流转) */}
-            <rect
-              x='1'
-              y='1'
-              width={barDimensions.width}
-              height={barDimensions.height}
-              rx='12'
-              fill='none'
-              stroke='url(#livebar-beam-grad)'
-              strokeWidth='1.5'
-              pathLength='100'
-              className='omcx-border-beam-core'
-            />
-          </svg>
-        )}
-
+      <div className='relative w-full px-1 py-1.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-panel-bg)] flex items-center justify-between gap-3 text-xs select-none overflow-hidden'>
         {/* 左侧：微光呼吸图标 + 当前实时动作语义 (已移除雷达同心圆扩散) */}
         <div className='flex items-center gap-2.5 min-w-0 relative z-10'>
           <div className='relative flex items-center justify-center w-4 h-4 flex-shrink-0'>
@@ -1532,12 +1460,12 @@ const AgentLiveStatusBar: React.FC<{
         {/* 右侧：当前 Todo 阶段 + 步骤计数 + 实时秒表 */}
         <div className='flex items-center gap-2 flex-shrink-0 font-mono text-[11px] relative z-10'>
           {currentTodo && (
-            <span className='hidden sm:inline-block px-2 py-0.5 rounded bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border border-[color:var(--ui-accent-blue-border)] truncate max-w-[180px]'>
+            <span className='hidden sm:inline-block text-[var(--ui-accent-blue)] truncate max-w-[180px]'>
               阶段: {currentTodo.text}
             </span>
           )}
           {visibleSteps.length > 0 && (
-            <span className='px-1.5 py-0.5 rounded bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border border-[color:var(--ui-border-hairline)]'>
+            <span className='text-[var(--ui-text-muted)]'>
               步骤 {visibleSteps.length}
             </span>
           )}
@@ -1555,8 +1483,8 @@ const AgentLiveStatusBar: React.FC<{
  */
 const ReferenceLinks: React.FC<{ metadata: any[] }> = ({ metadata }) => (
   <div className='mb-1.5 w-full max-w-full'>
-    <details className='group bg-[var(--ui-block-bg)] rounded-xl border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] text-xs overflow-hidden transition-colors'>
-      <summary className='flex items-center justify-between p-2.5 font-medium text-[var(--ui-text-muted)] cursor-pointer hover:bg-[var(--ui-block-hover-bg)] outline-none select-none transition-colors'>
+    <details className='group text-xs'>
+      <summary className='flex items-center justify-between py-1 font-medium text-[var(--ui-text-muted)] cursor-pointer hover:text-[var(--ui-text-secondary)] outline-none select-none transition-colors'>
         <div className='flex items-center gap-1.5'>
           <Globe size={13} className='text-[var(--ui-accent-blue)]' />
           <span>参考权威来源 ({metadata.length})</span>
@@ -1565,7 +1493,7 @@ const ReferenceLinks: React.FC<{ metadata: any[] }> = ({ metadata }) => (
           ▼
         </span>
       </summary>
-      <div className='p-2.5 border-t border-[color:var(--ui-divider-hairline)] space-y-1.5 bg-[var(--ui-block-body-bg)]'>
+      <div className='py-1 border-t border-[color:var(--ui-divider-hairline)] space-y-0.5'>
         {metadata.map((ref: any, idx: number) => {
           let hostname = '';
           try {
@@ -1648,8 +1576,8 @@ const MessageBubble: React.FC<{
   const durationFormatted = msg.metadata?.durationFormatted;
   const hasContent = Boolean(msg.content && msg.content.trim().length > 0);
 
-  const { thinkingBlocks, isThinkingStreaming, markdownContent } = useMemo(
-    () => (isUser ? { thinkingBlocks: [], isThinkingStreaming: false, markdownContent: msg.content } : parseMessageContent(msg.content)),
+  const { markdownContent } = useMemo(
+    () => (isUser ? { markdownContent: msg.content } : parseMessageContent(msg.content)),
     [isUser, msg.content]
   );
   const hasVisibleMarkdown = Boolean(markdownContent && markdownContent.trim().length > 0);
@@ -1668,20 +1596,24 @@ const MessageBubble: React.FC<{
       ? msg.metadata.todos
       : [];
 
+  // 思考内容：当前回合来自独立 reasoning 通道，历史回合按需从 reasoning 表拉取
+  const liveReasoning = !isUser && typeof msg.reasoning === 'string' ? msg.reasoning.trim() : '';
+  const liveThinkingBlocks = liveReasoning ? [liveReasoning] : [];
+  const lazyReasoningChars = Number(msg.reasoningChars) > 0 ? Number(msg.reasoningChars) : 0;
+  const hasAnyReasoning = liveThinkingBlocks.length > 0 || lazyReasoningChars > 0;
+
   // 兜底：assistant 回合彻底空响应（无正文 / 无思考 / 无工具步骤），且已不在流式中
   // 关键：仅当整个会话停止生成后才允许判定为"空响应"，否则中途追加 steer 消息会让
   // 仍在工具循环中的 assistant 占位气泡失去 isLast 身份，被误判为请求失败。
   const isStreamingThis = Boolean(isGenerating && isActiveTurn);
   const isInterrupted = Boolean(!isUser && msg.metadata?.interrupted && !isGenerating);
-  const hasLazyReasoning = Number(msg.reasoningChars) > 0;
   const isEmptyAssistantTurn =
     !isUser &&
     !isGenerating &&
     !isInterrupted &&
     !isStreamingThis &&
     !hasContent &&
-    !hasLazyReasoning &&
-    thinkingBlocks.length === 0 &&
+    !hasAnyReasoning &&
     displayToolEvents.length === 0 &&
     displayTodos.length === 0;
 
@@ -1703,7 +1635,7 @@ const MessageBubble: React.FC<{
 
         {/* 0. 中断恢复提示：应用退出/进程异常时主进程已保全部分正文与工具轨迹 */}
         {isInterrupted && (
-          <div className='w-full mb-1.5 px-3 py-2 rounded-xl border border-[color:var(--ui-accent-amber-border)] bg-[var(--ui-accent-amber-soft)] flex items-start gap-2 text-[11px] leading-relaxed text-[var(--ui-text-secondary)] select-none'>
+          <div className='w-full mb-1.5 pl-3 pr-2 py-1.5 border-l-2 border-[color:var(--ui-accent-amber)] bg-[var(--ui-accent-amber-soft)] flex items-start gap-2 text-[11px] leading-relaxed text-[var(--ui-text-secondary)] select-none'>
             <AlertTriangle
               size={13}
               className='text-[var(--ui-accent-amber)] flex-shrink-0 mt-[1px]'
@@ -1714,22 +1646,20 @@ const MessageBubble: React.FC<{
           </div>
         )}
 
-        {/* 1. 深度思考内容块（置顶于工具调用块上方） */}
-        {!isUser && thinkingBlocks.length > 0 && (
+        {/* 1. 深度思考内容块（当前回合实时思考，独立通道流入） */}
+        {!isUser && liveThinkingBlocks.length > 0 && (
           <ThinkingBlock
-            thoughts={thinkingBlocks}
-            // 只有当前活跃回合仍在生成时才允许显示"思考中"转圈：
-            // 上游异常中断后消息会留下未闭合 <think>，不能因此永久 loading。
-            isStreaming={isThinkingStreaming && Boolean(isGenerating && isActiveTurn)}
+            thoughts={liveThinkingBlocks}
+            isStreaming={Boolean(isGenerating && isActiveTurn)}
             className='mb-1.5'
           />
         )}
 
         {/* 1.1 历史思考块：正文已瘦身，展开时按需拉取 */}
-        {!isUser && thinkingBlocks.length === 0 && Number(msg.reasoningChars) > 0 && (
+        {!isUser && liveThinkingBlocks.length === 0 && lazyReasoningChars > 0 && (
           <LazyThinkingBlock
             messageId={msg.id}
-            chars={Number(msg.reasoningChars)}
+            chars={lazyReasoningChars}
             className='mb-1.5'
           />
         )}
@@ -1738,7 +1668,7 @@ const MessageBubble: React.FC<{
         {!isUser && msg.metadata?.truncated && !isGenerating && (
           <div
             data-testid='truncated-banner'
-            className='w-full mb-1.5 px-3 py-1.5 rounded-xl border border-[color:var(--ui-accent-amber-border)] bg-[var(--ui-accent-amber-soft)] flex items-center gap-1.5 text-[11px] text-[var(--ui-text-secondary)] select-none'
+            className='w-full mb-1.5 pl-3 pr-2 py-1.5 border-l-2 border-[color:var(--ui-accent-amber)] bg-[var(--ui-accent-amber-soft)] flex items-center gap-1.5 text-[11px] text-[var(--ui-text-secondary)] select-none'
           >
             <AlertTriangle size={12} className='text-[var(--ui-accent-amber)] flex-shrink-0' />
             <span>本次输出在代码块中途结束，可能已被上游截断。可重新生成获取完整内容。</span>
@@ -1829,15 +1759,15 @@ const MessageBubble: React.FC<{
 
         {/* 气泡本体 */}
         {isUser ? (
-          <div className='px-4 py-2.5 text-sm leading-relaxed break-words bg-[var(--ui-bubble-user-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-hairline)] rounded-2xl whitespace-pre-wrap font-sans max-w-[85%]'>
+          <div className='px-4 py-2.5 text-sm leading-relaxed break-words bg-[var(--ui-bubble-user-bg)] text-[var(--ui-text-primary)] rounded-2xl whitespace-pre-wrap font-sans max-w-[85%]'>
             {msg.content}
           </div>
         ) : hasVisibleMarkdown ? (
-          <div className='px-5 py-3.5 text-sm leading-relaxed break-words bg-[var(--ui-bubble-assistant-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-hairline)] rounded-2xl w-full'>
+          <div className='w-full text-sm leading-relaxed break-words text-[var(--ui-text-primary)]'>
             <MarkdownContent content={markdownContent} hideThinking />
           </div>
         ) : isEmptyAssistantTurn ? (
-          <div className='w-full px-4 py-3 rounded-2xl border border-[color:var(--ui-accent-rose-border)] bg-[var(--ui-accent-rose-soft)] flex items-start gap-2.5'>
+          <div className='w-full pl-3 pr-2 py-2 border-l-2 border-[color:var(--ui-accent-rose)] bg-[var(--ui-accent-rose-soft)] flex items-start gap-2.5'>
             <XCircle size={15} className='text-[var(--ui-accent-rose)] flex-shrink-0 mt-0.5' />
             <div className='flex flex-col gap-1.5 min-w-0'>
               <span className='text-xs font-medium text-[var(--ui-text-primary)]'>
@@ -2062,8 +1992,19 @@ export const MessageList: React.FC<Props> = ({
   const VIRTUAL_THRESHOLD = 20;
   const heightMapRef = useRef<Map<string, number>>(new Map());
 
+  // 实测高度必须回灌 offset 计算，否则长历史会一直使用估算值，滚动窗口与真实内容错位
+  const [heightVersion, setHeightVersion] = useState(0);
+  const heightRafRef = useRef<number | null>(null);
   const handleReportHeight = useCallback((id: string, h: number) => {
+    const prev = heightMapRef.current.get(id);
+    if (prev !== undefined && Math.abs(prev - h) < 2) return;
     heightMapRef.current.set(id, h);
+    if (heightRafRef.current === null) {
+      heightRafRef.current = requestAnimationFrame(() => {
+        heightRafRef.current = null;
+        setHeightVersion((v) => v + 1);
+      });
+    }
   }, []);
 
   const estimateHeight = useCallback((m: Message) => {
@@ -2073,19 +2014,9 @@ export const MessageList: React.FC<Props> = ({
       const hasAtt = Array.isArray(m.metadata?.attachments) && m.metadata.attachments.length > 0;
       return hasAtt ? 140 : 54;
     }
-    // 思考块默认折叠为 40px 静态条：估算高度必须剥离思考正文，
-    // 否则数万字思考会被误算成数千像素，导致滚动条抖动与画面跳变。
-    // 新版架构消息 content 已剥离思考，此处加入 fast-path 避免无谓正则计算
-    let visibleLen = 0;
+    // 思考内容与正文已物理分离，正文长度可直接用于估算；折叠思考条按固定高度计
     const rawContent = String(m.content || '');
-    if (rawContent.includes('<think') || rawContent.includes('<thinking')) {
-      const visibleContent = rawContent
-        .replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, '')
-        .replace(/<(?:think|thinking)>[\s\S]*$/i, '');
-      visibleLen = visibleContent.length;
-    } else {
-      visibleLen = rawContent.length;
-    }
+    const visibleLen = rawContent.length;
     const reasoningChars = Number(m.reasoningChars || m.metadata?.reasoningChars) || 0;
     const thinkingHeight = reasoningChars > 0 ? 40 : 0;
     const toolCount = Array.isArray(m.metadata?.toolSteps) ? m.metadata.toolSteps.length : 0;
@@ -2111,7 +2042,8 @@ export const MessageList: React.FC<Props> = ({
       bottoms[i] = accumulatedY;
     }
     return { tops, bottoms };
-  }, [messages, estimateHeight]);
+    // heightVersion 仅用于在实测高度变化时使缓存失效
+  }, [messages, estimateHeight, heightVersion]);
 
   const lowerBound = (arr: number[], value: number, length: number): number => {
     let lo = 0;
@@ -2216,10 +2148,16 @@ export const MessageList: React.FC<Props> = ({
 
   // 仅在粘底状态下，模型吐字或工具执行才跟随滚动到最后；用户向上翻阅时绝对不自动滚到底部！
   useEffect(() => {
-    if (isPinnedToBottom && scrollRef.current) {
+    // 用户正在选中文本、或右键菜单已打开时暂停吸底：
+    // 否则流式输出的程序化滚动会把选区滚走，并让菜单看起来“自己消失了”。
+    const selection = window.getSelection();
+    const hasSelection = Boolean(
+      selection && !selection.isCollapsed && selection.rangeCount > 0
+    );
+    if (isPinnedToBottom && scrollRef.current && !hasSelection && !selectionMenu) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, isGenerating, activeToolCalls, isPinnedToBottom]);
+  }, [messages, isGenerating, activeToolCalls, isPinnedToBottom, selectionMenu]);
 
   // 会话切换或消息数量变动时，重新计算视口虚拟范围
   useEffect(() => {
@@ -2324,7 +2262,7 @@ export const MessageList: React.FC<Props> = ({
         onWheel={handleWheel}
         onMouseUp={rememberSelection}
         onContextMenu={handleContextMenu}
-        className='flex-1 overflow-y-auto pl-6 pr-3 pt-2 pb-2.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
+        className='flex-1 overflow-y-auto pl-6 pr-5 pt-3 pb-3.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
       >
         {(() => {
           const virtualActive = messages.length > VIRTUAL_THRESHOLD;

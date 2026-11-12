@@ -1,4 +1,5 @@
 const { spawn } = require("child_process");
+const crypto = require("crypto");
 const path = require("path");
 const { StringDecoder } = require("string_decoder");
 const storageService = require("./storageService");
@@ -327,26 +328,22 @@ class McpClientManager {
     this.toolRouteMap = new Map();
   }
 
-  _getClientKey(server) {
+  _getClientKey(server, scope = "") {
     const envKeys = Object.keys(server.env || {}).sort();
     const envSig = envKeys.map((k) => `${k}=${server.env[k]}`).join("\u0001");
     const headerKeys = Object.keys(server.headers || {}).sort();
     const headerSig = headerKeys
       .map((k) => `${k}=${server.headers[k]}`)
       .join("\u0001");
-    return `${server.id}::${server.command || ""}::${JSON.stringify(server.args || [])}::${envSig}::${server.cwd || ""}::${server.url || ""}::${server.transport || ""}::${headerSig}::${server.authToken ? "auth" : ""}::${mcpOAuthService.isOAuthEnabled(server) ? "oauth" : ""}`;
+    // scope（项目工作目录）必须参与 key：不同项目的同名 server 不能复用/互相关闭进程
+    return `${scope}::${server.id}::${server.command || ""}::${JSON.stringify(server.args || [])}::${envSig}::${server.cwd || ""}::${server.url || ""}::${server.transport || ""}::${headerSig}::${server.authToken ? "auth" : ""}::${mcpOAuthService.isOAuthEnabled(server) ? "oauth" : ""}`;
   }
 
-  _getOrCreateClient(server) {
-    const existing = this.clients.get(server.id);
-    const desiredKey = this._getClientKey(server);
-    if (existing && existing._configKey === desiredKey) {
-      return existing;
-    }
-    if (existing) {
-      existing.close();
-      this.clients.delete(server.id);
-    }
+  _getOrCreateClient(server, scope = "") {
+    const desiredKey = this._getClientKey(server, scope);
+    const existing = this.clients.get(desiredKey);
+    if (existing) return existing;
+
     const client = server.url
       ? new McpHttpClient({
           ...server,
@@ -356,7 +353,7 @@ class McpClientManager {
         })
       : new McpStdioClient(server);
     client._configKey = desiredKey;
-    this.clients.set(server.id, client);
+    this.clients.set(desiredKey, client);
     return client;
   }
 
@@ -379,13 +376,27 @@ class McpClientManager {
     await Promise.allSettled(
       servers.map(async (server) => {
         try {
-          const client = this._getOrCreateClient(server);
+          const client = this._getOrCreateClient(server, workDir || "");
           const rawTools = await client.listTools();
           const disabledTools = new Set(Array.isArray(server.disabledTools) ? server.disabledTools : []);
           for (const rawTool of rawTools) {
             if (!rawTool || !rawTool.name) continue;
             if (disabledTools.has(rawTool.name)) continue;
-            const fullName = formatMcpToolName(server.id, rawTool.name);
+            let fullName = formatMcpToolName(server.id, rawTool.name);
+            // 归一化（非字母数字→_）可能让不同 server/tool 折叠成同名，
+            // 若已被其他来源占用则追加短哈希，确保路由绝不串台
+            const occupied = this.toolRouteMap.get(fullName);
+            if (
+              occupied &&
+              (occupied.serverId !== server.id || occupied.toolName !== rawTool.name)
+            ) {
+              const hash = crypto
+                .createHash("sha1")
+                .update(`${workDir || ""}::${server.id}::${rawTool.name}`)
+                .digest("hex")
+                .slice(0, 6);
+              fullName = `${fullName}__${hash}`;
+            }
             const parameters =
               rawTool.inputSchema && typeof rawTool.inputSchema === "object"
                 ? rawTool.inputSchema
@@ -462,7 +473,7 @@ class McpClientManager {
       return { success: false, error: "该 MCP 服务器缺少 command 或 url 配置" };
     }
     try {
-      const client = this._getOrCreateClient(server);
+      const client = this._getOrCreateClient(server, workDir || "");
       const rawTools = await client.listTools();
       const disabled = new Set(Array.isArray(server.disabledTools) ? server.disabledTools : []);
       return {
@@ -497,7 +508,7 @@ class McpClientManager {
     await Promise.allSettled(
       servers.map(async (server) => {
         try {
-          const client = this._getOrCreateClient(server);
+          const client = this._getOrCreateClient(server, workDir || "");
           await client.ensureConnected();
           const res = await client.request("resources/list", {}, HANDSHAKE_TIMEOUT_MS);
           result.push({
@@ -524,7 +535,7 @@ class McpClientManager {
       );
     for (const server of servers) {
       try {
-        const client = this._getOrCreateClient(server);
+        const client = this._getOrCreateClient(server, workDir || "");
         await client.ensureConnected();
         const res = await client.request("resources/read", { uri }, CALL_TIMEOUT_MS);
         return { success: true, serverId: server.id, result: res };
@@ -548,7 +559,7 @@ class McpClientManager {
     await Promise.allSettled(
       servers.map(async (server) => {
         try {
-          const client = this._getOrCreateClient(server);
+          const client = this._getOrCreateClient(server, workDir || "");
           await client.ensureConnected();
           const res = await client.request("prompts/list", {}, HANDSHAKE_TIMEOUT_MS);
           result.push({
@@ -585,7 +596,7 @@ class McpClientManager {
       return { success: false, error: `MCP 服务器不存在或未启用: ${serverId}` };
     }
     try {
-      const client = this._getOrCreateClient(server);
+      const client = this._getOrCreateClient(server, workDir || "");
       await client.ensureConnected();
       const res = await client.request(
         "prompts/get",

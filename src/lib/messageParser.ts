@@ -5,60 +5,18 @@ export interface ParsedMessageResult {
 }
 
 /**
- * 提取深度思考块 (<think>...</think> / <thinking>...</thinking>) 并修复流式未闭合 Markdown 围栏
+ * v2.1.9+：思考内容已通过独立通道传输与存储，正文不再内嵌  thinking 标签。
+ * 本函数仅保留最小的正文清理与围栏自愈职责，不再解析任何思考标签，
+ * 从根源上杜绝正文里出现字面量思考标签时被误吞的问题。
  */
 export function parseMessageContent(raw: string): ParsedMessageResult {
-  if (!raw) {
-    return {
-      thinkingBlocks: [],
-      isThinkingStreaming: false,
-      markdownContent: '',
-    };
-  }
-
-  // 极速快径：若消息文本根本不包含思考标签，直接跳过所有正则解析，0ms 返回
-  if (!raw.includes('<think') && !raw.includes('<thinking')) {
-    const cleanedRemaining = raw.replace(/^\s*task ready\s*$/gim, '').trim();
-    return {
-      thinkingBlocks: [],
-      isThinkingStreaming: false,
-      markdownContent: healStreamingMarkdown(cleanedRemaining),
-    };
-  }
-
-  const thinkingBlocks: string[] = [];
-  let isThinkingStreaming = false;
-  let remaining = raw;
-
-  // 1. 提取已闭合的 <think>...</think> 或 <thinking>...</thinking>
-  const closedThinkRegex = /<(?:think|thinking)>([\s\S]*?)<\/(?:think|thinking)>/gi;
-  remaining = remaining.replace(closedThinkRegex, (_, inner) => {
-    const trimmed = String(inner || '').trim();
-    if (trimmed) {
-      thinkingBlocks.push(trimmed);
-    }
-    return '';
-  });
-
-  // 2. 检测流式过程中尚未闭合的 <think> 或 <thinking>
-  const unclosedMatch = remaining.match(/<(?:think|thinking)>([\s\S]*)$/i);
-  if (unclosedMatch && unclosedMatch.index !== undefined) {
-    const partialThought = unclosedMatch[1].trim();
-    if (partialThought) {
-      thinkingBlocks.push(partialThought);
-    }
-    isThinkingStreaming = true;
-    remaining = remaining.slice(0, unclosedMatch.index);
-  }
-
-  // 过滤网关在截断降级时可能残留的伪造占位词 "task ready"
-  const cleanedRemaining = remaining.replace(/^\s*task ready\s*$/gim, '').trim();
-  const healedMarkdown = healStreamingMarkdown(cleanedRemaining);
-
+  const text = String(raw || '');
+  // 仅过滤网关在异常收尾时可能残留的伪造占位词
+  const cleaned = text.replace(/^\s*task ready\s*$/gim, '').trim();
   return {
-    thinkingBlocks,
-    isThinkingStreaming,
-    markdownContent: healedMarkdown,
+    thinkingBlocks: [],
+    isThinkingStreaming: false,
+    markdownContent: healStreamingMarkdown(cleaned),
   };
 }
 

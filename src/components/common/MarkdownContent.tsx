@@ -13,13 +13,14 @@ import {
   Loader2,
   Check,
 } from 'lucide-react';
-import { parseMessageContent, parseFileReference } from '@/lib/messageParser';
+import { healStreamingMarkdown, parseFileReference } from '@/lib/messageParser';
 import CodeBlock from './CodeBlock';
 import { useChatStore } from '@/stores/chatStore';
 
 interface Props {
   content: string;
   className?: string;
+  // 兼容旧调用点；思考内容已独立渲染，不再由 MarkdownContent 解析
   hideThinking?: boolean;
 }
 
@@ -54,11 +55,11 @@ export const ThinkingBlock: React.FC<{
   return (
     <div
       style={{ contain: 'content' }}
-      className={`${className} w-full rounded-xl border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] bg-[var(--ui-block-bg)] overflow-hidden select-none transition-colors`}
+      className={`${className} w-full select-none`}
     >
       <div
         onClick={() => setIsOpen((v) => !v)}
-        className='px-3.5 py-2 flex items-center justify-between cursor-pointer hover:bg-[var(--ui-block-hover-bg)] transition-colors'
+        className='py-1 flex items-center justify-between cursor-pointer text-[var(--ui-text-muted)] hover:text-[var(--ui-text-secondary)] transition-colors'
       >
         <div className='flex items-center gap-2 text-xs'>
           {isStreaming ? (
@@ -82,7 +83,7 @@ export const ThinkingBlock: React.FC<{
       {isOpen && (
         <div
           style={{ contain: 'content' }}
-          className='px-3.5 py-2.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar flex flex-col gap-2'
+          className='mt-1 ml-1 pl-3 pr-2 border-l border-[color:var(--ui-divider-hairline)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar flex flex-col gap-2'
         >
           {shouldTruncate && (
             <div className='sticky top-0 z-10 -mt-1 py-1 px-2.5 rounded-lg bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] text-[var(--ui-text-faint)] flex items-center justify-between shadow-sm select-none'>
@@ -141,12 +142,12 @@ export const LazyThinkingBlock: React.FC<{
     <div
       data-testid='lazy-thinking-block'
       style={{ contain: 'content' }}
-      className={`${className} w-full rounded-xl border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] bg-[var(--ui-block-bg)] overflow-hidden select-none transition-colors`}
+      className={`${className} w-full select-none`}
     >
       <div
         data-testid='lazy-thinking-header'
         onClick={handleToggle}
-        className='px-3.5 py-2 flex items-center justify-between cursor-pointer hover:bg-[var(--ui-block-hover-bg)] transition-colors'
+        className='py-1 flex items-center justify-between cursor-pointer text-[var(--ui-text-muted)] hover:text-[var(--ui-text-secondary)] transition-colors'
       >
         <div className='flex items-center gap-2 text-xs'>
           {isStreaming ? (
@@ -170,7 +171,7 @@ export const LazyThinkingBlock: React.FC<{
       {isOpen && (
         <div
           style={{ contain: 'content' }}
-          className='px-3.5 py-2.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar'
+          className='mt-1 ml-1 pl-3 pr-2 border-l border-[color:var(--ui-divider-hairline)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar'
         >
           {loading ? (
             <div className='flex items-center gap-1.5 text-[11px] text-[var(--ui-text-faint)]'>
@@ -275,18 +276,14 @@ const SANITIZE_SCHEMA = {
   },
 };
 
-export const MarkdownContent: React.FC<Props> = memo(({ content, className = '', hideThinking = false }) => {
-  const { thinkingBlocks, isThinkingStreaming, markdownContent } = useMemo(
-    () => parseMessageContent(content),
+export const MarkdownContent: React.FC<Props> = memo(({ content, className = '' }) => {
+  const markdownContent = useMemo(
+    () => healStreamingMarkdown(String(content || '')),
     [content]
   );
 
   return (
     <div className={`markdown-body ${className} text-[var(--ui-text-secondary)]`}>
-      {!hideThinking && thinkingBlocks.length > 0 && (
-        <ThinkingBlock thoughts={thinkingBlocks} isStreaming={isThinkingStreaming} />
-      )}
-
       {markdownContent && (
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}

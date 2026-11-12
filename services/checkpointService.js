@@ -23,10 +23,16 @@ const MAX_FILES_PER_TURN = 300;
 const MAX_TURNS_PER_SESSION = 80;
 
 function safeSegment(value) {
-  return String(value || "")
+  const raw = String(value || "");
+  const cleaned = raw
     .trim()
     .replace(/[^a-zA-Z0-9._-]/g, "_")
     .slice(0, 120);
+  // "." / ".." 会被 path.join 当成目录跳转，必须替换为不可导航的稳定哈希段
+  if (!cleaned || /^\.+$/.test(cleaned)) {
+    return `seg_${crypto.createHash("sha1").update(raw).digest("hex").slice(0, 16)}`;
+  }
+  return cleaned;
 }
 
 function toPosix(p) {
@@ -61,7 +67,16 @@ function readJson(filePath, fallback = null) {
 
 function writeJsonAtomic(filePath, data) {
   const tmp = `${filePath}.tmp_${process.pid}_${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const fd = fs.openSync(tmp, "w");
+  try {
+    fs.writeFileSync(fd, JSON.stringify(data, null, 2), "utf-8");
+    try {
+      fs.fsyncSync(fd);
+    } catch {}
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, filePath);
 }
 

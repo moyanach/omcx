@@ -97,10 +97,10 @@ export const SpecCard: React.FC = () => {
   };
 
   return (
-    <div className='rounded-xl bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-hairline)] overflow-hidden'>
+    <div className='border-b border-[color:var(--ui-divider-hairline)] last:border-b-0'>
       <button
         onClick={() => setIsOpen((v) => !v)}
-        className='w-full px-3 py-2 flex items-center gap-2 hover:bg-[var(--ui-block-hover-bg)] transition-colors'
+        className='w-full px-4 py-2.5 flex items-center gap-2 hover:bg-[var(--ui-block-hover-bg)] transition-colors'
       >
         {isOpen ? (
           <ChevronDown size={12} className='text-[var(--ui-text-faint)]' />
@@ -152,7 +152,7 @@ export const SpecCard: React.FC = () => {
                     return (
                       <div
                         key={item.id}
-                        className='rounded-lg bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] px-2 py-1.5'
+                        className='rounded-md bg-[var(--ui-block-bg)] px-2 py-1.5'
                       >
                         <div className='flex items-center gap-1.5 min-w-0'>
                           <button

@@ -20,9 +20,11 @@ import {
   Copy,
   Check,
   Bot,
+  Loader2,
   MessageSquareText,
 } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
+import { usePanelResize } from "@/hooks/usePanelResize";
 import { getEffectiveTheme, subscribeThemeChange, type EffectiveTheme } from "@/theme";
 import BrowserNewTabTools from "./BrowserNewTabTools";
 import FileExplorerView from "./FileExplorerView";
@@ -90,8 +92,35 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
   const [viewport, setViewport] = useState<"desktop" | "tablet" | "mobile">("desktop");
   const [htmlSourceContent, setHtmlSourceContent] = useState<string>("");
   const [copiedSource, setCopiedSource] = useState(false);
+  const [frameLoading, setFrameLoading] = useState(false);
+  const [frameTimedOut, setFrameTimedOut] = useState(false);
 
-  const isResizingRef = useRef(false);
+  const frameLoadedRef = useRef(false);
+
+  // 工作台宽度拖拽：rAF 直写 DOM，松手才提交一次 store，避免每帧 React 重渲染造成卡顿
+  const {
+    targetRef: drawerRef,
+    onPointerDown: startResize,
+    widthRef: resizeWidthRef,
+    isResizingRef,
+    isDragging: isResizing,
+  } = usePanelResize({
+    edge: "left",
+    min: 360,
+    max:
+      typeof window !== "undefined" ? Math.floor(window.innerWidth * 0.92) : 1600,
+    getWidth: () =>
+      workbenchMaximized
+        ? Math.floor(window.innerWidth * 0.9)
+        : workbenchWidth,
+    onStart: () => setWorkbenchMaximized(false),
+    onCommit: (width) => setWorkbenchWidth(width),
+  });
+
+  const liveResizeWidth =
+    isResizingRef.current && resizeWidthRef.current != null
+      ? resizeWidthRef.current
+      : null;
 
   useEffect(() => {
     if (!activeTab) return;
@@ -129,6 +158,31 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
     }
   }, [activeTab?.id, activeTab?.viewMode, activeTab?.filePath, activeTab?.refreshKey, workDir]);
 
+  // 网页 iframe 首次加载态：8s 内未触发 onLoad 则提示可能被目标站点拒绝嵌入
+  useEffect(() => {
+    if (activeTab?.type !== "url" || activeTab?.viewMode === "code") {
+      setFrameLoading(false);
+      setFrameTimedOut(false);
+      return;
+    }
+    frameLoadedRef.current = false;
+    setFrameLoading(true);
+    setFrameTimedOut(false);
+    const timer = setTimeout(() => {
+      if (!frameLoadedRef.current) {
+        setFrameLoading(false);
+        setFrameTimedOut(true);
+      }
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, [activeTab?.id, activeTab?.type, activeTab?.url, activeTab?.refreshKey, activeTab?.viewMode]);
+
+  const handleFrameLoad = () => {
+    frameLoadedRef.current = true;
+    setFrameLoading(false);
+    setFrameTimedOut(false);
+  };
+
   // 全局快捷键支持：⌘P (文件树)、⌃` (终端)、⌃⇧G (Git Diff)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -156,31 +210,6 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
   }, []);
 
   if (!isOpen) return null;
-
-  const startResize = (e: React.MouseEvent) => {
-    e.preventDefault();
-    isResizingRef.current = true;
-    const startX = e.clientX;
-    const startWidth = workbenchMaximized
-      ? Math.floor(window.innerWidth * 0.9)
-      : workbenchWidth;
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      if (!isResizingRef.current) return;
-      const delta = startX - moveEvent.clientX;
-      setWorkbenchMaximized(false);
-      setWorkbenchWidth(startWidth + delta);
-    };
-
-    const onMouseUp = () => {
-      isResizingRef.current = false;
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-    };
-
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-  };
 
   const handleNavigate = (targetUrl: string, title?: string, filePath?: string) => {
     const raw = targetUrl.trim();
@@ -234,6 +263,15 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
     addWorkbenchTab({ title: "浏览器自动化", type: "automation" });
   };
 
+  const handleOpenInAutomation = (targetUrl?: string) => {
+    // 先切到自动化标签页，让用户立即看到加载进度，再异步打开目标页面
+    handleOpenAutomation();
+    const target = String(targetUrl || "").trim();
+    if (target && window.electronAPI?.browserAutoOpen) {
+      window.electronAPI.browserAutoOpen(target).catch(() => {});
+    }
+  };
+
   const handleOpenBtw = () => {
     const existing = workbenchTabs.find((t) => t.type === "btw");
     if (existing) {
@@ -280,24 +318,48 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
         className="absolute inset-0 z-30 bg-black/35"
         title="点击收起工作台"
       />
+      {/* 拖拽期间的全屏拦截层：避免鼠标掠过 iframe / 焦点元素时丢失 pointermove */}
+      {isResizing && (
+        <div className="absolute inset-0 z-[60] cursor-col-resize" />
+      )}
       <aside
+        ref={drawerRef as React.RefObject<HTMLElement>}
         style={{
-          width: workbenchMaximized ? "90vw" : `${workbenchWidth}px`,
+          width:
+            liveResizeWidth != null
+              ? `${liveResizeWidth}px`
+              : workbenchMaximized
+              ? "90vw"
+              : `${workbenchWidth}px`,
           maxWidth: "100%",
           backgroundColor:
             effectiveTheme === "light"
-              ? "rgba(248, 250, 252, 0.94)"
+              ? isResizing
+                ? "rgb(248, 250, 252)"
+                : "rgba(248, 250, 252, 0.94)"
+              : isResizing
+              ? "rgb(18, 18, 20)"
               : "rgba(18, 18, 20, 0.94)",
-          backdropFilter: "blur(28px) saturate(1.1)",
-          WebkitBackdropFilter: "blur(28px) saturate(1.1)",
+          // 拖拽期间关闭 28px 背景模糊与阴影，避免每帧重算合成层
+          backdropFilter: isResizing ? "none" : "blur(28px) saturate(1.1)",
+          WebkitBackdropFilter: isResizing ? "none" : "blur(28px) saturate(1.1)",
+          boxShadow: isResizing
+            ? "none"
+            : "-12px 0 40px -12px rgba(0,0,0,0.45)",
         }}
-        className="absolute right-0 top-0 bottom-0 z-40 h-full flex flex-col border-l border-[color:var(--ui-divider-hairline)] shadow-[-12px_0_40px_-12px_rgba(0,0,0,0.45)] select-none transition-[width] duration-150 text-[var(--ui-text-primary)]"
+        className={`absolute right-0 top-0 bottom-0 z-40 h-full flex flex-col border-l border-[color:var(--ui-divider-hairline)] select-none text-[var(--ui-text-primary)] ${
+          isResizing ? "will-change-[width]" : "transition-[width] duration-150"
+        }`}
       >
       {/* 左侧拖拽调宽手柄 */}
       <div
-        onMouseDown={startResize}
-        className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize hover:bg-[var(--ui-accent-blue-soft)] active:bg-[var(--ui-accent-blue)] transition-colors z-30"
-        title="拖拽调整工作台宽度"
+        onPointerDown={startResize}
+        onDoubleClick={() => {
+          setWorkbenchMaximized(false);
+          setWorkbenchWidth(560);
+        }}
+        className="absolute left-0 top-0 bottom-0 w-2.5 -ml-[5px] cursor-col-resize z-30 hover:bg-[var(--ui-accent-blue-soft)] active:bg-[var(--ui-accent-blue)]/60 transition-colors"
+        title="拖拽调整工作台宽度（双击恢复默认）"
       />
 
       {/* ─── 1. 顶部多标签与快捷工具栏 (与 ChatHeader 同高 48px，视觉完全对齐) ─── */}
@@ -333,6 +395,10 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  // 关闭自动化标签时同步收敛隐藏的自动化浏览器，避免后台页面继续驻留
+                  if (tab.type === "automation") {
+                    window.electronAPI?.browserAutoClose?.().catch(() => {});
+                  }
                   closeWorkbenchTab(tab.id);
                 }}
                 className="w-4 h-4 rounded flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-faint)] hover:text-[var(--ui-text-primary)] transition-opacity"
@@ -555,13 +621,22 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
                   <FolderOpen size={13} />
                 </button>
               ) : activeTab.url?.startsWith("http") ? (
-                <button
-                  onClick={() => window.electronAPI?.openExternalUrl?.(activeTab.url!)}
-                  className="p-1.5 rounded-lg hover:bg-[var(--ui-block-hover-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] transition-colors"
-                  title="在系统默认浏览器中打开"
-                >
-                  <ExternalLink size={13} />
-                </button>
+                <>
+                  <button
+                    onClick={() => handleOpenInAutomation(activeTab.url!)}
+                    className="p-1.5 rounded-lg hover:bg-[var(--ui-block-hover-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-accent-violet)] transition-colors"
+                    title="用内置浏览器自动化打开（可绕过站点禁止嵌入限制）"
+                  >
+                    <Bot size={13} />
+                  </button>
+                  <button
+                    onClick={() => window.electronAPI?.openExternalUrl?.(activeTab.url!)}
+                    className="p-1.5 rounded-lg hover:bg-[var(--ui-block-hover-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] transition-colors"
+                    title="在系统默认浏览器中打开"
+                  >
+                    <ExternalLink size={13} />
+                  </button>
+                </>
               ) : null}
             </div>
           )}
@@ -667,7 +742,7 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
                       ? "768px"
                       : "100%",
                 }}
-                className={`h-full transition-all duration-200 ${
+                className={`relative h-full transition-all duration-200 ${
                   viewport !== "desktop"
                     ? "my-2 rounded-xl overflow-hidden border border-[color:var(--ui-border-subtle)] shadow-lg"
                     : "w-full"
@@ -679,7 +754,49 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
                   className="w-full h-full border-0 bg-white"
                   title={activeTab?.title || "Web Preview"}
                   sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+                  onLoad={handleFrameLoad}
                 />
+                {frameLoading && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-white/90 text-slate-500">
+                    <Loader2 size={22} className="animate-spin text-sky-500" />
+                    <span className="text-[11px] font-mono">正在加载页面…</span>
+                  </div>
+                )}
+                {frameTimedOut && !frameLoading && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 bg-[var(--ui-stage-bg)] px-8 text-center">
+                    <Globe size={22} className="text-[var(--ui-text-faint)]" />
+                    <span className="text-xs text-[var(--ui-text-secondary)]">
+                      页面 8 秒内未完成加载
+                    </span>
+                    <span className="text-[10.5px] leading-relaxed text-[var(--ui-text-muted)]">
+                      目标站点可能禁止被嵌入（X-Frame-Options / frame-ancestors），或本地服务尚未启动。
+                    </span>
+                    <div className="flex items-center gap-2 mt-1">
+                      <button
+                        onClick={handleRefresh}
+                        className="h-7 px-2.5 rounded-lg bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] transition-colors"
+                      >
+                        重试
+                      </button>
+                      {activeTab?.url?.startsWith("http") && (
+                        <>
+                          <button
+                            onClick={() => handleOpenInAutomation(activeTab.url!)}
+                            className="h-7 px-2.5 rounded-lg bg-[var(--ui-accent-violet-soft)] border border-[color:var(--ui-accent-violet-border)] text-[11px] text-[var(--ui-accent-violet)] hover:brightness-110 transition-all"
+                          >
+                            用浏览器自动化打开
+                          </button>
+                          <button
+                            onClick={() => window.electronAPI?.openExternalUrl?.(activeTab.url!)}
+                            className="h-7 px-2.5 rounded-lg bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] transition-colors"
+                          >
+                            系统浏览器打开
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           ))}

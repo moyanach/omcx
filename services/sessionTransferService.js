@@ -73,28 +73,49 @@ function forkSession(sessionId, options = {}) {
   });
   if (!saved.success) return saved;
 
-  copyAttachments(sessionId, newSessionId);
+  try {
+    copyAttachments(sessionId, newSessionId);
 
-  for (const msg of selected) {
-    storageService.addMessage(newSessionId, {
-      id: newId("msg"),
-      role: msg.role,
-      content: msg.content,
-      tool_calls: msg.tool_calls,
-      tool_call_id: msg.tool_call_id,
-      metadata: rewriteAttachmentPaths(msg.metadata, sessionId, newSessionId),
-      created_at: msg.created_at,
-    });
-  }
+    for (const msg of selected) {
+      // 思考内容独立存储在 message_reasonings，分叉时必须一并复制，
+      // 否则分支会话会丢失全部 thinking 历史
+      let reasoning = "";
+      try {
+        reasoning = storageService.getMessageReasoning(msg.id) || "";
+      } catch {
+        reasoning = "";
+      }
+      const added = storageService.addMessage(newSessionId, {
+        id: newId("msg"),
+        role: msg.role,
+        content: msg.content,
+        tool_calls: msg.tool_calls,
+        tool_call_id: msg.tool_call_id,
+        metadata: rewriteAttachmentPaths(msg.metadata, sessionId, newSessionId),
+        created_at: msg.created_at,
+        reasoning: reasoning || undefined,
+        reasoning_chars: reasoning ? reasoning.length : msg.reasoning_chars || 0,
+      });
+      if (!added?.success) {
+        throw new Error(added?.error || "复制消息失败");
+      }
+    }
 
-  const outputs = storageService.getSessionOutputs(sessionId);
-  for (const output of outputs) {
-    storageService.addSessionOutput(newSessionId, {
-      name: output.name,
-      filePath: output.filePath,
-      fileType: output.fileType,
-      action: output.action,
-    });
+    const outputs = storageService.getSessionOutputs(sessionId);
+    for (const output of outputs) {
+      storageService.addSessionOutput(newSessionId, {
+        name: output.name,
+        filePath: output.filePath,
+        fileType: output.fileType,
+        action: output.action,
+      });
+    }
+  } catch (err) {
+    // 分叉不是事务性操作：失败时回滚已创建的分支会话，避免留下残缺副本
+    try {
+      storageService.deleteSession(newSessionId);
+    } catch {}
+    return { success: false, error: err.message || "分叉会话失败" };
   }
 
   return {

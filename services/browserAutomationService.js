@@ -4,8 +4,8 @@
  * 能力：
  *  - open(url)                 打开 http/https 页面
  *  - interact({action,...})    click / fill / press / hover / scroll / wait_for
- *  - snapshot({fullPage,...})  CDP 全页/视口截图，支持基线视觉回归对比
- *  - state() / close()
+ *  - snapshot({fullPage,live,...}) CDP 全页/视口截图，支持基线视觉回归对比与低清实时预览
+ *  - reload() / state() / close()
  *
  * 安全约束：
  *  - 仅允许 http/https，拒绝 file/javascript/data 等协议
@@ -43,6 +43,8 @@ let win = null;
 let lastShotPath = "";
 let lastError = "";
 let lastActionAt = 0;
+// 导航进行中标记：供前端在页面尚未完成加载时显示进度，而不是误判为“未启动”
+let navigating = false;
 
 function normalizeUrl(input) {
   let raw = String(input || "").trim();
@@ -116,6 +118,40 @@ async function waitForLoad(wc, timeoutMs = NAV_TIMEOUT_MS) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+/**
+ * 等待页面进入可截图状态：readyState complete + 字体就绪 + 两帧渲染，
+ * 再叠加一个可配置的 settle 窗口，避免 SPA 首屏 loading 被提前截下来。
+ */
+async function waitForReady(wc, settleMs = 600) {
+  try {
+    await wc.executeJavaScript(
+      `(async () => {
+        if (document.readyState !== "complete") {
+          await new Promise((resolve) => {
+            const done = () => resolve();
+            document.addEventListener("readystatechange", () => {
+              if (document.readyState === "complete") done();
+            }, { once: true });
+            setTimeout(done, 5000);
+          });
+        }
+        try { await document.fonts?.ready; } catch {}
+        await new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve))
+        );
+        return document.readyState;
+      })()`,
+      true
+    );
+  } catch {}
+  const settle = Math.max(0, Math.min(10000, Number(settleMs) || 0));
+  if (settle > 0) await sleep(settle);
+}
+
 async function readPageInfo(wc) {
   try {
     const info = await wc.executeJavaScript(
@@ -139,15 +175,30 @@ async function readPageInfo(wc) {
   }
 }
 
-async function open({ url } = {}) {
+async function open({ url, settleMs = 600 } = {}) {
   const target = normalizeUrl(url);
   const browser = ensureWindow();
   const wc = browser.webContents;
   lastError = "";
+  let timedOut = false;
+  let navTimer = null;
+  navigating = true;
   try {
     const loaded = waitForLoad(wc);
-    await wc.loadURL(target);
+    // loadURL 本身可能因页面请求挂起而永不返回，必须叠加硬超时并主动 stop 兜底
+    const navTimeout = new Promise((_, reject) => {
+      navTimer = setTimeout(() => {
+        timedOut = true;
+        reject(new Error(`页面加载超过 ${Math.round(NAV_TIMEOUT_MS / 1000)}s`));
+      }, NAV_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([wc.loadURL(target), navTimeout]);
+    } finally {
+      if (navTimer) clearTimeout(navTimer);
+    }
     const loadState = await loaded;
+    await waitForReady(wc, settleMs);
     lastActionAt = Date.now();
     const info = await readPageInfo(wc);
     if (loadState?.failed) {
@@ -157,8 +208,19 @@ async function open({ url } = {}) {
     }
     return { ok: true, ...info, warning: lastError || undefined };
   } catch (err) {
-    lastError = err.message || String(err);
+    // 中断仍在进行的导航，避免后台继续占用加载队列
+    try {
+      wc.stop();
+    } catch {}
+    lastError = err?.message || String(err);
+    if (timedOut) {
+      // 超时不等于完全失败：尽量返回当前已经渲染出的内容，供用户继续操作/截图
+      const info = await readPageInfo(wc).catch(() => ({ url: target, title: "", text: "" }));
+      return { ok: true, ...info, warning: lastError, timedOut: true };
+    }
     return { ok: false, error: lastError, url: target };
+  } finally {
+    navigating = false;
   }
 }
 
@@ -272,12 +334,18 @@ function safeBaselineName(name) {
     .slice(0, 80) || "default";
 }
 
-async function capturePng(fullPage = false) {
+async function captureImage({ fullPage = false, format = "png", quality = 60 } = {}) {
   const browser = ensureWindow();
   const wc = browser.webContents;
+  const useJpeg = format === "jpeg";
+  const jpegQuality = Math.max(10, Math.min(90, Number(quality) || 60));
   try {
     if (!wc.debugger.isAttached()) wc.debugger.attach("1.3");
-    const params = { format: "png", captureBeyondViewport: Boolean(fullPage) };
+    const params = {
+      format: useJpeg ? "jpeg" : "png",
+      captureBeyondViewport: Boolean(fullPage),
+    };
+    if (useJpeg) params.quality = jpegQuality;
     if (fullPage) {
       const metrics = await wc.debugger.sendCommand("Page.getLayoutMetrics");
       const content = metrics.cssContentSize || metrics.contentSize || {};
@@ -291,7 +359,7 @@ async function capturePng(fullPage = false) {
   } catch (err) {
     try {
       const image = await wc.capturePage();
-      return image.toPNG();
+      return useJpeg ? image.toJPEG(jpegQuality) : image.toPNG();
     } catch (fallbackErr) {
       throw new Error(`截图失败: ${err.message}; 回退失败: ${fallbackErr.message}`);
     }
@@ -343,26 +411,40 @@ function compareBuffers(shotPng, baselinePath) {
   };
 }
 
-async function snapshot({ fullPage = false, baseline = "", threshold = 0.001 } = {}) {
+async function snapshot({ fullPage = false, baseline = "", threshold = 0.001, live = false, settleMs } = {}) {
   const browser = ensureWindow();
   const wc = browser.webContents;
   ensureDir(shotsDir());
   try {
-    const png = await capturePng(Boolean(fullPage));
-    const shotPath = path.join(shotsDir(), `shot-${Date.now()}.png`);
-    fs.writeFileSync(shotPath, png);
-    lastShotPath = shotPath;
+    // 自动等待渲染就绪，避免刚导航就截到 loading
+    if (settleMs !== false) {
+      await waitForReady(wc, settleMs === undefined ? 400 : settleMs);
+    }
+    const useLive = Boolean(live) && !baseline;
+    const img = await captureImage({
+      fullPage: Boolean(fullPage),
+      format: useLive ? "jpeg" : "png",
+      quality: 55,
+    });
+    const mime = useLive ? "image/jpeg" : "image/png";
+    const shotPath = useLive
+      ? ""
+      : path.join(shotsDir(), `shot-${Date.now()}.png`);
+    if (!useLive) {
+      fs.writeFileSync(shotPath, img);
+      lastShotPath = shotPath;
+    }
     lastActionAt = Date.now();
     const info = await readPageInfo(wc);
 
     let compare = null;
-    if (baseline) {
+    if (baseline && !useLive) {
       const name = safeBaselineName(baseline);
       const baselinePath = path.join(baselinesDir(), `${name}.png`);
       if (!fs.existsSync(baselinePath)) {
         compare = { match: false, error: `基线不存在: ${baselinePath}`, baselineName: name };
       } else {
-        const result = compareBuffers(png, baselinePath);
+        const result = compareBuffers(img, baselinePath);
         if (result.diffBuf) {
           const diffPath = path.join(shotsDir(), `diff-${name}-${Date.now()}.png`);
           try {
@@ -389,7 +471,8 @@ async function snapshot({ fullPage = false, baseline = "", threshold = 0.001 } =
     return {
       ok: true,
       shotPath,
-      dataUrl: `data:image/png;base64,${png.toString("base64")}`,
+      dataUrl: `data:${mime};base64,${img.toString("base64")}`,
+      live: useLive,
       ...info,
       compare,
     };
@@ -429,10 +512,14 @@ function listBaselines() {
 }
 
 function getState() {
-  const open = Boolean(win && !win.isDestroyed());
+  const alive = Boolean(win && !win.isDestroyed());
+  const pageUrl = alive ? win.webContents.getURL() : "";
+  // 仅当窗口已经真正载入页面时才算“会话运行中”，避免打开失败后一直显示运行态
+  const open = Boolean(alive && pageUrl && pageUrl !== "about:blank");
   return {
     open,
-    url: open ? win.webContents.getURL() : "",
+    loading: navigating,
+    url: open ? pageUrl : "",
     title: open ? win.webContents.getTitle() : "",
     lastShotPath,
     lastError,
@@ -441,9 +528,39 @@ function getState() {
   };
 }
 
+async function reload({ settleMs = 500 } = {}) {
+  const browser = ensureWindow();
+  const wc = browser.webContents;
+  lastError = "";
+  navigating = true;
+  try {
+    const loaded = waitForLoad(wc, 15000);
+    wc.reload();
+    const loadState = await loaded;
+    await waitForReady(wc, settleMs);
+    lastActionAt = Date.now();
+    const info = await readPageInfo(wc);
+    if (loadState?.failed) {
+      lastError = `页面加载失败 (${loadState.code}): ${loadState.desc || ""}`.trim();
+    } else if (loadState?.timedOut) {
+      lastError = "刷新超过 15s，已返回当前可交互内容";
+    }
+    return { ok: true, ...info, warning: lastError || undefined };
+  } catch (err) {
+    try {
+      wc.stop();
+    } catch {}
+    lastError = err.message || String(err);
+    return { ok: false, error: lastError };
+  } finally {
+    navigating = false;
+  }
+}
+
 async function back() {
   const browser = ensureWindow();
   const wc = browser.webContents;
+  navigating = true;
   try {
     const loaded = waitForLoad(wc, 10000);
     if (wc.navigationHistory?.canGoBack?.()) {
@@ -456,12 +573,15 @@ async function back() {
     return { ok: true, ...(await readPageInfo(wc)) };
   } catch (err) {
     return { ok: false, error: err.message };
+  } finally {
+    navigating = false;
   }
 }
 
 async function forward() {
   const browser = ensureWindow();
   const wc = browser.webContents;
+  navigating = true;
   try {
     const loaded = waitForLoad(wc, 10000);
     if (wc.navigationHistory?.canGoForward?.()) {
@@ -474,6 +594,8 @@ async function forward() {
     return { ok: true, ...(await readPageInfo(wc)) };
   } catch (err) {
     return { ok: false, error: err.message };
+  } finally {
+    navigating = false;
   }
 }
 
@@ -487,6 +609,7 @@ function close() {
     }
   } catch {}
   win = null;
+  navigating = false;
   return { ok: true };
 }
 
@@ -499,6 +622,7 @@ module.exports = {
   getState,
   back,
   forward,
+  reload,
   close,
   normalizeUrl,
   shotsDir,

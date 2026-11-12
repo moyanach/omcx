@@ -58,9 +58,9 @@ export const BtwSelectionMenu: React.FC<Props> = ({
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('resize', handleDismiss);
     window.addEventListener('blur', handleDismiss);
-    // 滚轮滚动（捕获阶段）时收起浮层，避免菜单悬空错位
+    // 仅响应用户主动滚轮滚动；不能用 scroll 事件，否则流式输出触发的程序化吸底滚动
+    // 会持续把右键菜单关掉（用户根本来不及点击）。
     window.addEventListener('wheel', handleDismiss, { capture: true });
-    window.addEventListener('scroll', handleDismiss, { capture: true });
 
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
@@ -68,7 +68,6 @@ export const BtwSelectionMenu: React.FC<Props> = ({
       window.removeEventListener('resize', handleDismiss);
       window.removeEventListener('blur', handleDismiss);
       window.removeEventListener('wheel', handleDismiss, { capture: true });
-      window.removeEventListener('scroll', handleDismiss, { capture: true });
     };
   }, [onClose]);
 

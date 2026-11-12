@@ -131,7 +131,6 @@ export const IntegratedTerminalView: React.FC = () => {
   }, [activeSessionId, toolCallsBySession]);
 
   useEffect(() => {
-    if (viewMode !== "pty") return;
     const api = window.electronAPI;
     if (!api?.createTerminalSession || !containerRef.current) {
       setStatus("error");
@@ -234,12 +233,21 @@ export const IntegratedTerminalView: React.FC = () => {
       } catch {}
     });
 
+    // 拖拽改变抽屉宽度时 ResizeObserver 会逐帧触发，fit + IPC 开销较大，做 120ms 防抖
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const observer = new ResizeObserver(() => {
       if (disposed) return;
-      try {
-        fit.fit();
-        api.resizeTerminalSession?.(terminalId, term.cols, term.rows);
-      } catch {}
+      // 切到 Agent 子视图时终端容器被隐藏（display:none），此时 fit 会算出 0 行列，必须跳过
+      if (!containerRef.current?.offsetParent) return;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        if (disposed) return;
+        try {
+          fit.fit();
+          api.resizeTerminalSession?.(terminalId, term.cols, term.rows);
+        } catch {}
+      }, 120);
     });
     observer.observe(containerRef.current);
     resizeObserverRef.current = observer;
@@ -248,6 +256,7 @@ export const IntegratedTerminalView: React.FC = () => {
 
     return () => {
       disposed = true;
+      if (resizeTimer) clearTimeout(resizeTimer);
       inputDisposable.dispose();
       unsubscribeFonts();
       offData?.();
@@ -262,7 +271,27 @@ export const IntegratedTerminalView: React.FC = () => {
       fitRef.current = null;
       ptyIdRef.current = "";
     };
-  }, [activeSessionId, cwd, workDir, restartKey, viewMode]);
+  }, [activeSessionId, cwd, workDir, restartKey]);
+
+  // 从 Agent 子视图切回交互终端时重新测量尺寸（隐藏期间 cols/rows 会失效）
+  useEffect(() => {
+    if (viewMode !== "pty") return;
+    const raf = requestAnimationFrame(() => {
+      const term = termRef.current;
+      const fit = fitRef.current;
+      if (!term || !fit || !containerRef.current?.offsetParent) return;
+      try {
+        fit.fit();
+        window.electronAPI?.resizeTerminalSession?.(
+          ptyIdRef.current,
+          term.cols,
+          term.rows
+        );
+        term.focus();
+      } catch {}
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [viewMode]);
 
   const sendQuickCommand = (command: string) => {
     if (!ptyIdRef.current) return;
@@ -360,8 +389,12 @@ export const IntegratedTerminalView: React.FC = () => {
         </div>
       </div>
 
-      {viewMode === "pty" ? (
-        <>
+      {/* 交互终端与 Agent 视图始终保留 DOM，仅切换显示：切到 Agent 不得销毁 PTY 会话 */}
+      <div
+        className={`flex-1 min-h-0 flex-col ${
+          viewMode === "pty" ? "flex" : "hidden"
+        }`}
+      >
           {/* 快捷命令胶囊栏 */}
           <div className="px-3 py-1.5 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-panel-bg)] flex items-center gap-1.5 overflow-x-auto flex-shrink-0 select-none">
             <span className="text-[10px] text-[var(--ui-text-faint)] mr-0.5 flex-shrink-0">
@@ -392,9 +425,13 @@ export const IntegratedTerminalView: React.FC = () => {
               支持 REPL / vim / ssh / Ctrl+C / 窗口自适应
             </span>
           </div>
-        </>
-      ) : (
-        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2.5 font-mono text-xs custom-scrollbar select-text bg-[var(--ui-terminal-bg)]">
+      </div>
+
+      <div
+        className={`flex-1 overflow-y-auto p-3 flex-col gap-2.5 font-mono text-xs custom-scrollbar select-text bg-[var(--ui-terminal-bg)] ${
+          viewMode === "agent" ? "flex" : "hidden"
+        }`}
+      >
           {agentEntries.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center text-center py-12 select-none">
               <ClipboardList size={28} className="text-[var(--ui-text-faint)] mb-2 opacity-50" />
@@ -442,8 +479,7 @@ export const IntegratedTerminalView: React.FC = () => {
               </div>
             ))
           )}
-        </div>
-      )}
+      </div>
     </div>
   );
 };

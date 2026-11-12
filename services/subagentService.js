@@ -424,7 +424,9 @@ async function runSubagentLoop({
 
     const executeSubTool = async ({ subCallId, toolName, toolArgs, stepRecord }) => {
       let execResult;
-      if (!allowedSet.has(toolName) && !String(toolName).startsWith("mcp__")) {
+      // 严格按子代理工具白名单执行：MCP 工具并未提供给子代理，模型幻觉出的 mcp__* 必须拒绝，
+      // 否则只读子代理可借父会话凭据调用有副作用的远端工具。
+      if (!allowedSet.has(toolName)) {
         execResult = {
           success: false,
           error: `子代理 [${agentDef.name}] 无权调用工具 ${toolName}`,

@@ -139,9 +139,9 @@ async function performWebSearch(query, searchConfig) {
 // ─── 网页内容抓取 ───────────────────────────────────────────
 
 async function scrapePageContent(url) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
     const response = await fetch(url, {
       signal: controller.signal,
       headers: {
@@ -150,7 +150,6 @@ async function scrapePageContent(url) {
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
       },
     });
-    clearTimeout(timeoutId);
     if (!response.ok) throw new Error(`HTTP 错误 ${response.status}`);
     const html = await response.text();
     const $ = cheerio.load(html);
@@ -161,6 +160,8 @@ async function scrapePageContent(url) {
     return { title, cleanText: bodyText.substring(0, 4000), success: true };
   } catch (err) {
     return { title: "", cleanText: "", success: false, error: err.message };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

@@ -285,8 +285,14 @@ async function checkoutWorkspaceBranch(workDir, branchName, createNew = false) {
   if (!safeBranch) {
     return { success: false, error: "分支名称不能为空" };
   }
+  // 防参数注入：分支名不允许以 - 开头（git 合法分支名本身也不允许），并显式用 -- 结束选项
+  if (safeBranch.startsWith("-")) {
+    return { success: false, error: "分支名称不能以 - 开头" };
+  }
 
-  const args = createNew ? ["checkout", "-b", safeBranch] : ["checkout", safeBranch];
+  const args = createNew
+    ? ["checkout", "-b", safeBranch]
+    : ["checkout", safeBranch, "--"];
   const res = await runGitExec(args, workDir);
 
   if (!res.ok) {

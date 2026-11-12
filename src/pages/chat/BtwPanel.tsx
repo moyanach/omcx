@@ -72,6 +72,7 @@ export const BtwPanel: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const { askBtw, cancelBtw } = useBtwChat();
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const pinnedRef = useRef(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
 
@@ -82,9 +83,19 @@ export const BtwPanel: React.FC<{ sessionId: string }> = ({ sessionId }) => {
     void askBtw(question, { sessionId });
   };
 
+  // 仅当用户原本就贴在底部时才自动跟随流式输出；上滚阅读或选中文本时保持原位
+  const handleScroll = () => {
+    const node = scrollRef.current;
+    if (!node) return;
+    pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+  };
+
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    if (!pinnedRef.current) return;
     node.scrollTop = node.scrollHeight;
   }, [threads]);
 
@@ -134,7 +145,11 @@ export const BtwPanel: React.FC<{ sessionId: string }> = ({ sessionId }) => {
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-3 py-3 space-y-4">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-3 py-3 space-y-4"
+      >
         {threads.length === 0 ? (
           <div className="h-full min-h-[220px] flex flex-col items-center justify-center text-center px-8 select-none">
             <div className="w-10 h-10 rounded-xl bg-[var(--ui-accent-sky-soft)] border border-[color:var(--ui-accent-sky-border)] flex items-center justify-center mb-3">

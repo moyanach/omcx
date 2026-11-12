@@ -1,4 +1,5 @@
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { z } = require("zod");
@@ -45,7 +46,25 @@ function buildCommand(scriptPath) {
   }
 }
 
-function runScript(scriptPath, args, cwd, timeoutMs, signal) {
+function buildScriptEnv(allowFullEnv) {
+  const env = { ...process.env };
+  if (!allowFullEnv) {
+    // 技能脚本来自第三方（技能市场/克隆仓库），默认不继承宿主机密钥类环境变量
+    for (const key of Object.keys(env)) {
+      if (/(KEY|TOKEN|SECRET|PASSWD|PASSWORD|CREDENTIAL|AUTH)/i.test(key)) {
+        delete env[key];
+      }
+    }
+  }
+  return {
+    ...env,
+    OMCX_SKILL_SCRIPT: "1",
+    COLORTERM: "truecolor",
+    NO_COLOR: "1",
+  };
+}
+
+function runScript(scriptPath, args, cwd, timeoutMs, signal, allowFullEnv = false) {
   return new Promise((resolve) => {
     const { command, prefix } = buildCommand(scriptPath);
     let stdout = "";
@@ -61,12 +80,7 @@ function runScript(scriptPath, args, cwd, timeoutMs, signal) {
     try {
       child = spawn(command, [...prefix, scriptPath, ...args], {
         cwd,
-        env: {
-          ...process.env,
-          OMCX_SKILL_SCRIPT: "1",
-          COLORTERM: "truecolor",
-          NO_COLOR: "1",
-        },
+        env: buildScriptEnv(allowFullEnv),
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (err) {
@@ -197,9 +211,23 @@ class RunSkillScriptTool extends StructuredTool {
       });
     }
 
-    const insideWorkspace = (__toolContext?.allowedFolders || []).some((folder) =>
-      isUnderFolder(realScript, folder)
-    );
+    // 只有“可写工作区目录 / 当前工作目录”内的技能脚本才视为工作区脚本。
+    // 全局 Skills/Memory 目录已被 main.js 自动加入 allowedFolders（用于免授权读取），
+    // 这里若继续用 allowedFolders 判定，会让全局技能脚本绕过审批直接执行。
+    const trustedScriptRoots = [
+      ...(Array.isArray(__toolContext?.writableFolders)
+        ? __toolContext.writableFolders
+        : []),
+      ...(__toolContext?.workDir ? [__toolContext.workDir] : []),
+    ];
+    const globalSkillRoots = [
+      path.join(os.homedir(), ".omcx", "skills"),
+      path.join(os.homedir(), ".agents", "skills"),
+    ];
+    const insideWorkspace =
+      trustedScriptRoots.length > 0 &&
+      trustedScriptRoots.some((folder) => isUnderFolder(realScript, folder)) &&
+      !globalSkillRoots.some((root) => isUnderFolder(realScript, root));
     // 全局技能脚本位于工作区之外时必须经过用户审批；ask 模式同样确认
     if (!insideWorkspace || policy?.confirmCommand) {
       if (typeof __checkPermission !== "function") {
@@ -225,7 +253,8 @@ class RunSkillScriptTool extends StructuredTool {
       splitArgs(args),
       skillRoot,
       timeout_ms || DEFAULT_TIMEOUT_MS,
-      __toolContext?.abortSignal
+      __toolContext?.abortSignal,
+      permissionMode === PERMISSION_MODES.FULL_ACCESS
     );
     return JSON.stringify({
       success: result.success,

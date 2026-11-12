@@ -29,7 +29,7 @@ export const ConnectorsCard: React.FC = () => {
   ];
 
   return (
-    <div className='bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl overflow-hidden transition-all duration-200 select-none titlebar-no-drag'>
+    <div className='border-b border-[color:var(--ui-divider-hairline)] transition-colors select-none titlebar-no-drag last:border-b-0'>
       {/* 头部标题与折叠开关 */}
       <button
         onClick={() => setIsOpen(!isOpen)}

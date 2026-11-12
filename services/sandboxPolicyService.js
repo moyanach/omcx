@@ -95,7 +95,7 @@ function getPermissionModePolicy(mode) {
 /**
  * 解析物理真实路径（兼容尚未创建的文件与多级符号链接，例如 macOS /tmp -> /private/tmp）
  */
-function resolveRealPathSafe(targetPath) {
+function resolveRealPathSafe(targetPath, depth = 0) {
   if (!targetPath || typeof targetPath !== "string") return "";
   const abs = path.resolve(targetPath);
   const realpathFn = fs.realpathSync.native || fs.realpathSync;
@@ -103,6 +103,18 @@ function resolveRealPathSafe(targetPath) {
   try {
     if (fs.existsSync(abs)) {
       return realpathFn(abs);
+    }
+    // 悬挂符号链接：existsSync 会因目标不存在而返回 false，但写入仍会跟随链接落到工作区外。
+    // 先解析链接目标再做边界判定（限定递归深度，防止符号链接环）。
+    if (depth < 16) {
+      const lst = fs.lstatSync(abs);
+      if (lst.isSymbolicLink()) {
+        const linkTarget = fs.readlinkSync(abs);
+        return resolveRealPathSafe(
+          path.resolve(path.dirname(abs), linkTarget),
+          depth + 1
+        );
+      }
     }
   } catch {
     // 忽略权限或瞬态异常，向下走祖先回溯
@@ -194,6 +206,9 @@ function getSensitiveBlacklistPaths() {
     ...omcxDbFiles,
     // 客户端自身核心配置（包含明文 API Key 与全局 MCP 配置）
     ...omcxConfigFiles,
+    // 会话历史与附件目录：与文件工具的 checkSensitivePath 保持一致，
+    // 防止 run_command 绕过 read_file 的会话数据保护直接 cat 全部历史
+    ...omcxHomes.map((home) => path.join(home, "sessions")),
     // 宿主机 SSH / 云厂商 / GPG / 密钥链凭据
     path.join(USER_HOME, ".ssh"),
     path.join(USER_HOME, ".aws"),

@@ -160,9 +160,9 @@ export const WorkspaceCard: React.FC = () => {
 
   return (
     <>
-      <div className='bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl overflow-hidden transition-all duration-200 select-none'>
+      <div className='border-b border-[color:var(--ui-divider-hairline)] transition-colors select-none last:border-b-0'>
         {/* 头部标题与操作区 */}
-        <div className='flex items-center justify-between px-4 py-3 bg-[var(--ui-card-header-bg)] border-b border-[color:var(--ui-divider-hairline)]'>
+        <div className='flex items-center justify-between px-4 py-3'>
           <button
             onClick={() => setIsOpen(!isOpen)}
             className='flex items-center gap-2 text-left hover:text-[var(--ui-text-primary)] transition-colors flex-1'
@@ -199,7 +199,7 @@ export const WorkspaceCard: React.FC = () => {
           <div className='p-3.5 flex flex-col gap-3'>
             {/* 1. 当前工作空间卡片 (展示工作空间名称 + 挂载的全部源文件夹) */}
             {currentWorkspace ? (
-              <div className='p-3 rounded-xl bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] flex flex-col gap-2.5'>
+              <div className='p-3 rounded-lg bg-[var(--ui-block-bg)] flex flex-col gap-2.5'>
                 <div className='flex items-center justify-between'>
                   <div className='flex items-center gap-2 min-w-0'>
                     <div className='w-6 h-6 rounded-md bg-[var(--ui-accent-blue-soft)] border border-[color:var(--ui-accent-blue-border)] flex items-center justify-center text-[var(--ui-accent-blue)] flex-shrink-0'>
@@ -288,7 +288,7 @@ export const WorkspaceCard: React.FC = () => {
             ) : (
               <div
                 onClick={() => handleOpenEditModal()}
-                className='p-4 rounded-xl border border-dashed border-[color:var(--ui-border-subtle)] hover:border-[color:var(--ui-accent-blue-border)] bg-[var(--ui-card-inner-bg)] hover:bg-[var(--ui-block-hover-bg)] flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center transition-all'
+                className='p-4 rounded-lg border border-dashed border-[color:var(--ui-border-subtle)] hover:border-[color:var(--ui-accent-blue-border)] hover:bg-[var(--ui-block-hover-bg)] flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center transition-all'
               >
                 <FolderOpen size={20} className='text-[var(--ui-text-muted)]' />
                 <span className='text-xs font-medium text-[var(--ui-text-secondary)]'>暂无多目录工作空间</span>

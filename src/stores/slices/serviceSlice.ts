@@ -67,7 +67,7 @@ export const createServiceSlice: StateCreator<
     try {
       const [mcps, skills, subagents] = await Promise.all([
         window.electronAPI.getMcpServers ? window.electronAPI.getMcpServers(workDir) : [],
-        window.electronAPI.getSkills ? window.electronAPI.getSkills(workDir) : [],
+        window.electronAPI.getSkills ? window.electronAPI.getSkills(workDir, true) : [],
         window.electronAPI.getSubagents ? window.electronAPI.getSubagents(workDir) : [],
       ]);
       if (seq !== mcpRefreshSeq) return;

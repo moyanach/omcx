@@ -18,8 +18,12 @@ import {
   Loader2,
   MessageSquareText,
   KeyRound,
+  Trash2,
+  Upload,
+  Store,
 } from 'lucide-react';
 import { useChatStore, SkillItem, SubagentItem } from '@/stores/chatStore';
+import SkillMarketModal from '@/components/skills/SkillMarketModal';
 
 export const ToolsView: React.FC = () => {
   const { skills, mcpServers, subagents, refreshMcpAndSkills, sessions, activeSessionId } = useChatStore();
@@ -42,6 +46,8 @@ export const ToolsView: React.FC = () => {
   const [oauthState, setOauthState] = useState<Record<string, any>>({});
   const [oauthBusy, setOauthBusy] = useState('');
   const [oauthNotices, setOauthNotices] = useState<Record<string, string>>({});
+  const [skillNotice, setSkillNotice] = useState('');
+  const [marketOpen, setMarketOpen] = useState(false);
 
   // 技能次级筛选
   const filteredSkills = skills.filter((s) => {
@@ -58,6 +64,74 @@ export const ToolsView: React.FC = () => {
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const flashSkillNotice = (text: string) => {
+    setSkillNotice(text);
+    setTimeout(() => setSkillNotice((current) => (current === text ? '' : current)), 3000);
+  };
+
+  const handleToggleSkill = async (skill: SkillItem, event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (!window.electronAPI?.toggleSkill) return;
+    const nextEnabled = skill.enabled === false;
+    const res = await window.electronAPI.toggleSkill(skill.name, nextEnabled);
+    if (!res?.success) {
+      flashSkillNotice(res?.error || '切换技能状态失败');
+      return;
+    }
+    flashSkillNotice(nextEnabled ? `已启用「${skill.name}」` : `已停用「${skill.name}」`);
+    await refreshMcpAndSkills(activeSession?.workDir);
+  };
+
+  const handleDeleteSkill = async (skill: SkillItem, event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (!window.electronAPI?.deleteSkill || !skill.filePath) return;
+    const confirmed = window.confirm(
+      `确认删除技能「${skill.name}」？\n\n将删除磁盘上的技能文件${
+        skill.scope === 'project' ? '（项目专属技能，仅影响当前项目）' : ''
+      }，此操作不可撤销。`
+    );
+    if (!confirmed) return;
+    const res = await window.electronAPI.deleteSkill(skill.filePath, activeSession?.workDir);
+    if (!res?.success) {
+      flashSkillNotice(res?.error || '删除技能失败');
+      return;
+    }
+    flashSkillNotice(`已删除「${skill.name}」`);
+    await refreshMcpAndSkills(activeSession?.workDir);
+  };
+
+  const handleImportSkill = async (mode: 'file' | 'folder') => {
+    if (!window.electronAPI?.importSkill) return;
+    const payload = { mode, workDir: activeSession?.workDir };
+    let res = await window.electronAPI.importSkill(payload);
+    if (res?.canceled) return;
+    if (res?.code === 'exists') {
+      const overwrite = window.confirm(`技能「${res.name}」已存在，是否覆盖安装？`);
+      if (!overwrite) return;
+      res = await window.electronAPI.importSkill({ ...payload, sourcePath: res.sourcePath, overwrite: true });
+    }
+    if (!res?.success) {
+      flashSkillNotice(res?.error || '导入技能失败');
+      return;
+    }
+    flashSkillNotice(`已导入「${res.name}」`);
+    await refreshMcpAndSkills(activeSession?.workDir);
+  };
+
+  const handleDeleteMcpServer = async (server: any) => {
+    if (!window.electronAPI?.deleteMcpServer) return;
+    const confirmed = window.confirm(
+      `确认删除 MCP 服务器「${server.name}」？\n\n将从 ~/.omcx/mcp.json 中移除该配置并断开连接。`
+    );
+    if (!confirmed) return;
+    const res = await window.electronAPI.deleteMcpServer(server.id);
+    if (!res?.success) {
+      console.error('删除 MCP 服务器失败:', res?.error);
+      return;
+    }
+    await refreshMcpAndSkills(activeSession?.workDir);
   };
 
   const handleToggleMcpServer = async (serverId: string, currentEnabled: boolean) => {
@@ -391,9 +465,35 @@ export const ToolsView: React.FC = () => {
                   </button>
                 </div>
 
-                <span className='text-[11px] text-neutral-500'>
-                  点击卡片可查看完整 Prompt 与执行指南
-                </span>
+                <div className='flex items-center gap-2 flex-shrink-0'>
+                  {skillNotice && (
+                    <span className='text-[11px] text-emerald-400 max-w-[220px] truncate'>{skillNotice}</span>
+                  )}
+                  <button
+                    onClick={() => handleImportSkill('file')}
+                    className='h-7 px-2.5 rounded-lg bg-[#232323] border border-[#333] text-[11px] text-neutral-200 hover:bg-[#2a2a2a] transition-colors flex items-center gap-1.5'
+                    title='导入单个 .md 技能或 .zip 技能包到 ~/.omcx/skills'
+                  >
+                    <Upload size={12} />
+                    <span>上传技能</span>
+                  </button>
+                  <button
+                    onClick={() => handleImportSkill('folder')}
+                    className='h-7 px-2.5 rounded-lg bg-[#232323] border border-[#333] text-[11px] text-neutral-200 hover:bg-[#2a2a2a] transition-colors flex items-center gap-1.5'
+                    title='导入包含 SKILL.md 的技能文件夹'
+                  >
+                    <FolderGit2 size={12} />
+                    <span>导入文件夹</span>
+                  </button>
+                  <button
+                    onClick={() => setMarketOpen(true)}
+                    className='h-7 px-2.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-600 border border-emerald-500/40 text-[11px] text-white font-medium transition-colors flex items-center gap-1.5'
+                    title='粘贴技能市场链接，分页浏览并直接下载'
+                  >
+                    <Store size={12} />
+                    <span>技能市场</span>
+                  </button>
+                </div>
               </div>
 
             {/* 卡片网格 */}
@@ -409,7 +509,9 @@ export const ToolsView: React.FC = () => {
                     <div
                       key={skill.id}
                       onClick={() => setInspectingSkill(skill)}
-                      className='p-4 rounded-2xl bg-[#1c1c1c] border border-[#292929] hover:border-[#383838] hover:bg-[#202020] transition-all duration-150 cursor-pointer flex flex-col justify-between gap-3 group shadow-sm'
+                      className={`p-4 rounded-2xl bg-[#1c1c1c] border border-[#292929] hover:border-[#383838] hover:bg-[#202020] transition-all duration-150 cursor-pointer flex flex-col justify-between gap-3 group shadow-sm ${
+                        skill.enabled === false ? 'opacity-60' : ''
+                      }`}
                     >
                       <div className='flex flex-col gap-2'>
                         <div className='flex items-center justify-between'>
@@ -434,6 +536,29 @@ export const ToolsView: React.FC = () => {
                             >
                               {isProject ? 'Project' : 'Global'}
                             </span>
+                            {skill.enabled === false && (
+                              <span className='px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/25'>
+                                已停用
+                              </span>
+                            )}
+                            <button
+                              onClick={(event) => handleToggleSkill(skill, event)}
+                              className={`p-1 rounded-md border transition-colors ${
+                                skill.enabled === false
+                                  ? 'bg-[#252525] text-neutral-500 border-[#333] hover:text-emerald-400'
+                                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25 hover:bg-emerald-500/20'
+                              }`}
+                              title={skill.enabled === false ? '点击启用（重新注入 Agent 上下文）' : '点击停用（不再进入 Agent 上下文）'}
+                            >
+                              <Power size={12} />
+                            </button>
+                            <button
+                              onClick={(event) => handleDeleteSkill(skill, event)}
+                              className='p-1 rounded-md bg-[#252525] text-neutral-500 border border-[#333] hover:text-rose-400 hover:border-rose-500/30 transition-colors'
+                              title='删除该技能文件'
+                            >
+                              <Trash2 size={12} />
+                            </button>
                           </div>
                         </div>
 
@@ -653,17 +778,26 @@ export const ToolsView: React.FC = () => {
                             <Shield size={13} />
                           </span>
                         ) : (
-                          <button
-                            onClick={() => handleToggleMcpServer(server.id, server.enabled)}
-                            className={`p-1.5 rounded-lg border transition-colors ${
-                              server.enabled
-                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
-                                : 'bg-[#252525] text-neutral-500 border-[#333] hover:text-neutral-300'
-                            }`}
-                            title={server.enabled ? '点击停用' : '点击启用'}
-                          >
-                            <Power size={13} />
-                          </button>
+                          <div className='flex items-center gap-1'>
+                            <button
+                              onClick={() => handleToggleMcpServer(server.id, server.enabled)}
+                              className={`p-1.5 rounded-lg border transition-colors ${
+                                server.enabled
+                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
+                                  : 'bg-[#252525] text-neutral-500 border-[#333] hover:text-neutral-300'
+                              }`}
+                              title={server.enabled ? '点击停用' : '点击启用'}
+                            >
+                              <Power size={13} />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteMcpServer(server)}
+                              className='p-1.5 rounded-lg bg-[#252525] text-neutral-500 border border-[#333] hover:text-rose-400 hover:border-rose-500/30 transition-colors'
+                              title='删除该 MCP 服务器配置'
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
                         )}
                       </div>
 
@@ -935,6 +1069,13 @@ export const ToolsView: React.FC = () => {
         )}
         </div>
       </div>
+
+      {/* ═════════ 技能市场弹层 ═════════ */}
+      <SkillMarketModal
+        open={marketOpen}
+        onClose={() => setMarketOpen(false)}
+        onInstalled={() => refreshMcpAndSkills(activeSession?.workDir)}
+      />
 
       {/* ═════════ 3. SKILL 详情弹窗 (createPortal 挂载至 body 顶层，z-[99999] 防遮挡) ═════════ */}
       {inspectingSkill && typeof document !== 'undefined' && createPortal(

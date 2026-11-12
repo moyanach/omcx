@@ -23,18 +23,38 @@ const MAX_STDOUT_CHARS = 5000;
 const MAX_STDERR_CHARS = 2000;
 
 const DANGEROUS_COMMAND_PATTERNS = [
-  /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|--recursive)\b/i,
   /\bgit\s+reset\s+--hard\b/i,
-  /\bgit\s+push\s+([^\n]*\s+)?(--force|-f)\b/i,
-  /\bgit\s+clean\s+-[a-zA-Z]*f/i,
+  /\bgit\s+push\s+([^\n]*\s+)?(--force|-f|\+\S+)\b/i,
+  /\bgit\s+clean\s+-[a-zA-Z]*[fdx]/i,
   /\bsudo\s+/i,
   /\b(?:mkfs|fdisk|dd\s+if=|shutdown|reboot)\b/i,
   /\b(?:drop\s+table|drop\s+database|truncate\s+table)\b/i,
+  // find 的 -delete/-exec rm 等价于批量删除，统一纳入高危确认
+  /\bfind\b[^\n]*\s-delete\b/i,
+  /\bfind\b[^\n]*\s-exec\s+(?:rm|shred)\b/i,
 ];
+
+/**
+ * rm 的递归/强制参数经常被拆成 rm -r -f、rm -f -r、rm --recursive --force 等形态，
+ * 单一正则容易被绕过，这里按参数逐个判定（只要出现递归或强制即视为高危）。
+ */
+function isDangerousRm(text) {
+  const match = text.match(/\brm\b([^\n;&|]*)/i);
+  if (!match) return false;
+  const args = match[1].split(/\s+/).filter(Boolean);
+  let recursive = false;
+  let force = false;
+  for (const arg of args) {
+    if (arg === "--recursive" || /^-[a-zA-Z]*[rR][a-zA-Z]*$/.test(arg)) recursive = true;
+    if (arg === "--force" || /^-[a-zA-Z]*f[a-zA-Z]*$/.test(arg)) force = true;
+  }
+  return recursive || force;
+}
 
 function isDangerousCommand(cmd) {
   const text = String(cmd || "").trim();
   if (!text) return false;
+  if (isDangerousRm(text)) return true;
   return DANGEROUS_COMMAND_PATTERNS.some((pattern) => pattern.test(text));
 }
 

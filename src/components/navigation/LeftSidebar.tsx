@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useChatStore, type Session } from "@/stores/chatStore";
 import { useAppStore } from "@/stores/appStore";
+import { usePanelResize } from "@/hooks/usePanelResize";
 import { formatRelativeTime } from "@/lib/relativeTime";
 
 interface ProjectGroup {
@@ -42,7 +43,37 @@ const LeftSidebar: React.FC = () => {
     deleteSession,
     updateSessionTitle,
   } = useChatStore();
-  const { activeNavTab, setActiveNavTab } = useAppStore();
+  const {
+    activeNavTab,
+    setActiveNavTab,
+    settingsOpen,
+    openSettings,
+    leftSidebarWidth,
+    setLeftSidebarWidth,
+  } = useAppStore();
+
+  // 侧边栏右侧边缘拖拽调宽：rAF 直写 DOM，松手提交一次
+  const {
+    targetRef: sidebarRef,
+    onPointerDown: startSidebarResize,
+    widthRef: sidebarWidthRef,
+    isResizingRef: sidebarResizingRef,
+    isDragging: sidebarResizing,
+  } = usePanelResize({
+    edge: "right",
+    min: 220,
+    max:
+      typeof window !== "undefined"
+        ? Math.min(520, Math.floor(window.innerWidth * 0.4))
+        : 520,
+    getWidth: () => leftSidebarWidth,
+    onCommit: (width) => setLeftSidebarWidth(width),
+  });
+
+  const liveSidebarWidth =
+    sidebarResizingRef.current && sidebarWidthRef.current != null
+      ? sidebarWidthRef.current
+      : null;
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -344,7 +375,14 @@ const LeftSidebar: React.FC = () => {
   const initial = (username || "本").trim().charAt(0).toUpperCase();
 
   return (
-    <aside className="w-[280px] h-full bg-[var(--ui-panel-bg)] border-r border-[color:var(--ui-divider-hairline)] flex flex-col flex-shrink-0 select-none">
+    <aside
+      ref={sidebarRef as React.RefObject<HTMLElement>}
+      style={{
+        width: liveSidebarWidth != null ? `${liveSidebarWidth}px` : leftSidebarWidth,
+        maxWidth: "40vw",
+      }}
+      className="relative h-full bg-[var(--ui-panel-bg)] border-r border-[color:var(--ui-divider-hairline)] flex flex-col flex-shrink-0 select-none"
+    >
       {/* 顶部留出 macOS 原生红绿灯安全间距与窗口拖拽区 */}
       <div className="h-9 w-full titlebar-drag flex-shrink-0" />
 
@@ -476,9 +514,9 @@ const LeftSidebar: React.FC = () => {
         </div>
         <span className="flex-1 min-w-0 text-xs text-[var(--ui-text-secondary)] truncate">{username}</span>
         <button
-          onClick={() => setActiveNavTab("settings")}
+          onClick={() => openSettings()}
           className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors ${
-            activeNavTab === "settings"
+            settingsOpen
               ? "text-[var(--ui-accent-blue)] bg-[var(--ui-accent-blue-soft)]"
               : "text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)]"
           }`}
@@ -487,6 +525,18 @@ const LeftSidebar: React.FC = () => {
           <Settings size={15} />
         </button>
       </div>
+
+      {/* 右侧拖拽调宽手柄（双击恢复默认 280px） */}
+      <div
+        onPointerDown={startSidebarResize}
+        onDoubleClick={() => setLeftSidebarWidth(280)}
+        className={`absolute right-0 top-0 bottom-0 w-2.5 translate-x-1/2 cursor-col-resize z-40 titlebar-no-drag transition-colors ${
+          sidebarResizing
+            ? "bg-[var(--ui-accent-blue)]/60"
+            : "hover:bg-[var(--ui-accent-blue-soft)]"
+        }`}
+        title="拖拽调整侧边栏宽度（双击恢复默认）"
+      />
     </aside>
   );
 };

@@ -1,6 +1,22 @@
 import { StateCreator } from "zustand";
 import type { ChatState, WorkbenchTab } from "../chatStore";
 
+const WORKBENCH_WIDTH_KEY = "omcx.workbench_width";
+const DEFAULT_WORKBENCH_WIDTH = 560;
+const MIN_WORKBENCH_WIDTH = 360;
+
+const readStoredWorkbenchWidth = () => {
+  if (typeof window === "undefined") return DEFAULT_WORKBENCH_WIDTH;
+  try {
+    const raw = Number(window.localStorage.getItem(WORKBENCH_WIDTH_KEY));
+    return Number.isFinite(raw) && raw > 0
+      ? Math.max(MIN_WORKBENCH_WIDTH, Math.round(raw))
+      : DEFAULT_WORKBENCH_WIDTH;
+  } catch {
+    return DEFAULT_WORKBENCH_WIDTH;
+  }
+};
+
 export interface WorkbenchSlice {
   workbenchOpen: boolean;
   workbenchWidth: number;
@@ -35,7 +51,7 @@ export const createWorkbenchSlice: StateCreator<
   WorkbenchSlice
 > = (set, get) => ({
   workbenchOpen: false,
-  workbenchWidth: 560,
+  workbenchWidth: readStoredWorkbenchWidth(),
   workbenchMaximized: true,
   workbenchTabs: [{ id: "t_home", title: "工具台", type: "newtab" }],
   activeWorkbenchTabId: "t_home",
@@ -45,8 +61,14 @@ export const createWorkbenchSlice: StateCreator<
   setWorkbenchOpen: (open) => set({ workbenchOpen: open }),
   setWorkbenchWidth: (width) => {
     const maxW =
-      typeof window !== "undefined" ? Math.floor(window.innerWidth * 0.9) : 1800;
-    set({ workbenchWidth: Math.max(400, Math.min(maxW, Math.round(width))) });
+      typeof window !== "undefined" ? Math.floor(window.innerWidth * 0.92) : 1800;
+    const next = Math.max(MIN_WORKBENCH_WIDTH, Math.min(maxW, Math.round(width)));
+    set({ workbenchWidth: next });
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(WORKBENCH_WIDTH_KEY, String(next));
+      } catch {}
+    }
   },
   setWorkbenchMaximized: (maximized) => set({ workbenchMaximized: maximized }),
   setPendingMentionInsert: (text) => set({ pendingMentionInsert: text }),

@@ -106,7 +106,7 @@ export const ChangesCard: React.FC = () => {
   };
 
   return (
-    <div className='bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl overflow-hidden transition-all duration-200 select-none titlebar-no-drag'>
+    <div className='border-b border-[color:var(--ui-divider-hairline)] transition-colors select-none titlebar-no-drag last:border-b-0'>
       {/* 头部标题与折叠开关 */}
       <button
         onClick={() => setIsOpen(!isOpen)}
@@ -146,7 +146,7 @@ export const ChangesCard: React.FC = () => {
           ) : (
             <div className='flex flex-col gap-2'>
               {/* 总增删行与 Commit 按钮 */}
-              <div className='flex items-center justify-between bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] rounded-xl px-2.5 py-1.5 gap-2'>
+              <div className='flex items-center justify-between bg-[var(--ui-block-bg)] rounded-lg px-2.5 py-1.5 gap-2'>
                 <div className='flex items-center gap-2 font-mono text-xs min-w-0'>
                   <span className='text-[var(--ui-accent-emerald)] font-semibold'>
                     +{insertions.toLocaleString()}
@@ -180,7 +180,7 @@ export const ChangesCard: React.FC = () => {
 
               {/* 提交面板 */}
               {commitOpen && (
-                <div className='rounded-xl bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] p-2.5 space-y-2'>
+                <div className='rounded-lg bg-[var(--ui-block-bg)] p-2.5 space-y-2'>
                   <textarea
                     value={commitMessage}
                     onChange={(e) => setCommitMessage(e.target.value)}
@@ -221,7 +221,7 @@ export const ChangesCard: React.FC = () => {
                     <div
                       key={idx}
                       onClick={() => openDiffInWorkbench(file.path)}
-                      className='flex items-center justify-between py-1 px-2 rounded-lg bg-[var(--ui-card-inner-bg)] hover:bg-[var(--ui-block-hover-bg)] text-xs transition-colors cursor-pointer group'
+                      className='flex items-center justify-between py-1 px-2 rounded-md bg-[var(--ui-block-bg)] hover:bg-[var(--ui-block-hover-bg)] text-xs transition-colors cursor-pointer group'
                       title={`点击在右侧工作台查看 Diff: ${file.path}`}
                     >
                       <div className='flex items-center gap-2 min-w-0 pr-2'>

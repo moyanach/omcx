@@ -28,6 +28,7 @@ import {
   Type,
   RotateCw,
   Webhook,
+  X,
 } from "lucide-react";
 import {
   loadTheme,
@@ -267,7 +268,15 @@ const createEmptyRow = (defaultContext = 128000): ModelDraftRow => ({
   outputPrice: 0,
 });
 
-const SettingsView: React.FC = () => {
+interface SettingsViewProps {
+  /** 渲染形态：整页路由或覆盖式弹层 */
+  variant?: "page" | "modal";
+  /** 弹层模式下关闭弹层的回调 */
+  onClose?: () => void;
+}
+
+const SettingsView: React.FC<SettingsViewProps> = ({ variant = "page", onClose }) => {
+  const isModal = variant === "modal";
   const [activeTab, setActiveTab] = useState<"general" | "models">("models");
 
   // 配置状态
@@ -876,10 +885,16 @@ const SettingsView: React.FC = () => {
   };
 
   return (
-    <div className="flex h-full w-full bg-[#161616] overflow-hidden select-none flex-col">
-      {/* Toast 提示 */}
+    <div
+      className={`relative flex h-full w-full bg-[#161616] overflow-hidden select-none flex-col ${
+        isModal ? "rounded-2xl" : ""
+      }`}
+    >
+      {/* Toast 提示（弹层内定位在面板顶部，整页模式仍固定在窗口顶部） */}
       <div
-        className={`fixed top-6 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl shadow-2xl transition-all duration-300 z-50 ${
+        className={`${
+          isModal ? "absolute top-3" : "fixed top-6"
+        } left-1/2 -translate-x-1/2 flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl shadow-2xl transition-all duration-300 z-50 ${
           toastMsg ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-4 pointer-events-none"
         }`}
       >
@@ -887,19 +902,40 @@ const SettingsView: React.FC = () => {
         <span className="text-xs font-medium">{toastMsg}</span>
       </div>
 
-      {/* 顶部 Header：仅保留左侧标题与返回按钮 */}
-      <div className="h-12 border-b border-[#242424] bg-[#141414] px-5 flex items-center justify-between flex-shrink-0 titlebar-drag">
+      {/* 顶部 Header：整页模式返回会话；弹层模式仅保留标题、Esc 提示与关闭按钮 */}
+      <div
+        className={`h-12 border-b border-[#242424] bg-[#141414] px-5 flex items-center justify-between flex-shrink-0 ${
+          isModal ? "" : "titlebar-drag"
+        }`}
+      >
         <div className="flex items-center gap-2 text-neutral-100 font-semibold text-xs tracking-wide">
-          <button
-            onClick={() => setActiveNavTab("sessions")}
-            className="p-1 rounded-md text-neutral-400 hover:text-white hover:bg-white/[0.06] transition-colors titlebar-no-drag"
-            title="返回会话"
-          >
-            <ArrowLeft size={15} />
-          </button>
+          {!isModal && (
+            <button
+              onClick={() => setActiveNavTab("sessions")}
+              className="p-1 rounded-md text-neutral-400 hover:text-white hover:bg-white/[0.06] transition-colors titlebar-no-drag"
+              title="返回会话"
+            >
+              <ArrowLeft size={15} />
+            </button>
+          )}
           <SettingsIcon size={16} className="text-blue-400" />
           <span>系统设置</span>
         </div>
+
+        {isModal && (
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-mono text-neutral-500 px-1.5 py-0.5 rounded border border-[#2e2e2e] bg-[#1a1a1a]">
+              Esc
+            </span>
+            <button
+              onClick={onClose}
+              className="p-1 rounded-md text-neutral-400 hover:text-white hover:bg-white/[0.06] transition-colors"
+              title="关闭设置"
+            >
+              <X size={15} />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* 内容展示区 (居中自适应展开) */}

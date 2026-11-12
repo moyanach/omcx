@@ -336,7 +336,14 @@ const MessageInput: React.FC<Props> = ({
   const { items: mentionItems, grouped: mentionGrouped } = useMemo(
     () =>
       mention
-        ? filterUnifiedMentions(mention.query, fileIndex, skills, mcpServers, subagents)
+        ? filterUnifiedMentions(
+            mention.query,
+            fileIndex,
+            // 已停用的技能不再出现在 @ 引用候选里
+            (skills || []).filter((skill) => skill.enabled !== false),
+            mcpServers,
+            subagents
+          )
         : { items: [], grouped: { subagents: [], skills: [], mcps: [], files: [] } },
     [mention, fileIndex, skills, mcpServers, subagents]
   );
@@ -566,6 +573,10 @@ const MessageInput: React.FC<Props> = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // 中文输入法组合态下的 Enter 只是确认候选词，绝不能触发送信
+    if ((e.nativeEvent as any).isComposing || (e as any).keyCode === 229) {
+      return;
+    }
     if (slash && filteredSlashCommands.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();

@@ -13,6 +13,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const { execFile } = require("child_process");
 const { Worker } = require("worker_threads");
 const Database = require("better-sqlite3");
 
@@ -68,31 +69,64 @@ const MAX_CACHED_OUTPUT_SESSIONS = 100;
 const MAX_CACHED_REASONINGS = 200;
 
 /**
- * 拆分正文中的思考块：
- * { content: 最终正文, reasoning: <think>/<thinking> 内的推演内容 }
- * 用于持久化分流与按需查询，实现思考内容物理独立存储。
+ * 旧数据兼容：仅剥离正文中“成对且闭合”的思考标签。
+ *
+ * v2.1.9 后新消息的思考内容物理独立存储，正文不再包含任何思考标记；
+ * 本函数仅用于读取历史数据或迁移兜底。为避免再次出现“正文字面量标签
+ * 被误判为未闭合思考块”的灾难性截断，这里严禁再做未闭合标签的强制吞尾：
+ * 凡是找不到对应闭合标签的思考标签，一律按字面文本保留在正文中。
  */
-function splitThinkingContent(raw) {
+function extractLegacyThinking(raw) {
+  const text = String(raw || "");
+  if (!text || text.indexOf('<think>') === -1) {
+    return { content: text, reasoning: "" };
+  }
+
+  let cursor = 0;
+  let content = "";
   let reasoning = "";
-  let remaining = String(raw || "");
-  if (!remaining.includes("<think") && !remaining.includes("<thinking")) {
-    return { content: remaining, reasoning: "" };
-  }
-  remaining = remaining.replace(
-    /<(?:think|thinking)>([\s\S]*?)<\/(?:think|thinking)>/gi,
-    (_, inner) => {
-      const text = String(inner || "").trim();
-      if (text) reasoning += `${text}\n\n`;
-      return "";
+
+  while (cursor < text.length) {
+    const thinkOpen = text.indexOf('<think>', cursor);
+    const thinkingOpen = text.indexOf('<thinking>', cursor);
+    let openIdx = -1;
+    let openTag = "";
+    let closeTag = "";
+
+    if (thinkOpen !== -1 && (thinkingOpen === -1 || thinkOpen <= thinkingOpen)) {
+      openIdx = thinkOpen;
+      openTag = '<think>';
+      closeTag = '</think>';
+    } else if (thinkingOpen !== -1) {
+      openIdx = thinkingOpen;
+      openTag = '<thinking>';
+      closeTag = '</thinking>';
     }
-  );
-  const unclosed = remaining.match(/<(?:think|thinking)>([\s\S]*)$/i);
-  if (unclosed && unclosed.index !== undefined) {
-    const text = unclosed[1].trim();
-    if (text) reasoning += text;
-    remaining = remaining.slice(0, unclosed.index);
+
+    if (openIdx === -1) {
+      content += text.slice(cursor);
+      break;
+    }
+
+    const closeIdx = text.indexOf(closeTag, openIdx + openTag.length);
+    if (closeIdx === -1) {
+      // 未闭合：必须保留原文，不能吞尾
+      content += text.slice(cursor);
+      break;
+    }
+
+    content += text.slice(cursor, openIdx);
+    const inner = text.slice(openIdx + openTag.length, closeIdx).trim();
+    if (inner) reasoning = reasoning ? `${reasoning}\n\n${inner}` : inner;
+    cursor = closeIdx + closeTag.length;
   }
-  return { content: remaining.trim(), reasoning: reasoning.trim() };
+
+  return { content: content.trim(), reasoning: reasoning.trim() };
+
+}
+// 兼容旧调用名：对外仍暴露 splitThinkingContent，但实现改为非正则的安全提取
+function splitThinkingContent(raw) {
+  return extractLegacyThinking(raw);
 }
 
 /**
@@ -504,7 +538,7 @@ function initStorage() {
 
   if (!fs.existsSync(MCP_FILE)) {
     const defaultMcp = { mcpServers: {} };
-    fs.writeFileSync(MCP_FILE, JSON.stringify(defaultMcp, null, 2), "utf-8");
+    writeFileAtomicSync(MCP_FILE, JSON.stringify(defaultMcp, null, 2));
   }
 
   console.log(`[storageService] 存储层架构质变就绪 (0ms 内存秒读 + Worker Thread 异步持久化): ${DB_FILE}`);
@@ -733,7 +767,15 @@ function saveSession(session) {
     work_dir: session.work_dir !== undefined ? session.work_dir : (existing?.work_dir || null),
     permission_mode: session.permission_mode || existing?.permission_mode || "auto-sandbox",
     reasoning_effort: session.reasoning_effort || existing?.reasoning_effort || "medium",
-    archived: session.archived ? 1 : (existing?.archived ? 1 : 0),
+    // 显式传入 false 必须能够“取消归档”，不能被 existing.archived 覆盖
+    archived:
+      session.archived !== undefined
+        ? session.archived
+          ? 1
+          : 0
+        : existing?.archived
+        ? 1
+        : 0,
     created_at: session.created_at || existing?.created_at || now,
     updated_at: session.updated_at || now,
   };
@@ -781,8 +823,14 @@ function updateSessionWorkspace(sessionId, workspaceId, workDir = null) {
 function deleteSession(sessionId) {
   if (!sessionId) return { success: false };
 
-  // 1. 内存同步移除
+  // 1. 内存同步移除（同时清理该会话消息的思考内容缓存，避免残留占用）
   memorySessions = memorySessions.filter((s) => s.id !== sessionId);
+  const cachedMessages = memoryMessagesBySession.get(sessionId);
+  if (Array.isArray(cachedMessages)) {
+    for (const msg of cachedMessages) {
+      if (msg?.id) memoryReasoningsByMsgId.delete(msg.id);
+    }
+  }
   memoryMessagesBySession.delete(sessionId);
   memoryOutputsBySession.delete(sessionId);
 
@@ -944,6 +992,12 @@ async function getMessageReasoningAsync(messageId) {
 function addMessage(sessionId, message) {
   if (!sessionId || !message) return { success: false, error: "参数不完整" };
 
+  // 已删除会话的晚到写入（流式收尾/快照 flush）直接丢弃：
+  // Worker 队列是 FIFO，DELETE_SESSION 之后到达的 UPSERT 会重新插入孤儿消息行。
+  if (!memorySessions.some((s) => s.id === sessionId)) {
+    return { success: false, error: "会话不存在或已删除" };
+  }
+
   // 架构防御：若该会话尚未加载历史缓存，必须先调用 getMessages(sessionId) 预热内存池，
   // 杜绝首次写入直接覆盖导致历史消息丢失的重大时序缺口
   if (!memoryMessagesBySession.has(sessionId)) {
@@ -962,12 +1016,12 @@ function addMessage(sessionId, message) {
       ? message.reasoningContent
       : "";
 
-  // 双轨兼容：若未显式传 reasoning，但 rawContent 包含 <think>/<thinking>，剥离并物理分流
-  if (!reasoning && rawContent && (rawContent.includes("<think") || rawContent.includes("<thinking"))) {
-    const split = splitThinkingContent(rawContent);
-    if (split.reasoning) {
-      rawContent = split.content;
-      reasoning = split.reasoning;
+  // 旧数据兼容：仅在未显式提供 reasoning 时，安全剥离已成对闭合的历史思考标签
+  if (!reasoning && rawContent && rawContent.indexOf("<think") !== -1) {
+    const legacy = extractLegacyThinking(rawContent);
+    if (legacy.reasoning) {
+      rawContent = legacy.content;
+      reasoning = legacy.reasoning;
     }
   }
 
@@ -1104,16 +1158,42 @@ function deleteMessagesAfter(sessionId, timestamp) {
 // 附件管理 (Attachments) —— 物理沙箱落盘
 // ─────────────────────────────────────────────────────────────
 
+// 会话 ID / 附件名必须锁定为单层安全段，杜绝 ../../ 路径穿越改写/删除会话外文件
+const SAFE_SESSION_ID = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
+const SAFE_ATTACHMENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const SAFE_ATTACHMENT_EXT = /^[A-Za-z0-9]{1,12}$/;
+
+function isSafeSessionId(sessionId) {
+  const value = String(sessionId || "");
+  if (!SAFE_SESSION_ID.test(value)) return false;
+  const root = path.resolve(SESSIONS_DIR);
+  const resolved = path.resolve(root, value);
+  const relative = path.relative(root, resolved);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
 function getSessionAttachmentsDir(sessionId) {
+  if (!isSafeSessionId(sessionId)) {
+    throw new Error("非法会话 ID");
+  }
   return path.join(SESSIONS_DIR, sessionId, "attachments");
 }
 
 function saveAttachmentBuffer(sessionId, id, ext, buffer) {
+  const safeId = String(id || "");
+  const rawExt = String(ext || "").replace(/^\./, "");
+  // 扩展名来自原始文件名，可能超长或含特殊字符：截断/降级而不是让整次上传失败
+  const safeExt = SAFE_ATTACHMENT_EXT.test(rawExt)
+    ? rawExt
+    : rawExt.replace(/[^A-Za-z0-9]/g, "").slice(0, 12) || "bin";
+  if (!SAFE_ATTACHMENT_ID.test(safeId)) {
+    throw new Error("非法附件标识");
+  }
   const dir = getSessionAttachmentsDir(sessionId);
   ensureDir(dir);
-  const filePath = path.join(dir, `${id}.${ext}`);
+  const filePath = path.join(dir, `${safeId}.${safeExt}`);
   fs.writeFileSync(filePath, buffer);
-  return { id, path: filePath, size: buffer.length };
+  return { id: safeId, path: filePath, size: buffer.length };
 }
 
 function isSessionAttachmentPath(filePath) {
@@ -1144,6 +1224,10 @@ function deleteAttachmentFile(filePath) {
 }
 
 function deleteSessionAttachments(sessionId) {
+  if (!isSafeSessionId(sessionId)) {
+    console.warn(`[storageService] 拒绝删除非法会话目录: ${sessionId}`);
+    return { success: false, error: "非法会话 ID" };
+  }
   const sessionDir = path.join(SESSIONS_DIR, sessionId);
   try {
     fs.rmSync(sessionDir, { recursive: true, force: true });
@@ -1385,6 +1469,28 @@ function getMcpServers(workDir = null) {
   });
 }
 
+/**
+ * 原子写文件：同目录临时文件 + fsync + rename，避免进程崩溃/断电留下半截 JSON。
+ */
+function writeFileAtomicSync(targetPath, content) {
+  const dir = path.dirname(targetPath);
+  ensureDir(dir);
+  const tmpPath = path.join(
+    dir,
+    `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.tmp`
+  );
+  const fd = fs.openSync(tmpPath, "w");
+  try {
+    fs.writeFileSync(fd, content, "utf-8");
+    try {
+      fs.fsyncSync(fd);
+    } catch {}
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmpPath, targetPath);
+}
+
 function saveGlobalMcpServers(serversMap) {
   ensureDir(path.dirname(MCP_FILE));
   // 读取现有配置，避免 UI 回传空 env 时抹掉用户原本配置的环境变量
@@ -1463,7 +1569,7 @@ function saveGlobalMcpServers(serversMap) {
     if (typeof item.enabled === "boolean") clean.enabled = item.enabled;
     cleanServers[id] = clean;
   }
-  fs.writeFileSync(MCP_FILE, JSON.stringify({ mcpServers: cleanServers }, null, 2), "utf-8");
+  writeFileAtomicSync(MCP_FILE, JSON.stringify({ mcpServers: cleanServers }, null, 2));
   return true;
 }
 
@@ -1641,7 +1747,35 @@ function scanSkillsDir(targetDir, scope = "global") {
   return result;
 }
 
-function getSkills(workDir = null) {
+// ─── 技能启用 / 停用（持久化到 configs.disabled_skills）──────────
+const DISABLED_SKILLS_KEY = "disabled_skills";
+
+function getDisabledSkillNames() {
+  const raw = getConfig(DISABLED_SKILLS_KEY);
+  if (Array.isArray(raw)) return raw.map((item) => String(item));
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function setSkillEnabled(name, enabled) {
+  const key = String(name || "").trim();
+  if (!key) return { success: false, error: "缺少技能名称" };
+  const disabled = new Set(getDisabledSkillNames());
+  if (enabled) disabled.delete(key);
+  else disabled.add(key);
+  setConfig(DISABLED_SKILLS_KEY, Array.from(disabled));
+  return { success: true, name: key, enabled: Boolean(enabled) };
+}
+
+function getSkills(workDir = null, options = {}) {
+  const includeDisabled = Boolean(options && options.includeDisabled);
   const skillsMap = new Map();
 
   const globalDirs = [
@@ -1672,9 +1806,306 @@ function getSkills(workDir = null) {
     }
   }
 
-  const list = Array.from(skillsMap.values());
+  const disabled = new Set(getDisabledSkillNames());
+  const list = Array.from(skillsMap.values()).map((item) => ({
+    ...item,
+    enabled: !disabled.has(item.name),
+  }));
   list.sort((a, b) => a.name.localeCompare(b.name));
-  return list;
+  return includeDisabled ? list : list.filter((item) => item.enabled);
+}
+
+// ─── 技能库维护：删除 / 导入 ─────────────────────────────────
+const IMPORT_SKIP_DIRS = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  "node_modules",
+  "__pycache__",
+  ".venv",
+  "venv",
+  "dist",
+  "build",
+  ".idea",
+  ".vscode",
+  "__MACOSX",
+]);
+const IMPORT_MAX_FILES = 300;
+const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
+
+function getSkillRoots(workDir = null) {
+  const roots = [
+    path.join(USER_HOME, ".agents", "skills"),
+    path.join(USER_HOME, ".omcx", "skills"),
+  ];
+  if (workDir) {
+    roots.push(path.join(workDir, ".agents", "skills"));
+    roots.push(path.join(workDir, ".omcx", "skills"));
+  }
+  return roots;
+}
+
+function isPathInside(parent, child) {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return Boolean(rel) && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+function slugifySkillName(raw) {
+  const text = String(raw || "")
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .slice(0, 80);
+  return text || `skill-${Date.now()}`;
+}
+
+function findSkillDoc(dir) {
+  for (const candidate of ["SKILL.md", "skill.md", "README.md"]) {
+    const target = path.join(dir, candidate);
+    try {
+      if (fs.statSync(target).isFile()) return target;
+    } catch {}
+  }
+  try {
+    const match = fs
+      .readdirSync(dir)
+      .find((file) => file.toLowerCase().endsWith(".md") && !file.startsWith("."));
+    return match ? path.join(dir, match) : null;
+  } catch {
+    return null;
+  }
+}
+
+function pickExtractedRoot(dir) {
+  if (findSkillDoc(dir)) return dir;
+  let dirs = [];
+  try {
+    dirs = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "__MACOSX")
+      .map((entry) => path.join(dir, entry.name));
+  } catch {
+    return dir;
+  }
+  for (const candidate of dirs) {
+    if (findSkillDoc(candidate)) return candidate;
+  }
+  return dirs.length === 1 ? dirs[0] : dir;
+}
+
+function copySkillTree(sourceDir, targetDir, budget, depth = 0) {
+  if (depth > 4) return;
+  const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || IMPORT_SKIP_DIRS.has(entry.name)) continue;
+    if (budget.files >= IMPORT_MAX_FILES) return;
+    const source = path.join(sourceDir, entry.name);
+    const dest = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      ensureDir(dest);
+      copySkillTree(source, dest, budget, depth + 1);
+    } else if (entry.isFile()) {
+      let size = 0;
+      try {
+        size = fs.statSync(source).size;
+      } catch {
+        continue;
+      }
+      if (budget.bytes + size > IMPORT_MAX_BYTES) continue;
+      fs.copyFileSync(source, dest);
+      budget.files += 1;
+      budget.bytes += size;
+    }
+  }
+}
+
+function extractZip(zipPath, targetDir) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "/usr/bin/unzip",
+      ["-o", "-q", zipPath, "-d", targetDir],
+      { timeout: 30000, maxBuffer: 4 * 1024 * 1024 },
+      (err) => (err ? reject(new Error(`解压失败：${err.message}`)) : resolve())
+    );
+  });
+}
+
+/**
+ * 导入本地技能：支持单个 .md、.zip 压缩包或技能文件夹。
+ * 目标目录固定为全局 ~/.omcx/skills（或项目 .omcx/skills），不执行任何脚本内容。
+ */
+async function importSkill(sourcePath, options = {}) {
+  const { overwrite = false, workDir = null, scope = "global" } = options;
+  if (!sourcePath) return { success: false, error: "缺少技能来源路径" };
+
+  let stat;
+  try {
+    stat = fs.statSync(sourcePath);
+  } catch {
+    return { success: false, error: "文件或目录不存在" };
+  }
+
+  const targetRoot =
+    scope === "project" && workDir
+      ? path.join(workDir, ".omcx", "skills")
+      : SKILLS_DIR;
+  ensureDir(targetRoot);
+
+  let tempDir = null;
+  try {
+    if (stat.isFile() && /\.zip$/i.test(sourcePath)) {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-skill-"));
+      await extractZip(sourcePath, tempDir);
+      return await importSkill(pickExtractedRoot(tempDir), options);
+    }
+
+    if (stat.isFile()) {
+      if (!/\.md$/i.test(sourcePath)) {
+        return { success: false, error: "仅支持 .md 技能文件或 .zip 技能包" };
+      }
+      const parsed = parseSkillMarkdown(sourcePath, scope);
+      if (!parsed) return { success: false, error: "无法解析该技能文件" };
+      const targetFile = path.join(targetRoot, `${slugifySkillName(parsed.name)}.md`);
+      if (fs.existsSync(targetFile) && !overwrite) {
+        return {
+          success: false,
+          code: "exists",
+          sourcePath,
+          name: parsed.name,
+          error: `技能「${parsed.name}」已存在`,
+        };
+      }
+      fs.copyFileSync(sourcePath, targetFile);
+      return { success: true, name: parsed.name, filePath: targetFile, scope };
+    }
+
+    if (stat.isDirectory()) {
+      const docPath = findSkillDoc(sourcePath);
+      if (!docPath) {
+        return { success: false, error: "该目录下未找到 SKILL.md 或任意 .md 技能说明" };
+      }
+      const parsed = parseSkillMarkdown(docPath, scope, path.basename(sourcePath));
+      const dirName = slugifySkillName(parsed?.name || path.basename(sourcePath));
+      const targetDir = path.join(targetRoot, dirName);
+      if (fs.existsSync(targetDir)) {
+        if (!overwrite) {
+          return {
+            success: false,
+            code: "exists",
+            sourcePath,
+            name: parsed?.name || dirName,
+            error: `技能「${parsed?.name || dirName}」已存在`,
+          };
+        }
+        fs.rmSync(targetDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(targetDir, { recursive: true });
+      copySkillTree(sourcePath, targetDir, { files: 0, bytes: 0 });
+      return {
+        success: true,
+        name: parsed?.name || dirName,
+        dir: targetDir,
+        filePath: path.join(targetDir, path.basename(docPath)),
+        scope,
+      };
+    }
+
+    return { success: false, error: "不支持的技能来源类型" };
+  } catch (err) {
+    return { success: false, error: err.message || "导入技能失败" };
+  } finally {
+    if (tempDir) {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+}
+
+/**
+ * 删除技能：仅允许删除技能根目录内的文件/目录，越界一律拒绝。
+ */
+function deleteSkill({ filePath, workDir } = {}) {
+  if (!filePath) return { success: false, error: "缺少技能路径" };
+
+  let realPath;
+  try {
+    realPath = fs.realpathSync(filePath);
+  } catch {
+    return { success: false, error: "技能文件不存在" };
+  }
+
+  const roots = getSkillRoots(workDir).map((root) => {
+    try {
+      return fs.realpathSync(root);
+    } catch {
+      return path.resolve(root);
+    }
+  });
+  const root = roots.find((item) => isPathInside(item, realPath));
+  if (!root) {
+    return { success: false, error: "仅允许删除技能目录内的内容" };
+  }
+
+  const parsed = parseSkillMarkdown(realPath, "global");
+
+  let target = realPath;
+  let removeDir = false;
+  if (/^(skill|readme)\.md$/i.test(path.basename(realPath))) {
+    const parent = path.dirname(realPath);
+    if (isPathInside(root, parent)) {
+      target = parent;
+      removeDir = true;
+    }
+  }
+
+  try {
+    if (removeDir) {
+      fs.rmSync(target, { recursive: true, force: true });
+    } else {
+      fs.unlinkSync(target);
+      // 单文件技能删除后若无残留内容，顺手清理空目录
+      const parent = path.dirname(target);
+      try {
+        if (isPathInside(root, parent) && fs.readdirSync(parent).length === 0) {
+          fs.rmdirSync(parent);
+        }
+      } catch {}
+    }
+  } catch (err) {
+    return { success: false, error: err.message || "删除失败" };
+  }
+
+  if (parsed?.name) {
+    const disabled = new Set(getDisabledSkillNames());
+    if (disabled.delete(parsed.name)) {
+      setConfig(DISABLED_SKILLS_KEY, Array.from(disabled));
+    }
+  }
+
+  return { success: true, name: parsed?.name || path.basename(target) };
+}
+
+function deleteGlobalMcpServer(id) {
+  const serverId = String(id || "").trim();
+  if (!serverId) return { success: false, error: "缺少服务器 ID" };
+
+  let globalServers = {};
+  try {
+    if (fs.existsSync(MCP_FILE)) {
+      globalServers = JSON.parse(fs.readFileSync(MCP_FILE, "utf-8"))?.mcpServers || {};
+    }
+  } catch {
+    return { success: false, error: "读取全局 MCP 配置失败" };
+  }
+  if (!Object.prototype.hasOwnProperty.call(globalServers, serverId)) {
+    return { success: false, error: "未找到该全局 MCP 服务器" };
+  }
+  delete globalServers[serverId];
+  saveGlobalMcpServers(globalServers);
+  return { success: true };
 }
 
 function getMemories(workDir = null) {
@@ -1791,6 +2222,7 @@ module.exports = {
   getMessageReasoning,
   getMessageReasoningAsync,
   splitThinkingContent,
+  extractLegacyThinking,
   addMessage,
   persistMessageSync,
   deleteMessagesAfter,
@@ -1809,6 +2241,11 @@ module.exports = {
   setProjectHooksTrust,
   readProjectMcpConfig,
   getSkills,
+  setSkillEnabled,
+  getDisabledSkillNames,
+  deleteSkill,
+  importSkill,
+  deleteGlobalMcpServer,
   getMemories,
   getMemoryIndex,
   getProjectInstructions,

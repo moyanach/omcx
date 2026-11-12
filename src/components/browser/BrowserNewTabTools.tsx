@@ -208,7 +208,11 @@ export const BrowserNewTabTools: React.FC<BrowserNewTabToolsProps> = ({
                   key={item.id}
                   onClick={() => {
                     if (isHtml) {
-                      const localUrl = `local-media://local${encodeURI(item.filePath)}`;
+                      // .svg 仍按图片文档打开；.html/.htm 需显式 render 参数才允许按文档渲染
+                      const isHtmlDoc = lower.endsWith(".html") || lower.endsWith(".htm");
+                      const localUrl = `local-media://local${encodeURI(item.filePath)}${
+                        isHtmlDoc ? "?render=1" : ""
+                      }`;
                       onOpenUrl(localUrl, item.name, item.filePath);
                     } else {
                       openFileInWorkbench(item.filePath);

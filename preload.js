@@ -18,6 +18,9 @@ ipcRenderer.on("chat-stream-event", (event, envelope) => {
     case "data":
       callbacks.onData?.(data);
       break;
+    case "reasoning":
+      callbacks.onReasoning?.(data);
+      break;
     case "tool_status":
       callbacks.onToolStatus?.(data);
       break;
@@ -32,6 +35,9 @@ ipcRenderer.on("chat-stream-event", (event, envelope) => {
       break;
     case "permission":
       callbacks.onPermissionRequest?.(data);
+      break;
+    case "permission_resolved":
+      callbacks.onPermissionResolved?.(data);
       break;
     case "outputs":
       callbacks.onOutputsUpdated?.(data);
@@ -135,6 +141,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   trustProjectMcp: (workDir, trusted) =>
     ipcRenderer.invoke("trust-project-mcp", { workDir, trusted }),
   toggleMcpServer: (id, enabled) => ipcRenderer.invoke("toggle-mcp-server", { id, enabled }),
+  deleteMcpServer: (id) => ipcRenderer.invoke("delete-mcp-server", { id }),
   getMcpTools: (serverId, workDir) => ipcRenderer.invoke("get-mcp-tools", { serverId, workDir }),
   toggleMcpTool: (serverId, toolName, enabled, workDir) =>
     ipcRenderer.invoke("toggle-mcp-tool", { serverId, toolName, enabled, workDir }),
@@ -148,7 +155,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("mcp-oauth-authorize", { serverId, workDir }),
   logoutMcpOAuth: (serverId, workDir) =>
     ipcRenderer.invoke("mcp-oauth-logout", { serverId, workDir }),
-  getSkills: (workDir) => ipcRenderer.invoke("get-skills", workDir),
+  getSkills: (workDir, includeDisabled = false) =>
+    ipcRenderer.invoke("get-skills", { workDir, includeDisabled }),
+  toggleSkill: (name, enabled) => ipcRenderer.invoke("toggle-skill", { name, enabled }),
+  deleteSkill: (filePath, workDir) => ipcRenderer.invoke("delete-skill", { filePath, workDir }),
+  importSkill: (options = {}) => ipcRenderer.invoke("import-skill", options),
+  fetchSkillMarket: (payload = {}) => ipcRenderer.invoke("fetch-skill-market", payload),
+  installMarketSkill: (item, overwrite = false) =>
+    ipcRenderer.invoke("install-market-skill", { item, overwrite }),
   getSubagents: (workDir) => ipcRenderer.invoke("get-subagents", workDir),
   getMemories: (workDir) => ipcRenderer.invoke("get-memories", workDir),
   getSessionOutputs: (sessionId) => ipcRenderer.invoke("get-session-outputs", sessionId),
@@ -239,6 +253,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   browserAutoState: () => ipcRenderer.invoke("browser-auto-state"),
   browserAutoBack: () => ipcRenderer.invoke("browser-auto-back"),
   browserAutoForward: () => ipcRenderer.invoke("browser-auto-forward"),
+  browserAutoReload: (payload = {}) => ipcRenderer.invoke("browser-auto-reload", payload),
   browserAutoClose: () => ipcRenderer.invoke("browser-auto-close"),
   listWorkspaceDir: (workDir, dirPath) =>
     ipcRenderer.invoke("workspace-list-dir", { workDir, dirPath }),
@@ -301,6 +316,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.send("chat-steer", { sessionId, content, id }),
 
   // ─── 流式 Agent 调用 (挂载至多路复用总线，零监听器残留) ──
+  // 思考内容通过 onReasoning 独立回传，不再与正文混合在 data 通道中。
   streamChat: (
     sessionId,
     messages,
@@ -320,7 +336,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     permissionMode,
     reasoningEffort,
     onSteered,
-    onWaiting
+    onWaiting,
+    onReasoning,
+    onPermissionResolved
   ) => {
     // 每次请求生成独立 runId：同一会话重发时，旧 run 的迟到事件会被总线丢弃
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -338,6 +356,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
         onCompaction,
         onSteered,
         onWaiting,
+        onReasoning,
+        onPermissionResolved,
       },
     });
 

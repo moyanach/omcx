@@ -35,6 +35,7 @@ const { buildSystemContext, getGitSnapshotAsync } = require("./utils/contextBuil
 const { mcpClientService } = require("./services/mcpClientService");
 const mcpOAuthService = require("./services/mcpOAuthService");
 const subagentService = require("./services/subagentService");
+const skillMarketService = require("./services/skillMarketService");
 const checkpointService = require("./services/checkpointService");
 const { terminalPtyService } = require("./services/terminalPtyService");
 const repoIndexService = require("./services/repoIndexService");
@@ -122,7 +123,8 @@ const RENDERER_CSP = [
   "font-src 'self' data:",
   "media-src 'self' data: blob: local-media:",
   "connect-src 'self' app: local-media: http: https: ws: wss:",
-  "frame-src 'self' data: about: blob:",
+  // 工作台内嵌预览需要 http(s) 与本地产物协议；iframe 自身仍由 sandbox 属性隔离
+  "frame-src 'self' data: about: blob: local-media: http: https:",
   "worker-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'none'",
@@ -131,6 +133,10 @@ const RENDERER_CSP = [
 
 // 本地媒体响应策略：即使被当作文档直接加载，也禁止脚本执行与外部资源请求
 const LOCAL_MEDIA_CSP = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+// 显式请求网页渲染（?render=1）时才允许 text/html：仍禁用脚本/表单/跨源请求，
+// 仅放行同协议下的图片、样式、字体与媒体，供工作区静态页面预览使用。
+const LOCAL_MEDIA_RENDER_CSP =
+  "sandbox; default-src 'none'; img-src local-media: data:; style-src 'unsafe-inline' local-media:; font-src local-media: data:; media-src local-media: data:; script-src 'none'; form-action 'none'; base-uri 'none'";
 
 const INTERNAL_APP_URL_PREFIX = "app://dist/";
 
@@ -245,34 +251,6 @@ function extractTextContent(content) {
       .join("\n");
   }
   return "";
-}
-
-/**
- * 拆分正文中的思考块：
- * { content: 最终正文, reasoning: <think>/<thinking> 内的推演内容 }
- * 用于 IPC 按需下发与上游历史裁剪，避免把数万字思考反复序列化。
- */
-function splitThinkingContent(raw) {
-  let reasoning = "";
-  let remaining = String(raw || "");
-  if (!remaining.includes("<think") && !remaining.includes("<thinking")) {
-    return { content: remaining, reasoning: "" };
-  }
-  remaining = remaining.replace(
-    /<(?:think|thinking)>([\s\S]*?)<\/(?:think|thinking)>/gi,
-    (_, inner) => {
-      const text = String(inner || "").trim();
-      if (text) reasoning += `${text}\n\n`;
-      return "";
-    }
-  );
-  const unclosed = remaining.match(/<(?:think|thinking)>([\s\S]*)$/i);
-  if (unclosed && unclosed.index !== undefined) {
-    const text = unclosed[1].trim();
-    if (text) reasoning += text;
-    remaining = remaining.slice(0, unclosed.index);
-  }
-  return { content: remaining.trim(), reasoning: reasoning.trim() };
 }
 
 /** 是否以未闭合的代码围栏结尾（上游静默截断的典型特征） */
@@ -1019,8 +997,10 @@ app.whenReady().then(() => {
   protocol.handle("local-media", async (request) => {
     try {
       let filePath = "";
+      let wantsRender = false;
       try {
         const parsedUrl = new URL(request.url);
+        wantsRender = parsedUrl.searchParams.get("render") === "1";
         if (parsedUrl.hostname === "local") {
           filePath = decodeURIComponent(parsedUrl.pathname);
         } else if (parsedUrl.hostname) {
@@ -1081,6 +1061,11 @@ app.whenReady().then(() => {
       else if (lower.endsWith(".js") || lower.endsWith(".mjs")) mimeType = "text/plain; charset=utf-8";
       else if (lower.endsWith(".json")) mimeType = "text/plain; charset=utf-8";
 
+      // 仅当显式携带 ?render=1 时，HTML 才按文档渲染（脚本已被 CSP sandbox + script-src 'none' 双重禁用）
+      const isHtmlDoc = lower.endsWith(".html") || lower.endsWith(".htm");
+      const renderAsDocument = isHtmlDoc && wantsRender;
+      if (renderAsDocument) mimeType = "text/html; charset=utf-8";
+
       const fileBuffer = await fs.promises.readFile(resolvedPath);
       return new Response(fileBuffer, {
         status: 200,
@@ -1088,7 +1073,7 @@ app.whenReady().then(() => {
           "Content-Type": mimeType,
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "public, max-age=86400",
-          "Content-Security-Policy": LOCAL_MEDIA_CSP,
+          "Content-Security-Policy": renderAsDocument ? LOCAL_MEDIA_RENDER_CSP : LOCAL_MEDIA_CSP,
           "X-Content-Type-Options": "nosniff",
         },
       });
@@ -1347,9 +1332,9 @@ app.whenReady().then(() => {
             },
           };
         }
-        // 兼容历史混杂在 content 里的老数据
-        if (typeof m.content === "string" && (m.content.includes("<think") || m.content.includes("<thinking"))) {
-          const { content, reasoning } = splitThinkingContent(m.content);
+        // 兼容历史混杂在 content 里的老数据（仅安全剥离成对标签，未闭合一律保留正文）
+        if (typeof m.content === "string" && m.content.includes("<think")) {
+          const { content, reasoning } = storageService.extractLegacyThinking(m.content);
           if (reasoning) {
             return {
               ...m,
@@ -1405,14 +1390,14 @@ app.whenReady().then(() => {
       // 降级兜底：查询老消息记录正文并抽离
       const message = await storageService.getMessageByIdAsync(id);
       if (!message || !message.content) return "";
-      return splitThinkingContent(message.content).reasoning;
+      return storageService.extractLegacyThinking(message.content).reasoning;
     })
   );
 
   ipcMain.handle(
     "db-add-message",
-    safeHandler((event, { id, sessionId, role, content, metadata }) =>
-      storageService.addMessage(sessionId, { id, role, content, metadata })
+    safeHandler((event, { id, sessionId, role, content, metadata, reasoning }) =>
+      storageService.addMessage(sessionId, { id, role, content, metadata, reasoning })
     )
   );
 
@@ -1566,6 +1551,16 @@ app.whenReady().then(() => {
     })
   );
 
+  // 删除全局 MCP 服务器（项目级配置由项目文件托管，不在此处改写）
+  ipcMain.handle(
+    "delete-mcp-server",
+    safeHandler((event, { id } = {}) => {
+      const result = storageService.deleteGlobalMcpServer(id);
+      if (result?.success) mcpClientService.reloadClients();
+      return result;
+    })
+  );
+
   ipcMain.handle(
     "get-mcp-tools",
     safeHandler((event, { serverId, workDir } = {}) =>
@@ -1684,7 +1679,76 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "get-skills",
-    safeHandler((event, workDir) => storageService.getSkills(workDir))
+    safeHandler((event, payload) => {
+      const workDir =
+        typeof payload === "string" ? payload : payload?.workDir || null;
+      const includeDisabled =
+        payload && typeof payload === "object" ? Boolean(payload.includeDisabled) : false;
+      return storageService.getSkills(workDir, { includeDisabled });
+    })
+  );
+
+  // 技能启停：仅写入 disabled_skills 配置，不改动磁盘文件
+  ipcMain.handle(
+    "toggle-skill",
+    safeHandler((event, { name, enabled } = {}) =>
+      storageService.setSkillEnabled(name, Boolean(enabled))
+    )
+  );
+
+  // 删除技能：严格限制在全局 / 项目技能根目录内
+  ipcMain.handle(
+    "delete-skill",
+    safeHandler((event, { filePath, workDir } = {}) =>
+      storageService.deleteSkill({ filePath, workDir })
+    )
+  );
+
+  // 导入本地技能：支持 .md / .zip / 文件夹；sourcePath 可复用上一次选择，避免重复弹窗
+  ipcMain.handle(
+    "import-skill",
+    safeHandler(async (event, { mode = "file", sourcePath, overwrite = false, workDir, scope } = {}) => {
+      let target = sourcePath;
+      if (!target) {
+        const result = await dialog.showOpenDialog(mainWindow, {
+          title: mode === "folder" ? "选择技能文件夹" : "选择技能文件（.md / .zip）",
+          properties: mode === "folder" ? ["openDirectory"] : ["openFile"],
+          filters:
+            mode === "folder"
+              ? undefined
+              : [{ name: "技能文件", extensions: ["md", "zip"] }],
+        });
+        if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
+        target = result.filePaths[0];
+      }
+      const resolvedScope = scope === "project" ? "project" : "global";
+      return storageService.importSkill(target, {
+        overwrite: Boolean(overwrite),
+        workDir: resolvedScope === "project" ? workDir : null,
+        scope: resolvedScope,
+      });
+    })
+  );
+
+  // 技能市场：链接自适应分页拉取
+  ipcMain.handle(
+    "fetch-skill-market",
+    safeHandler((event, payload = {}) =>
+      skillMarketService.fetchMarketPage({
+        url: payload.url,
+        page: payload.page,
+        pageSize: payload.pageSize,
+        query: payload.query,
+      })
+    )
+  );
+
+  // 技能市场：直接下载并安装到 ~/.omcx/skills
+  ipcMain.handle(
+    "install-market-skill",
+    safeHandler((event, { item, overwrite = false } = {}) =>
+      skillMarketService.installSkill(item, { overwrite: Boolean(overwrite) })
+    )
   );
 
   ipcMain.handle(
@@ -1828,6 +1892,17 @@ app.whenReady().then(() => {
         const gitInfo = await getGitSnapshotAsync(targetWorkDir);
         const initialTodos = session?.todos || [];
         const wikiInfo = targetWorkDir ? repoWikiService.getRepoWiki(targetWorkDir) : null;
+        // 真实请求默认注入仓库地图，指标计算必须同源，否则会低估 System Prompt 占用
+        let repoMapText = "";
+        if (targetWorkDir && storageService.getConfig("repo_map_enabled") !== "false") {
+          try {
+            repoMapText = repoIndexService.buildRepoMap(targetWorkDir, {
+              maxChars: Number(storageService.getConfig("repo_map_max_chars")) || 6000,
+            });
+          } catch (repoErr) {
+            console.warn(`[repo-map] 指标计算生成失败: ${repoErr.message}`);
+          }
+        }
 
         const modelId =
           params.model ||
@@ -1848,6 +1923,7 @@ app.whenReady().then(() => {
           memories,
           memoryIndex,
           projectRules,
+          repoMap: repoMapText,
           repoWiki: wikiInfo?.exists ? String(wikiInfo.content || "").slice(0, 3500) : "",
           repoWikiPath: wikiInfo?.path || "",
           todos: initialTodos,
@@ -2156,6 +2232,10 @@ app.whenReady().then(() => {
     safeHandler(() => browserAutomationService.forward())
   );
   ipcMain.handle(
+    "browser-auto-reload",
+    safeHandler((event, payload = {}) => browserAutomationService.reload(payload))
+  );
+  ipcMain.handle(
     "browser-auto-close",
     safeHandler(() => browserAutomationService.close())
   );
@@ -2298,13 +2378,44 @@ app.whenReady().then(() => {
 
         // 3. 递归模糊后缀与文件名穿透匹配 (彻底解决深层微服务子目录如 notify_v2/runner/life_runner.py)
         if (!fs.existsSync(targetAbs)) {
-          const IGNORED = new Set([".git", "node_modules", ".venv", "__pycache__", "dist", ".omcx", ".vscode", "build"]);
+          const IGNORED = new Set([
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "dist",
+            "build",
+            ".next",
+            ".nuxt",
+            "target",
+            "vendor",
+            "Pods",
+            "coverage",
+            ".cache",
+            ".omcx",
+            ".vscode",
+          ]);
           const targetSuffix = "/" + normRel;
           const targetFileName = normRel.split("/").pop();
+          // 主进程同步遍历必须设上限：大仓库（尤其含构建产物/依赖目录）下无界 BFS 会直接冻结 UI
+          const MAX_SCAN_ENTRIES = 30000;
+          const MAX_SCAN_MS = 1500;
+          const scanStartedAt = Date.now();
+          let scannedEntries = 0;
+          let suffixMatch = "";
+          let filenameFallback = "";
 
           for (const folder of validFolders) {
+            if (suffixMatch) break;
             const queue = [folder];
-            while (queue.length > 0) {
+            while (queue.length > 0 && !suffixMatch) {
+              if (
+                scannedEntries > MAX_SCAN_ENTRIES ||
+                Date.now() - scanStartedAt > MAX_SCAN_MS
+              ) {
+                break;
+              }
               const curDir = queue.shift();
               let entries = [];
               try {
@@ -2314,6 +2425,7 @@ app.whenReady().then(() => {
               }
               for (const item of entries) {
                 if (item.startsWith(".") || IGNORED.has(item)) continue;
+                scannedEntries += 1;
                 const full = path.join(curDir, item);
                 let stat;
                 try {
@@ -2325,16 +2437,26 @@ app.whenReady().then(() => {
                   queue.push(full);
                 } else if (stat.isFile()) {
                   const normFull = full.replace(/\\/g, "/");
-                  if (normFull.endsWith(targetSuffix) || item === targetFileName) {
-                    targetAbs = full;
+                  // 优先完整后缀匹配；同名文件只作为兜底候选，避免浅层同名文件抢先命中
+                  if (normFull.endsWith(targetSuffix)) {
+                    suffixMatch = full;
                     break;
+                  }
+                  if (!filenameFallback && item === targetFileName) {
+                    filenameFallback = full;
                   }
                 }
               }
-              if (fs.existsSync(targetAbs)) break;
+              if (
+                scannedEntries > MAX_SCAN_ENTRIES ||
+                Date.now() - scanStartedAt > MAX_SCAN_MS
+              ) {
+                break;
+              }
             }
-            if (fs.existsSync(targetAbs)) break;
           }
+
+          targetAbs = suffixMatch || filenameFallback || targetAbs;
         }
       }
 
@@ -2385,6 +2507,7 @@ app.whenReady().then(() => {
           success: true,
           path: filePath,
           absPath: targetAbs,
+          resolvedPath: targetAbs,
           name: path.basename(targetAbs),
           ext,
           size: stat.size,
@@ -2407,6 +2530,7 @@ app.whenReady().then(() => {
         success: true,
         path: filePath,
         absPath: targetAbs,
+        resolvedPath: targetAbs,
         name: path.basename(targetAbs),
         ext,
         size: stat.size,
@@ -2785,6 +2909,7 @@ app.whenReady().then(() => {
 
   // --- 人机协同授权响应通道 ---
   const pendingPermissions = new Map();
+  const PERMISSION_TIMEOUT_MS = 10 * 60 * 1000;
   ipcMain.on("chat-permission-response", (event, { id, allow, decision }) => {
     const entry = pendingPermissions.get(id);
     if (entry) {
@@ -3186,6 +3311,14 @@ app.whenReady().then(() => {
               reason: "新的执行请求已接管当前会话，旧审批自动作废",
             });
           } catch (e) {}
+          try {
+            if (!event.sender.isDestroyed()) {
+              replyStream("permission_resolved", {
+                id: permId,
+                reason: "新的执行请求已接管当前会话，旧审批自动作废",
+              });
+            }
+          } catch (e) {}
         }
         console.warn(`[chat-request] session ${sessionId} 检测到并发请求，已中断上一轮 run`);
       }
@@ -3210,9 +3343,20 @@ app.whenReady().then(() => {
         }
         const reqId = `perm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         return new Promise((resolve) => {
-          pendingPermissions.set(reqId, {
-            sessionId,
-            settle: (resp) => {
+          let settled = false;
+          let destroyedHandler = null;
+          let timer = null;
+          const settleOnce = (resp) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            pendingPermissions.delete(reqId);
+            if (destroyedHandler) {
+              try {
+                event.sender.removeListener("destroyed", destroyedHandler);
+              } catch {}
+            }
+            {
               const allow = typeof resp === "object" ? !!resp.allow : !!resp;
               const decision =
                 typeof resp === "object" && resp.decision
@@ -3252,8 +3396,39 @@ app.whenReady().then(() => {
                 }
               }
               resolve(allow);
-            },
-          });
+            }
+          };
+
+          // 主进程侧自动收敛时必须同步通知渲染进程关闭审批弹窗，避免 UI 挂着一个已经作废的请求
+          const notifyResolved = (reason) => {
+            try {
+              if (!event.sender.isDestroyed()) {
+                replyStream("permission_resolved", { id: reqId, reason });
+              }
+            } catch {}
+          };
+
+          // 审批不能无限挂起：渲染进程崩溃/窗口关闭/用户不再响应时必须自动收敛
+          timer = setTimeout(() => {
+            settleOnce({
+              allow: false,
+              decision: "deny",
+              reason: "审批等待超时，已自动拒绝",
+            });
+            notifyResolved("审批等待超时，已自动拒绝");
+          }, PERMISSION_TIMEOUT_MS);
+          destroyedHandler = () => {
+            settleOnce({
+              allow: false,
+              decision: "deny",
+              reason: "窗口已关闭，审批自动作废",
+            });
+          };
+          try {
+            event.sender.once("destroyed", destroyedHandler);
+          } catch {}
+
+          pendingPermissions.set(reqId, { sessionId, settle: settleOnce });
           replyStream("permission", {
             id: reqId,
             path: targetPath,
@@ -3270,6 +3445,7 @@ app.whenReady().then(() => {
 
       const initialTodos = [];
       let fullGeneratedText = "";
+      let fullGeneratedReasoning = "";
       let toolRound = 0;
       const executedToolSteps = [];
 
@@ -3349,6 +3525,7 @@ app.whenReady().then(() => {
             id: partialMessageId,
             role: "assistant",
             content: fullGeneratedText,
+            reasoning: fullGeneratedReasoning,
             createdAt: runStartedAt,
             metadata: {
               streaming: true,
@@ -3377,6 +3554,7 @@ app.whenReady().then(() => {
             id: partialMessageId,
             role: "assistant",
             content: fullGeneratedText,
+            reasoning: fullGeneratedReasoning,
             createdAt: runStartedAt,
             metadata: {
               streaming: false,
@@ -3445,7 +3623,7 @@ app.whenReady().then(() => {
         let apiMessages = (Array.isArray(messages) ? messages : []).map((m) => {
           if (!m || m.role !== "assistant" || typeof m.content !== "string") return m;
           if (!m.content.includes("<think")) return m;
-          return { ...m, content: splitThinkingContent(m.content).content };
+          return { ...m, content: storageService.extractLegacyThinking(m.content).content };
         });
         // 斜杠命令展开：仅在最后一条用户消息以 /command 开头时替换为完整提示词
         let slashCommandInfo = null;
@@ -3894,6 +4072,15 @@ app.whenReady().then(() => {
           persistPartial();
         }
 
+        // 思考内容走独立通道：正文中不再插入任何思考标签标记，
+        // 从根源上杜绝正文里出现同名标签时被误判为思考块。
+        function sendReasoning(delta) {
+          if (!delta) return;
+          fullGeneratedReasoning += delta;
+          replyStream("reasoning", delta);
+          persistPartial();
+        }
+
         function isTransientSocketError(err) {
           if (!err) return false;
           const msg = String(err.message || "").toLowerCase();
@@ -3928,7 +4115,6 @@ app.whenReady().then(() => {
         async function doStreamRequestOnce(requestMessages, requestBody) {
           // Anthropic 原生 Messages API：独立协议分支，输出结构与 OpenAI 分支完全一致
           if (isAnthropicProvider(provider, modelBaseUrl)) {
-            let inThinkingBlock = false;
             const anthropicResult = await streamAnthropicMessage({
               baseUrl: modelBaseUrl,
               apiKey: modelApiKey,
@@ -3938,27 +4124,9 @@ app.whenReady().then(() => {
               maxTokens: maxOutputTokens,
               temperature: 0.2,
               signal: sessionAbort.abortController.signal,
-              onText: (delta) => {
-                if (!delta) return;
-                if (inThinkingBlock) {
-                  inThinkingBlock = false;
-                  sendData("</think>\n\n");
-                }
-                sendData(delta);
-              },
-              onReasoning: (delta) => {
-                if (!delta) return;
-                if (!inThinkingBlock) {
-                  inThinkingBlock = true;
-                  sendData("<think>");
-                }
-                sendData(delta);
-              },
+              onText: (delta) => sendData(delta),
+              onReasoning: (delta) => sendReasoning(delta),
             });
-            if (inThinkingBlock) {
-              inThinkingBlock = false;
-              sendData("</think>\n\n");
-            }
             if (anthropicResult.usage) {
               lastProviderUsage = anthropicResult.usage;
             }
@@ -4026,7 +4194,6 @@ app.whenReady().then(() => {
           let buffer = "";
           let fullContent = "";
           let fullReasoning = "";
-          let inReasoningBlock = false;
           let toolCalls = [];
           let usage = null;
           let streamFinished = false;
@@ -4132,12 +4299,8 @@ app.whenReady().then(() => {
 
                   const reasoningDelta = delta.reasoning_content || delta.reasoning;
                   if (reasoningDelta) {
-                    if (!inReasoningBlock) {
-                      inReasoningBlock = true;
-                      sendData("<think>");
-                    }
                     fullReasoning += reasoningDelta;
-                    sendData(reasoningDelta);
+                    sendReasoning(reasoningDelta);
                   }
 
                   if (delta.content) {
@@ -4148,10 +4311,6 @@ app.whenReady().then(() => {
                     ) {
                       hitLengthLimit = true;
                       continue;
-                    }
-                    if (inReasoningBlock) {
-                      inReasoningBlock = false;
-                      sendData("</think>\n\n");
                     }
                     fullContent += delta.content;
                     sendData(delta.content);
@@ -4193,14 +4352,6 @@ app.whenReady().then(() => {
               );
             } else {
               // 异常中断前收口未闭合的思考块，避免错误提示被吞进 <think> 内
-              if (inReasoningBlock) {
-                inReasoningBlock = false;
-                try {
-                  sendData("</think>\n\n");
-                } catch (e) {
-                  // 忽略前端已关闭的推送异常
-                }
-              }
               console.warn(
                 `[chat-stream] 流式读取中断: ${readErr?.name || "Error"} - ${readErr?.message || ""} ` +
                   `(receivedBytes=${receivedBytes}, finishReason=${finishReason || "none"})`
@@ -4214,11 +4365,6 @@ app.whenReady().then(() => {
             } catch {
               // 忽略释放 reader 异常
             }
-          }
-
-          if (inReasoningBlock) {
-            inReasoningBlock = false;
-            sendData("</think>\n\n");
           }
 
           return {
@@ -4410,8 +4556,8 @@ app.whenReady().then(() => {
             // 模式 D：上游以 stop 收尾但把代码块留在未闭合状态（网关静默截断的典型表现）
             // -> 断点续写一次，避免最终回答直接断在代码块中间。
             // 必须检查累计正文：单轮续写可能只输出"闭合围栏"，只看本轮会误判并无限续写。
-            const cumulativeVisibleText = splitThinkingContent(fullGeneratedText)
-              .content.replace(/\btask ready\b/gi, "")
+            const cumulativeVisibleText = fullGeneratedText
+              .replace(/\btask ready\b/gi, "")
               .trim();
             if (
               !result.hitLengthLimit &&
@@ -4423,7 +4569,9 @@ app.whenReady().then(() => {
               console.log(
                 `[auto-continue] 模式D：代码块未闭合即结束，发起第 ${continuationCount} 次断点续写`
               );
-              apiMessages.push({ role: "assistant", content: cumulativeVisibleText });
+              // 只回填“本轮”输出：累计正文已包含此前各轮，重复回填会让历史成倍膨胀。
+              // 累计文本仅用于判断围栏是否仍未闭合。
+              apiMessages.push({ role: "assistant", content: result.content || cleanRoundText });
               apiMessages.push({
                 role: "user",
                 content:
@@ -4492,14 +4640,32 @@ app.whenReady().then(() => {
               !sessionToolContext.allowedToolNames.has(tc.function.name)
             ) {
               recordToolTrace("blocked", "技能工具白名单拦截");
+              const whitelistBlockedResult = {
+                success: false,
+                error: `当前激活的技能限制了可用工具范围，已拒绝调用 ${tc.function.name}`,
+              };
+              // 与 Hook 阻断保持一致：必须补齐 done 状态与快照步骤，
+              // 否则该 callId 会永久停留在 running，UI 与持久化轨迹都缺这一步
+              executedToolSteps.push({
+                tool: tc.function.name,
+                status: "done",
+                args,
+                result: whitelistBlockedResult,
+                callId,
+              });
+              replyStream("tool_status", {
+                tool: tc.function.name,
+                status: "done",
+                args,
+                result: whitelistBlockedResult,
+                callId,
+              });
+              persistPartial(true);
               return {
                 tc,
                 callId,
                 args,
-                execResult: {
-                  success: false,
-                  error: `当前激活的技能限制了可用工具范围，已拒绝调用 ${tc.function.name}`,
-                },
+                execResult: whitelistBlockedResult,
               };
             }
 
@@ -4718,10 +4884,8 @@ app.whenReady().then(() => {
           replyStream("metrics", withUsageMetrics(updatedMetrics));
         }
 
-        // 提取剥离了 <think> 思考块与合成占位符后的可见正文
+        // 正文通道已与思考通道彻底分离，仅需过滤网关注入的合成占位符
         const visibleGeneratedText = fullGeneratedText
-          .replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, "")
-          .replace(/<(?:think|thinking)>[\s\S]*$/gi, "")
           .replace(/\btask ready\b/gi, "")
           .trim();
 
@@ -4788,10 +4952,11 @@ app.whenReady().then(() => {
         });
 
         // 结束时通知前端，由前端单源原子落盘 (消除主进程重复双写导致的消息被覆盖Bug)
-        const finalVisibleForCheck = splitThinkingContent(fullGeneratedText).content;
+        const finalVisibleForCheck = fullGeneratedText;
         const outputTruncated = hasUnclosedCodeFence(finalVisibleForCheck);
         replyStream("end", {
           content: fullGeneratedText,
+          reasoning: fullGeneratedReasoning,
           metadata: {
             cancelled: !!sessionAbort.cancelled,
             truncated: outputTruncated,

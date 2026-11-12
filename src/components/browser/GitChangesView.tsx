@@ -271,6 +271,36 @@ export const GitChangesView: React.FC<GitChangesViewProps> = ({
     return allDiffLines.filter((_, idx) => changedIndices.has(idx));
   }, [allDiffLines, onlyChanges]);
 
+  // 左右对比：把相邻的删除块与新增块逐行配对，缺失的一侧补空行。
+  // 之前两列各自 filter 后会因行数不等而整体错位，无法直观看出“哪行改成了哪行”。
+  const splitRows = useMemo(() => {
+    const rows: Array<{ left?: DiffLine; right?: DiffLine }> = [];
+    let idx = 0;
+    while (idx < visibleDiffLines.length) {
+      const line = visibleDiffLines[idx];
+      if (line.type === "same") {
+        rows.push({ left: line, right: line });
+        idx += 1;
+        continue;
+      }
+      const dels: DiffLine[] = [];
+      const adds: DiffLine[] = [];
+      while (idx < visibleDiffLines.length && visibleDiffLines[idx].type === "del") {
+        dels.push(visibleDiffLines[idx]);
+        idx += 1;
+      }
+      while (idx < visibleDiffLines.length && visibleDiffLines[idx].type === "add") {
+        adds.push(visibleDiffLines[idx]);
+        idx += 1;
+      }
+      const count = Math.max(dels.length, adds.length);
+      for (let k = 0; k < count; k++) {
+        rows.push({ left: dels[k], right: adds[k] });
+      }
+    }
+    return rows;
+  }, [visibleDiffLines]);
+
   const handleCommit = async () => {
     if (!workDir || !commitMsg.trim() || committing) return;
     if (!window.electronAPI?.commitWorkspaceChanges) return;
@@ -510,28 +540,29 @@ export const GitChangesView: React.FC<GitChangesViewProps> = ({
                       <div className="px-2.5 py-1.5 text-[10px] font-sans font-semibold text-[var(--ui-accent-rose)] border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-accent-rose-soft)] select-none">
                         变更前 (HEAD)
                       </div>
-                      {visibleDiffLines
-                        .filter((l) => l.type !== "add")
-                        .map((line, idx) => (
+                      {splitRows.map((row, idx) => {
+                        const line = row.left;
+                        return (
                           <div
-                            key={idx}
+                            key={`split-left-${idx}`}
                             className={`flex px-2 ${
-                              line.type === "del"
+                              line?.type === "del"
                                 ? "bg-[var(--ui-diff-del-bg)] text-[var(--ui-diff-del-text)]"
                                 : "text-[var(--ui-text-primary)]"
                             }`}
                           >
                             <span className="w-8 pr-2 text-right text-[10px] text-[var(--ui-text-faint)] select-none flex-shrink-0">
-                              {line.oldLineNo ?? ""}
+                              {line?.oldLineNo ?? ""}
                             </span>
                             <span className="w-3.5 select-none font-bold flex-shrink-0">
-                              {line.type === "del" ? "-" : " "}
+                              {line?.type === "del" ? "-" : " "}
                             </span>
                             <span className="whitespace-pre-wrap break-all flex-1">
-                              {line.text || " "}
+                              {line?.text || " "}
                             </span>
                           </div>
-                        ))}
+                        );
+                      })}
                     </div>
 
                     {/* 右栏：新版本 (Working Tree) */}
@@ -539,28 +570,29 @@ export const GitChangesView: React.FC<GitChangesViewProps> = ({
                       <div className="px-2.5 py-1.5 text-[10px] font-sans font-semibold text-[var(--ui-accent-emerald)] border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-accent-emerald-soft)] select-none">
                         变更后 (当前工作区)
                       </div>
-                      {visibleDiffLines
-                        .filter((l) => l.type !== "del")
-                        .map((line, idx) => (
+                      {splitRows.map((row, idx) => {
+                        const line = row.right;
+                        return (
                           <div
-                            key={idx}
+                            key={`split-right-${idx}`}
                             className={`flex px-2 ${
-                              line.type === "add"
+                              line?.type === "add"
                                 ? "bg-[var(--ui-diff-add-bg)] text-[var(--ui-diff-add-text)]"
                                 : "text-[var(--ui-text-primary)]"
                             }`}
                           >
                             <span className="w-8 pr-2 text-right text-[10px] text-[var(--ui-text-faint)] select-none flex-shrink-0">
-                              {line.newLineNo ?? ""}
+                              {line?.newLineNo ?? ""}
                             </span>
                             <span className="w-3.5 select-none font-bold flex-shrink-0">
-                              {line.type === "add" ? "+" : " "}
+                              {line?.type === "add" ? "+" : " "}
                             </span>
                             <span className="whitespace-pre-wrap break-all flex-1">
-                              {line.text || " "}
+                              {line?.text || " "}
                             </span>
                           </div>
-                        ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}

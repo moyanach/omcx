@@ -26,9 +26,18 @@ export interface ConversationSlice {
     messageId: string,
     delta: string
   ) => void;
+  appendMessageReasoning: (
+    sessionId: string,
+    messageId: string,
+    delta: string
+  ) => void;
   saveMessageToDb: (sessionId: string, message: Message) => Promise<void>;
   updateMessageMetadata: (sessionId: string, messageId: string, metadata: any) => void;
-  truncateMessages: (sessionId: string, messageId: string) => Promise<void>;
+  truncateMessages: (
+    sessionId: string,
+    messageId: string,
+    includeTarget?: boolean
+  ) => Promise<void>;
 
   setSessionGenerating: (sessionId: string, isGenerating: boolean) => void;
   setSessionStartTime: (sessionId: string, startTime: number | null) => void;
@@ -82,6 +91,7 @@ export const createConversationSlice: StateCreator<
           role: message.role,
           content: message.content,
           metadata: message.metadata,
+          reasoning: message.reasoning,
         });
       } catch (err) {
         console.error("持久化消息失败:", err);
@@ -111,6 +121,31 @@ export const createConversationSlice: StateCreator<
     });
   },
 
+  appendMessageReasoning: (sessionId, messageId, delta) => {
+    if (!delta) return;
+    set((state) => {
+      const currentMsgs = state.messages[sessionId] || [];
+      const msgIndex = currentMsgs.findIndex((m) => m.id === messageId);
+      if (msgIndex === -1) return state;
+
+      const updatedMsgs = [...currentMsgs];
+      const targetMsg = updatedMsgs[msgIndex];
+      const nextReasoning = `${targetMsg.reasoning || ""}${delta}`;
+      updatedMsgs[msgIndex] = {
+        ...targetMsg,
+        reasoning: nextReasoning,
+        reasoningChars: nextReasoning.length,
+      };
+
+      return {
+        messages: {
+          ...state.messages,
+          [sessionId]: updatedMsgs,
+        },
+      };
+    });
+  },
+
   saveMessageToDb: async (sessionId, message) => {
     if (!window.electronAPI?.dbAddMessage) return;
     try {
@@ -120,6 +155,7 @@ export const createConversationSlice: StateCreator<
         role: message.role,
         content: message.content,
         metadata: message.metadata,
+        reasoning: message.reasoning,
       });
     } catch (err) {
       console.error("保存消息到存储失败:", err);
@@ -147,13 +183,22 @@ export const createConversationSlice: StateCreator<
     });
   },
 
-  truncateMessages: async (sessionId, messageId) => {
+  truncateMessages: async (sessionId, messageId, includeTarget = true) => {
     const currentMsgs = get().messages[sessionId] || [];
     const targetMsg = currentMsgs.find((m) => m.id === messageId);
     if (!targetMsg) return;
 
-    const filtered = currentMsgs.filter((m) => m.createdAt <= targetMsg.createdAt);
-    const removed = currentMsgs.filter((m) => m.createdAt > targetMsg.createdAt);
+    const filtered = currentMsgs.filter((m) =>
+      includeTarget
+        ? m.createdAt <= targetMsg.createdAt
+        : m.createdAt < targetMsg.createdAt
+    );
+    const removed = currentMsgs.filter((m) =>
+      includeTarget
+        ? m.createdAt > targetMsg.createdAt
+        : m.createdAt >= targetMsg.createdAt
+    );
+    const cutoff = includeTarget ? targetMsg.createdAt : targetMsg.createdAt - 1;
 
     set((state) => ({
       messages: {
@@ -164,7 +209,7 @@ export const createConversationSlice: StateCreator<
 
     if (window.electronAPI) {
       try {
-        await window.electronAPI.dbDeleteMessagesAfter(sessionId, targetMsg.createdAt);
+        await window.electronAPI.dbDeleteMessagesAfter(sessionId, cutoff);
       } catch (err) {
         console.error("截断消息失败:", err);
       }

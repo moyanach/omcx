@@ -167,6 +167,8 @@ export interface SkillItem {
   scripts?: Array<{ name: string; path: string; ext?: string }>;
   filePath?: string;
   version?: string;
+  /** 技能是否启用（停用后不进入 Agent 上下文） */
+  enabled?: boolean;
 }
 
 export interface SubagentItem {

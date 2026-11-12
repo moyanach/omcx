@@ -6,6 +6,7 @@ import ToolsView from '@/pages/ToolsView';
 import WorkspacesView from '@/pages/WorkspacesView';
 import SettingsView from '@/pages/SettingsView';
 import InsightsView from '@/pages/InsightsView';
+import SettingsModal from '@/components/settings/SettingsModal';
 
 const MainContent: React.FC = () => {
   const { activeNavTab } = useAppStore();
@@ -35,6 +36,9 @@ const Layout: React.FC = () => {
       <main className='flex h-full flex-1 min-w-0 overflow-hidden'>
         <MainContent />
       </main>
+
+      {/* 设置弹出层：覆盖在当前视图之上，Esc / 点击遮罩 / 右上角关闭 */}
+      <SettingsModal />
     </div>
   );
 };

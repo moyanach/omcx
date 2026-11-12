@@ -492,11 +492,11 @@ class SearchCodeTool extends StructuredTool {
         rgArgs.push("-C", String(normalizedContextLines));
       }
       rgArgs.push("-g", "!node_modules", "-g", "!.git", "-g", "!dist");
-      rgArgs.push(String(query));
       if (include && String(include).trim()) {
         rgArgs.push("-g", String(include));
       }
-      rgArgs.push(...searchTargets);
+      // 显式 -- 结束选项解析：查询词以 - 开头时（如 --pre=...）不得被 rg 当成参数执行
+      rgArgs.push("--", String(query), ...searchTargets);
 
       const stdout = execFileSync("rg", rgArgs, {
         encoding: "utf-8",

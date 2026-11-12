@@ -279,6 +279,8 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   const [treeCollapsed, setTreeCollapsed] = useState(false);
 
   const codeContainerRef = useRef<HTMLDivElement>(null);
+  // 并发打开保护：快速点击不同文件时，只允许最后一次请求落地，避免旧响应覆盖新选择
+  const openSeqRef = useRef(0);
 
   // 加载指定绝对目录的子项
   const loadDirectory = async (absDir: string) => {
@@ -417,13 +419,16 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     const clean = String(targetPath || "").trim();
     if (!clean) return;
 
+    const seq = ++openSeqRef.current;
     setLoadingFile(true);
     try {
       // 优先直接传递原始目标路径（主进程具备多源深度穿透匹配能力）
       let res = await window.electronAPI.readWorkspaceFile(primaryWorkDir, clean);
+      if (seq !== openSeqRef.current) return;
       if (!res?.success && !clean.startsWith("/") && !/^[a-zA-Z]:[\\/]/.test(clean)) {
         const fallbackTarget = resolveTargetPath(clean);
         res = await window.electronAPI.readWorkspaceFile(primaryWorkDir, fallbackTarget);
+        if (seq !== openSeqRef.current) return;
       }
 
       if (res?.success) {
@@ -484,10 +489,11 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     } catch (err) {
       console.error("读取文件失败:", err);
     } finally {
-      setLoadingFile(false);
+      if (seq === openSeqRef.current) setLoadingFile(false);
     }
   };
 
+  // 外部指定文件：仅在初始路径/定位行本身变化时打开，避免刷新时把用户切走的文件强行弹回初始文件
   useEffect(() => {
     if (initialFilePath && primaryWorkDir) {
       openFile(initialFilePath, {
@@ -495,14 +501,25 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         lineEnd: initialLineEnd,
         mode: initialViewMode,
       });
-    } else if (selectedFile && refreshKey) {
-      openFile(selectedFile.absPath, {
-        line: highlightLine,
-        lineEnd: highlightLineEnd,
-        mode: viewMode,
-      });
     }
-  }, [initialFilePath, initialLineNumber, initialLineEnd, initialViewMode, refreshKey, primaryWorkDir]);
+  }, [initialFilePath, initialLineNumber, initialLineEnd, initialViewMode, primaryWorkDir]);
+
+  // 刷新：优先重载“当前正在看的文件”，没有选中文件时才回退到初始文件
+  const refreshMountedRef = useRef(false);
+  useEffect(() => {
+    if (!refreshMountedRef.current) {
+      refreshMountedRef.current = true;
+      return;
+    }
+    if (!primaryWorkDir || !refreshKey) return;
+    const target = selectedFile?.absPath || initialFilePath;
+    if (!target) return;
+    openFile(target, {
+      line: highlightLine,
+      lineEnd: highlightLineEnd,
+      mode: viewMode,
+    });
+  }, [refreshKey]);
 
   // 自适应渲染守护：轮询检测 SyntaxHighlighter DOM 挂载完成，平滑居中滚动至指定代码行
   useEffect(() => {
@@ -939,10 +956,10 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
                 (selectedFile.ext === "html" || selectedFile.ext === "htm") ? (
                 <iframe
                   key={`${selectedFile.absPath}_${refreshKey || 0}`}
-                  src={`local-media://local${encodeURI(selectedFile.absPath)}`}
+                  src={`local-media://local${encodeURI(selectedFile.absPath)}?render=1`}
                   className="w-full h-full border-0 bg-white"
                   title={selectedFile.name}
-                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                  sandbox=""
                 />
               ) : viewMode === "preview" &&
                 (selectedFile.ext === "md" || selectedFile.ext === "markdown") ? (

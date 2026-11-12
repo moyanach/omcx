@@ -215,10 +215,14 @@ class McpHttpClient {
         signal: controller.signal,
         body: JSON.stringify(body),
       });
-    } finally {
+    } catch (err) {
       clearTimeout(timer);
+      throw err;
     }
 
+    // 超时计时器必须覆盖响应体读取：SSE 服务器在返回 200 头之后可能永不发送匹配结果，
+    // 或在 body 上持续涓流字节，仅在拿到响应头后清理 timer 会让工具调用永久挂起。
+    try {
     const sessionHeader = response.headers.get("mcp-session-id");
     if (sessionHeader) this.sessionId = sessionHeader;
 
@@ -276,6 +280,9 @@ class McpHttpClient {
     }
     if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
     return parsed.result;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   notify(method, params = {}) {

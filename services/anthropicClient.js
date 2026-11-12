@@ -278,12 +278,24 @@ async function streamAnthropicMessage({
     temperature,
   });
 
-  const response = await fetch(buildMessagesEndpoint(baseUrl), {
-    method: "POST",
-    headers: anthropicHeaders(apiKey),
-    signal,
-    body: JSON.stringify(payload),
-  });
+  // 连接阶段超时：上游只建立连接却不返回响应头时不能无限等待
+  const connectController = new AbortController();
+  const connectTimer = setTimeout(() => connectController.abort(), 60 * 1000);
+  const combinedSignal =
+    signal && typeof AbortSignal.any === "function"
+      ? AbortSignal.any([signal, connectController.signal])
+      : signal || connectController.signal;
+  let response;
+  try {
+    response = await fetch(buildMessagesEndpoint(baseUrl), {
+      method: "POST",
+      headers: anthropicHeaders(apiKey),
+      signal: combinedSignal,
+      body: JSON.stringify(payload),
+    });
+  } finally {
+    clearTimeout(connectTimer);
+  }
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
@@ -378,9 +390,34 @@ async function streamAnthropicMessage({
     // message_stop / ping 无需额外处理
   };
 
+  // 流读取空闲超时：Anthropic 通道此前没有 watchdog，上游静默挂起会让 Agent 永久卡住
+  const STREAM_IDLE_TIMEOUT_MS = 90 * 1000;
+  const readWithIdleTimeout = () =>
+    new Promise((resolve, reject) => {
+      const idleTimer = setTimeout(() => {
+        reject(
+          new Error(
+            `Anthropic 流式响应空闲超时（${Math.round(
+              STREAM_IDLE_TIMEOUT_MS / 1000
+            )} 秒未收到任何数据）`
+          )
+        );
+      }, STREAM_IDLE_TIMEOUT_MS);
+      reader.read().then(
+        (chunk) => {
+          clearTimeout(idleTimer);
+          resolve(chunk);
+        },
+        (err) => {
+          clearTimeout(idleTimer);
+          reject(err);
+        }
+      );
+    });
+
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithIdleTimeout();
       if (done) break;
       if (value?.byteLength) {
         receivedBytes += value.byteLength;

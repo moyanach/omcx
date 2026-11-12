@@ -54,11 +54,11 @@ export const TodoListCard: React.FC<TodoListCardProps> = ({ todos, isActive = fa
   const allCompleted = completedCount === totalCount;
 
   return (
-    <div className='mb-1.5 w-full max-w-full bg-[var(--ui-block-bg)] border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] rounded-xl overflow-hidden select-none transition-colors'>
+    <div className='mb-1.5 w-full max-w-full select-none'>
       {/* 紧凑单行顶栏 */}
       <div
         onClick={() => setIsExpanded((v) => !v)}
-        className='px-3 py-1.5 flex items-center justify-between gap-3 cursor-pointer hover:bg-[var(--ui-block-hover-bg)] transition-colors'
+        className='py-1 flex items-center justify-between gap-3 cursor-pointer text-[var(--ui-text-muted)] hover:text-[var(--ui-text-secondary)] transition-colors'
       >
         <div className='flex items-center gap-2 min-w-0'>
           <div
@@ -110,7 +110,7 @@ export const TodoListCard: React.FC<TodoListCardProps> = ({ todos, isActive = fa
 
       {/* 展开后的详细清单 */}
       {isExpanded && (
-        <div className='px-3 py-2 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] flex flex-col gap-1'>
+        <div className='py-1 border-t border-[color:var(--ui-divider-hairline)] flex flex-col gap-1'>
           {safeTodos.map((item, idx) => {
             const isDone = item.status === 'completed';
             const isRunning = item.status === 'in_progress';

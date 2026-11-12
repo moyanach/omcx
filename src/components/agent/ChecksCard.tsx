@@ -93,7 +93,7 @@ export const ChecksCard: React.FC = () => {
     typeof result?.durationMs === "number" ? `${(result.durationMs / 1000).toFixed(1)}s` : "";
 
   return (
-    <div className="bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl overflow-hidden transition-all duration-200 select-none titlebar-no-drag">
+    <div className="border-b border-[color:var(--ui-divider-hairline)] transition-colors select-none titlebar-no-drag last:border-b-0">
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-[var(--ui-block-hover-bg)] transition-colors"
@@ -173,8 +173,8 @@ export const ChecksCard: React.FC = () => {
               </div>
 
               {diagnostics.length > 0 && (
-                <div className="rounded-xl bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] max-h-[180px] overflow-y-auto custom-scrollbar">
-                  <div className="px-2.5 py-1.5 text-[10px] font-semibold text-[var(--ui-text-muted)] border-b border-[color:var(--ui-divider-hairline)] sticky top-0 bg-[var(--ui-card-inner-bg)]">
+                <div className="rounded-lg bg-[var(--ui-block-bg)] max-h-[180px] overflow-y-auto custom-scrollbar">
+                  <div className="px-2.5 py-1.5 text-[10px] font-semibold text-[var(--ui-text-muted)] border-b border-[color:var(--ui-divider-hairline)] sticky top-0 bg-[var(--ui-panel-bg)]">
                     <FileWarning size={11} className="inline mr-1" />
                     {diagnostics.length} 条类型诊断
                   </div>

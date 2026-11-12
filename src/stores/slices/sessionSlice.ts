@@ -607,6 +607,23 @@ export const createSessionSlice: StateCreator<
   deleteSession: async (id) => {
     if (!window.electronAPI) return;
     try {
+      // 删除前先终止该会话所有在跑链路：否则主进程会继续执行工具并写回已删除会话
+      if (get().generatingBySession[id]) {
+        try {
+          window.electronAPI.cancelChat?.(id);
+        } catch {
+          // 忽略取消失败，后续本地状态仍会清理
+        }
+      }
+      const runningBtwId = get().btwRunningBySession?.[id];
+      if (runningBtwId && window.electronAPI.cancelBtw) {
+        try {
+          await window.electronAPI.cancelBtw(runningBtwId);
+        } catch {
+          // 忽略
+        }
+      }
+
       await window.electronAPI.dbDeleteSession(id);
       set((state) => {
         const newSessions = state.sessions.filter((s) => s.id !== id);
@@ -624,12 +641,40 @@ export const createSessionSlice: StateCreator<
         const nextStartTimes = { ...state.sessionStartTimeBySession };
         delete nextStartTimes[id];
 
+        const nextGenerating = { ...state.generatingBySession };
+        delete nextGenerating[id];
+        const nextWaiting = { ...state.waitingBySession };
+        delete nextWaiting[id];
+        const nextPermissions = { ...state.permissionBySession };
+        delete nextPermissions[id];
+        const nextToolCalls = { ...state.toolCallsBySession };
+        delete nextToolCalls[id];
+        const nextTodos = { ...state.todosBySession };
+        delete nextTodos[id];
+        const nextMetrics = { ...state.contextMetricsBySession };
+        delete nextMetrics[id];
+        const nextBtwThreads = { ...state.btwThreadsBySession };
+        delete nextBtwThreads[id];
+        const nextBtwRunning = { ...state.btwRunningBySession };
+        delete nextBtwRunning[id];
+        const nextBtwQuote = { ...state.btwQuoteBySession };
+        delete nextBtwQuote[id];
+
         return {
           sessions: newSessions,
           activeSessionId: newActive,
           messages: newMessages,
           promptQueueBySession: nextQueue,
           sessionStartTimeBySession: nextStartTimes,
+          generatingBySession: nextGenerating,
+          waitingBySession: nextWaiting,
+          permissionBySession: nextPermissions,
+          toolCallsBySession: nextToolCalls,
+          todosBySession: nextTodos,
+          contextMetricsBySession: nextMetrics,
+          btwThreadsBySession: nextBtwThreads,
+          btwRunningBySession: nextBtwRunning,
+          btwQuoteBySession: nextBtwQuote,
         };
       });
 
