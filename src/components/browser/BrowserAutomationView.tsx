@@ -15,6 +15,7 @@ import {
   XCircle,
   X,
 } from "lucide-react";
+import { useChatStore } from "@/stores/chatStore";
 
 interface CompareResult {
   match?: boolean;
@@ -37,6 +38,9 @@ interface SnapshotState {
 }
 
 export const BrowserAutomationView: React.FC = () => {
+  const { sessions, activeSessionId } = useChatStore();
+  // 截图与基线跟随当前会话绑定的工作目录落盘到 <workDir>/.omcx/browser-shots/
+  const activeWorkDir = sessions.find((s) => s.id === activeSessionId)?.workDir || "";
   const [url, setUrl] = useState("");
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -153,7 +157,7 @@ export const BrowserAutomationView: React.FC = () => {
     setNotice("");
     setLiveShot("");
     try {
-      const result = await window.electronAPI.browserAutoOpen(target);
+      const result = await window.electronAPI.browserAutoOpen(target, activeWorkDir || undefined);
       if (result?.ok) {
         setOpen(true);
         setTitle(result.title || "");
@@ -181,6 +185,7 @@ export const BrowserAutomationView: React.FC = () => {
       const result = await window.electronAPI.browserAutoSnapshot({
         fullPage,
         baseline: "",
+        workDir: activeWorkDir || undefined,
       });
       if (result?.ok) {
         setSnapshot(result);
@@ -231,6 +236,7 @@ export const BrowserAutomationView: React.FC = () => {
         fullPage,
         baseline: baselineName || "default",
         threshold: 0.001,
+        workDir: activeWorkDir || undefined,
       });
       if (result?.ok) {
         setSnapshot(result);
@@ -319,7 +325,7 @@ export const BrowserAutomationView: React.FC = () => {
         >
           <RotateCw size={13} className={busy === "reload" ? "animate-spin" : ""} />
         </button>
-        <div className="flex-1 h-7 rounded-lg bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] flex items-center px-2.5 gap-1.5 focus-within:border-[color:var(--ui-accent-blue-border)] transition-colors">
+        <div className="ui-focus-ring flex-1 h-7 rounded-lg bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] flex items-center px-2.5 gap-1.5 focus-within:bg-[var(--ui-input-hover-bg)] transition-colors">
           <Globe size={12} className="text-[var(--ui-text-faint)] flex-shrink-0" />
           <input
             type="text"
@@ -469,7 +475,7 @@ export const BrowserAutomationView: React.FC = () => {
           onChange={(e) => setBaselineName(e.target.value)}
           list="omcx-baseline-list"
           placeholder="基线名称"
-          className="h-7 w-28 px-2 rounded-lg bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] text-[10.5px] font-mono text-[var(--ui-text-secondary)] outline-none"
+          className="ui-focus-ring h-7 w-28 px-2 rounded-lg bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] text-[10.5px] font-mono text-[var(--ui-text-secondary)] outline-none transition-colors focus:bg-[var(--ui-input-hover-bg)]"
         />
         <datalist id="omcx-baseline-list">
           {baselines.map((name) => (

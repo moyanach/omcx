@@ -523,7 +523,7 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
             <RotateCw size={13} className={isRefreshing ? "animate-spin" : ""} />
           </button>
 
-          <div className="flex-1 h-7 rounded-lg bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] flex items-center px-2.5 gap-1.5 focus-within:border-[color:var(--ui-accent-blue-border)] transition-colors">
+          <div className="ui-focus-ring flex-1 h-7 rounded-lg bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] flex items-center px-2.5 gap-1.5 focus-within:bg-[var(--ui-input-hover-bg)] transition-colors">
             {activeTab?.filePath && (
               <span className="px-1.5 py-0.5 rounded bg-[var(--ui-accent-sky-soft)] text-[var(--ui-accent-sky)] text-[10px] font-medium flex-shrink-0">
                 本地产物

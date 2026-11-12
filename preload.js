@@ -245,7 +245,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("eval-run", { evalId, model, maxRounds }),
   runAllEvals: (model, ids, maxRounds) =>
     ipcRenderer.invoke("eval-run-all", { model, ids, maxRounds }),
-  browserAutoOpen: (url) => ipcRenderer.invoke("browser-auto-open", { url }),
+  browserAutoOpen: (url, workDir) => ipcRenderer.invoke("browser-auto-open", { url, workDir }),
   browserAutoInteract: (payload) => ipcRenderer.invoke("browser-auto-interact", payload),
   browserAutoSnapshot: (payload = {}) => ipcRenderer.invoke("browser-auto-snapshot", payload),
   browserAutoSaveBaseline: (payload = {}) =>

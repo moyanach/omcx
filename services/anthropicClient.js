@@ -11,6 +11,14 @@
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 8192;
 
+// adaptive thinking 的 effort 档位映射（Anthropic 官方：output_config.effort）
+const ADAPTIVE_EFFORT_MAP = {
+  low: "low",
+  medium: "medium",
+  high: "high",
+  max: "max",
+};
+
 function isAnthropicProvider(provider, baseUrl) {
   const p = String(provider || "").toLowerCase();
   const url = String(baseUrl || "").toLowerCase();
@@ -150,6 +158,21 @@ function convertMessages(messages = []) {
           });
         }
       }
+      // Anthropic 要求 thinking block 必须排在 text / tool_use 之前，
+      // 且多轮与工具循环中必须连同 signature 原样回传，否则上游会拒绝或显著掉质量。
+      if (typeof message.reasoning === "string" && message.reasoning.trim()) {
+        const signatures = Array.isArray(message.reasoningSignatures)
+          ? message.reasoningSignatures
+          : [];
+        const thinkBlock = { type: "thinking", thinking: message.reasoning };
+        if (signatures[0]) {
+          thinkBlock.signature = String(signatures[0]);
+        } else {
+          console.warn("[anthropic] 回传 thinking 缺少 signature（上游可能忽略该块）");
+        }
+        blocks.unshift(thinkBlock);
+      }
+      if (blocks.length === 0) continue;
       append("assistant", blocks);
       continue;
     }
@@ -208,10 +231,14 @@ function buildAnthropicPayload({
   tools = [],
   maxTokens,
   temperature = 0.2,
+  reasoningEffort,
 }) {
   const { system, messages: converted } = convertMessages(messages);
   const anthropicTools = convertTools(tools);
   const cached = applyCacheControl(system, anthropicTools, converted);
+
+  const effort = String(reasoningEffort || "").toLowerCase();
+  const thinkingEnabled = effort && effort !== "off";
 
   const payload = {
     model,
@@ -224,7 +251,15 @@ function buildAnthropicPayload({
     payload.tools = cached.tools;
     payload.tool_choice = { type: "auto" };
   }
-  if (Number.isFinite(Number(temperature))) {
+  if (thinkingEnabled) {
+    // extended thinking 的 thinking.type="enabled" + budget_tokens 已是 legacy 协议，
+    // Claude 4.7+ 直接 400。统一迁移到 adaptive thinking：由模型自行决定是否思考与深度，
+    // 通过 output_config.effort 表达意图（官方推荐做法）。
+    payload.thinking = { type: "adaptive" };
+    payload.output_config = { effort: ADAPTIVE_EFFORT_MAP[effort] || "high" };
+    // 开启思考时上游要求 temperature=1，显式下发避免网关默认值冲突
+    payload.temperature = 1;
+  } else if (Number.isFinite(Number(temperature))) {
     payload.temperature = Number(temperature);
   }
   return payload;
@@ -266,6 +301,7 @@ async function streamAnthropicMessage({
   tools,
   maxTokens,
   temperature,
+  reasoningEffort,
   signal,
   onText,
   onReasoning,
@@ -276,6 +312,7 @@ async function streamAnthropicMessage({
     tools,
     maxTokens,
     temperature,
+    reasoningEffort,
   });
 
   // 连接阶段超时：上游只建立连接却不返回响应头时不能无限等待
@@ -295,6 +332,37 @@ async function streamAnthropicMessage({
     });
   } finally {
     clearTimeout(connectTimer);
+  }
+
+  // 兼容性安全退避：老模型或第三方 Anthropic 兼容网关可能不认识 adaptive thinking /
+  // output_config，返回 400 时剥离思考参数重试一次，避免思考能力把整个请求打死。
+  if (!response.ok && response.status === 400 && payload.thinking) {
+    const errProbe = await response.text().catch(() => "");
+    const lowerProbe = errProbe.toLowerCase();
+    if (
+      lowerProbe.includes("thinking") ||
+      lowerProbe.includes("output_config") ||
+      lowerProbe.includes("effort") ||
+      lowerProbe.includes("unrecognized") ||
+      lowerProbe.includes("extra fields") ||
+      lowerProbe.includes("not supported")
+    ) {
+      console.warn(
+        `[anthropic] 端点不接受 adaptive thinking (${errProbe.slice(0, 160)})，剥离思考参数重试...`
+      );
+      const retryPayload = { ...payload };
+      delete retryPayload.thinking;
+      delete retryPayload.output_config;
+      retryPayload.temperature = Number.isFinite(Number(temperature)) ? Number(temperature) : 0.2;
+      response = await fetch(buildMessagesEndpoint(baseUrl), {
+        method: "POST",
+        headers: anthropicHeaders(apiKey),
+        signal: combinedSignal,
+        body: JSON.stringify(retryPayload),
+      });
+    } else {
+      throw new Error(`Anthropic API 请求失败 (400): ${errProbe.slice(0, 1200)}`);
+    }
   }
 
   if (!response.ok) {
@@ -317,6 +385,10 @@ async function streamAnthropicMessage({
   let eventName = "";
   let dataLines = [];
   const toolCallsByBlock = new Map();
+  // 思考块采集：Anthropic 要求把 assistant turn 内的 thinking block 连同 signature
+  // 原样回传（工具循环尤其如此），因此必须按产出顺序完整保留，不能只留文本。
+  const thinkingBlocksByIndex = new Map();
+  const orderedReasoningBlocks = [];
 
   const flushEvent = () => {
     if (dataLines.length === 0) return;
@@ -343,6 +415,12 @@ async function streamAnthropicMessage({
           type: "function",
           function: { name: block.name || "", arguments: "" },
         });
+      } else if (block.type === "thinking") {
+        thinkingBlocksByIndex.set(json.index, {
+          index: json.index,
+          thinking: block.thinking || "",
+          signature: block.signature || "",
+        });
       }
       return;
     }
@@ -353,7 +431,13 @@ async function streamAnthropicMessage({
         onText?.(delta.text);
       } else if (delta.type === "thinking_delta" && delta.thinking) {
         reasoning += delta.thinking;
+        const holder = thinkingBlocksByIndex.get(json.index);
+        if (holder) holder.thinking += delta.thinking;
         onReasoning?.(delta.thinking);
+      } else if (delta.type === "signature_delta" && delta.signature) {
+        // signature 是加密推理副本，必须按块累积，禁止写日志或进入 Markdown 导出
+        const holder = thinkingBlocksByIndex.get(json.index);
+        if (holder) holder.signature += delta.signature;
       } else if (delta.type === "input_json_delta" && delta.partial_json) {
         const tool = toolCallsByBlock.get(json.index);
         if (tool) tool.function.arguments += delta.partial_json;
@@ -363,6 +447,11 @@ async function streamAnthropicMessage({
     if (type === "content_block_stop") {
       const tool = toolCallsByBlock.get(json.index);
       if (tool && !tool.function.arguments) tool.function.arguments = "{}";
+      const thinkingBlock = thinkingBlocksByIndex.get(json.index);
+      if (thinkingBlock) {
+        orderedReasoningBlocks.push(thinkingBlock);
+        thinkingBlocksByIndex.delete(json.index);
+      }
       return;
     }
     if (type === "message_delta") {
@@ -452,11 +541,28 @@ async function streamAnthropicMessage({
     .filter((tool) => tool.function.name)
     .sort((a, b) => a.index - b.index);
 
+  // 流意外中断时 content_block_stop 可能缺失：把残留思考块按 index 顺序补收，
+  // 避免 signature 与文本错位。
+  if (thinkingBlocksByIndex.size > 0) {
+    const leftovers = Array.from(thinkingBlocksByIndex.values()).sort((a, b) => a.index - b.index);
+    orderedReasoningBlocks.push(...leftovers);
+    thinkingBlocksByIndex.clear();
+  }
+
   if (!finishReason && toolCalls.length > 0) finishReason = "tool_calls";
+
+  // 按产出顺序输出 signature 列表，供下一轮请求原样回传 thinking block
+  const reasoningSignatures = orderedReasoningBlocks.map((block) => block.signature || "");
 
   return {
     content,
     reasoning,
+    reasoningSignatures,
+    reasoningMeta: {
+      provider: "anthropic",
+      signatures: reasoningSignatures,
+      blockCount: orderedReasoningBlocks.length,
+    },
     toolCalls,
     usage,
     hitLengthLimit,

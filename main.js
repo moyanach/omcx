@@ -17,6 +17,7 @@ const crypto = require("crypto");
 
 // 引入核心业务服务
 const storageService = require("./services/storageService");
+const reasoningPolicy = require("./services/reasoningPolicy");
 const { initAutoUpdater } = require("./services/updaterService");
 const {
   getWorkspaceGitStatus,
@@ -607,25 +608,24 @@ function buildReasoningPayload(apiModelId, provider, reasoningEffort) {
     return { payload, isThinkingModel: true };
   }
 
-  // 2. Anthropic Claude 3.7+ 思考模型规范 (claude-3-7-sonnet, claude-4 等)
+  // 2. Anthropic Claude 思考模型（含经 OpenAI 兼容网关暴露的 claude 模型）
+  //    注意：legacy 的 thinking.type="enabled" + budget_tokens 已被官方标记为弃用，
+  //    Claude 4.7+ 直接返回 400。这里统一下发 adaptive thinking，并用 output_config.effort
+  //    表达强度意图；若网关仍不认识，main.js 的 400 安全退避会自动剥离重试。
+  //    仅匹配明确支持思考的版本（3.7+ / 4.x / 5.x），避免给 claude-3-5 等旧模型平白多打一次 400。
+  const supportsClaudeThinking =
+    /claude[-_]?(?:3[-.]?7|4|5|6|7|8|9)/i.test(modelLower) ||
+    /(?:sonnet|opus|haiku)[-_]?(?:4|5|6|7|8|9)/i.test(modelLower) ||
+    modelLower.includes("thinking");
   const isClaudeThinking =
-    (providerLower === "anthropic" || modelLower.includes("claude")) &&
-    (modelLower.includes("3-7") || modelLower.includes("3.7") || modelLower.includes("claude-4") || modelLower.includes("thinking"));
+    (providerLower === "anthropic" || modelLower.includes("claude")) && supportsClaudeThinking;
 
   if (isClaudeThinking) {
-    const budgetMap = {
-      low: 2048,
-      medium: 4096,
-      high: 8192,
-      max: 16384,
-    };
-    const budget = budgetMap[reasoningEffort] || 4096;
+    const effortMap = { low: "low", medium: "medium", high: "high", max: "max" };
     return {
       payload: {
-        thinking: {
-          type: "enabled",
-          budget_tokens: budget,
-        },
+        thinking: { type: "adaptive" },
+        output_config: { effort: effortMap[reasoningEffort] || "high" },
         temperature: 1.0,
       },
       isThinkingModel: true,
@@ -2205,7 +2205,7 @@ app.whenReady().then(() => {
   // --- P2: 内置浏览器自动化 ---
   ipcMain.handle(
     "browser-auto-open",
-    safeHandler((event, { url } = {}) => browserAutomationService.open({ url }))
+    safeHandler((event, { url, workDir } = {}) => browserAutomationService.open({ url, workDir }))
   );
   ipcMain.handle(
     "browser-auto-interact",
@@ -3618,13 +3618,115 @@ app.whenReady().then(() => {
           headers["Authorization"] = `Bearer ${modelApiKey}`;
         }
 
-        // 历史回合的思考块对后续推理价值极低，却会在每次请求中重复上传数万 token：
-        // 统一剥离，仅保留最终正文（当前回合的实时思考仍走流式通道）。
+        // 历史回合的思考块仅剥离正文中的字面量标签（v2.1.9 前线上下发的旧格式），
+        // 是否把历史推理回传给上游由 reasoning_replay_scope 策略决定（见下方 reasoningReplay）。
+        // 同时用 WeakMap 记住每条历史消息的持久化 id，供窗口回填按需拉取思考全文；
+        // id 属于内部字段，必须在进入请求体前剥离，避免污染上游 protocol payload。
+        const historyMessageIds = new WeakMap();
         let apiMessages = (Array.isArray(messages) ? messages : []).map((m) => {
-          if (!m || m.role !== "assistant" || typeof m.content !== "string") return m;
-          if (!m.content.includes("<think")) return m;
-          return { ...m, content: storageService.extractLegacyThinking(m.content).content };
+          if (!m || typeof m !== "object") return m;
+          const cloned = { ...m };
+          if (m.id) historyMessageIds.set(cloned, m.id);
+          delete cloned.id;
+          if (
+            cloned.role === "assistant" &&
+            typeof cloned.content === "string" &&
+            cloned.content.includes("<think")
+          ) {
+            cloned.content = storageService.extractLegacyThinking(cloned.content).content;
+          }
+          return cloned;
         });
+
+        // ─── 推理回传策略（provider-aware reasoning replay） ───
+        // 协议正确性与成本控制的核心开关：
+        // - Anthropic：只在同一 assistant turn 内回传 thinking block（历史缺 signature 会 400）；
+        // - OpenAI 兼容（DeepSeek 等）：仅在携带 tools 时回传 reasoning_content；
+        // - scope=window 时额外带上最近 N 个用户轮次的思考（默认 3 轮）。
+        const reasoningReplay = reasoningPolicy.resolveReplayPolicy({
+          provider,
+          baseUrl: modelBaseUrl,
+          modelId: apiModelId,
+          hasTools: Boolean(enableTools),
+          scope: storageService.getConfig("reasoning_replay_scope"),
+          window: storageService.getConfig("reasoning_replay_window"),
+        });
+        console.log(
+          `[reasoning-replay] mode=${reasoningReplay.mode} scope=${reasoningReplay.scope} window=${reasoningReplay.window} includeHistory=${reasoningReplay.includeHistory}`
+        );
+
+        if (reasoningReplay.includeHistory && reasoningReplay.mode === "openai-field") {
+          // 从最近的消息往前扫描，只回填最近 N 个用户轮次内的 assistant 思考，
+          // 避免把整段会话的推理全部塞回请求体导致上下文与成本双爆。
+          const MAX_HISTORY_REPLAY_ITEMS = 12;
+          let userTurnsSeen = 0;
+          let replayed = 0;
+          for (let i = apiMessages.length - 1; i >= 0; i--) {
+            if (replayed >= MAX_HISTORY_REPLAY_ITEMS) break;
+            const msg = apiMessages[i];
+            if (!msg) continue;
+            if (msg.role === "user") {
+              userTurnsSeen += 1;
+              if (userTurnsSeen > reasoningReplay.window) break;
+              continue;
+            }
+            if (msg.role !== "assistant" || msg.reasoning_content) continue;
+            const persistedId = historyMessageIds.get(msg);
+            if (!persistedId) continue;
+            try {
+              const text = storageService.getMessageReasoning(persistedId);
+              const payload = reasoningPolicy.buildReplayPayload(reasoningReplay, {
+                reasoning: text,
+              });
+              if (payload) {
+                msg[payload.field] = payload.value;
+                replayed += 1;
+              }
+            } catch (err) {
+              console.warn(`[reasoning-replay] 历史思考回填失败 (${persistedId}):`, err.message);
+            }
+          }
+          if (replayed > 0) {
+            console.log(
+              `[reasoning-replay] 已回填 ${replayed} 条历史推理 (window=${reasoningReplay.window})`
+            );
+          }
+        }
+
+        /**
+         * 把本轮 assistant 产出（content + reasoning + tool_calls）组装成可回传的消息。
+         * 推理字段按 provider 策略注入，绝不无条件塞入，避免非推理端点因未知字段 400。
+         */
+        const buildAssistantReplayMessage = (result, { toolCalls, content } = {}) => {
+          const message = {
+            role: "assistant",
+            content: content !== undefined ? content : result.content || "",
+          };
+          if (reasoningReplay.mode === "openai-field") {
+            const replayPayload = reasoningPolicy.buildReplayPayload(reasoningReplay, result);
+            if (replayPayload) message[replayPayload.field] = replayPayload.value;
+          } else if (reasoningReplay.mode === "anthropic-block") {
+            // Anthropic 的 thinking block 与 signature 必须严格配对且不可截断，
+            // 因此这里直接使用本轮原始推理文本，不走 buildReplayPayload 的长度护栏。
+            const rawReasoning = reasoningPolicy.extractReplayReasoning(result);
+            const signatures = Array.isArray(result.reasoningMeta?.signatures)
+              ? result.reasoningMeta.signatures
+              : [];
+            if (rawReasoning && signatures.some(Boolean)) {
+              message.reasoning = rawReasoning;
+              message.reasoningSignatures = signatures;
+            } else if (rawReasoning) {
+              // 缺少 signature 时不回传：结构不合法的 thinking block 会被上游拒绝，
+              // 直接丢弃反而更安全（正文与 tool_calls 仍然完整）。
+              console.warn("[reasoning-replay] Anthropic thinking 缺少 signature，本轮跳过推理回传");
+            }
+          }
+          if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+            message.tool_calls = toolCalls;
+          }
+          return message;
+        };
+
         // 斜杠命令展开：仅在最后一条用户消息以 /command 开头时替换为完整提示词
         let slashCommandInfo = null;
         try {
@@ -4123,12 +4225,20 @@ app.whenReady().then(() => {
               tools: requestBody.tools || [],
               maxTokens: maxOutputTokens,
               temperature: 0.2,
+              // 迁移到 adaptive thinking：由 effort 表达思考意图，禁止下发 legacy 的 budget_tokens
+              reasoningEffort: sessionReasoningEffort,
               signal: sessionAbort.abortController.signal,
               onText: (delta) => sendData(delta),
               onReasoning: (delta) => sendReasoning(delta),
             });
             if (anthropicResult.usage) {
               lastProviderUsage = anthropicResult.usage;
+            }
+            const signatureCount = Array.isArray(anthropicResult.reasoningSignatures)
+              ? anthropicResult.reasoningSignatures.filter(Boolean).length
+              : 0;
+            if (signatureCount > 0) {
+              console.log(`[anthropic] 采集到 ${signatureCount} 个 thinking signature，可在工具轮回传`);
             }
             return anthropicResult;
           }
@@ -4142,6 +4252,15 @@ app.whenReady().then(() => {
             ...reasoningSpec.payload,
             ...requestBody,
           };
+          // 显式下发输出上限：此前完全依赖网关默认值，导致 finish_reason=length
+          // 与设置中的 max_output_tokens 脱节（长思考后正文被提前截断的诱因之一）。
+          // 思考模型的 completion 预算需容纳思考本身，因此在配置值基础上追加余量。
+          if (Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) {
+            const thinkingActive = Object.keys(reasoningSpec.payload).length > 0;
+            requestBodyFinal.max_tokens = thinkingActive
+              ? Math.min(64000, maxOutputTokens * 2)
+              : maxOutputTokens;
+          }
 
           let resp = await fetch(`${modelBaseUrl}/chat/completions`, {
             method: "POST",
@@ -4370,6 +4489,8 @@ app.whenReady().then(() => {
           return {
             content: fullContent,
             reasoning: fullReasoning,
+            // OpenAI 兼容端点无加密推理副本，仅回传明文 reasoning_content
+            reasoningMeta: { provider: "openai-compatible", signatures: [] },
             toolCalls: toolCalls.filter(Boolean),
             usage,
             hitLengthLimit,
@@ -4497,10 +4618,8 @@ app.whenReady().then(() => {
               continuationCount++;
               const tailSnippet = result.content.slice(-80);
               console.log(`[auto-continue] 模式A：正文触发长度上限，发起第 ${continuationCount} 次无缝断点续写`);
-              apiMessages.push({
-                role: "assistant",
-                content: result.content,
-              });
+              // 续写回填同样携带推理，避免在 Reasoning 模型上丢失推理链导致续写跑偏
+              apiMessages.push(buildAssistantReplayMessage(result, { content: result.content }));
               apiMessages.push({
                 role: "user",
                 content: `你的上一条回复因达到单次输出长度上限而在末尾中断（中断处末尾字符为：${JSON.stringify(
@@ -4517,6 +4636,8 @@ app.whenReady().then(() => {
             ) {
               continuationCount++;
               console.log(`[auto-continue] 模式B：思考或大工具参数被截断，发起第 ${continuationCount} 次增量恢复`);
+              // 模式 B 的推理已作为摘要写进 content（旧行为），因此这里只回填正文，
+              // 避免同一段推理同时出现在 reasoning_content 与 content 中导致语义重复。
               apiMessages.push({
                 role: "assistant",
                 content: result.reasoning
@@ -4542,7 +4663,7 @@ app.whenReady().then(() => {
               const activeTodo = initialTodos.find((t) => t.status === "in_progress") || initialTodos.find((t) => t.status === "pending");
               console.log(`[auto-continue] 模式C：检测到未完成 Todo (${activeTodo?.text})，督促继续执行`);
               if (cleanRoundText) {
-                apiMessages.push({ role: "assistant", content: cleanRoundText });
+                apiMessages.push(buildAssistantReplayMessage(result, { content: cleanRoundText }));
               }
               apiMessages.push({
                 role: "user",
@@ -4571,7 +4692,9 @@ app.whenReady().then(() => {
               );
               // 只回填“本轮”输出：累计正文已包含此前各轮，重复回填会让历史成倍膨胀。
               // 累计文本仅用于判断围栏是否仍未闭合。
-              apiMessages.push({ role: "assistant", content: result.content || cleanRoundText });
+              apiMessages.push(
+                buildAssistantReplayMessage(result, { content: result.content || cleanRoundText })
+              );
               apiMessages.push({
                 role: "user",
                 content:
@@ -4849,18 +4972,20 @@ app.whenReady().then(() => {
 
           if (completedCalls.length > 0) {
             // 3. 标准消息序列：单条聚合 assistant 消息（保留本轮产出的 content 与全部 tool_calls）+ 紧随其后的多条 tool 消息
-            apiMessages.push({
-              role: "assistant",
-              content: result.content || "",
-              tool_calls: completedCalls.map(({ tc, callId }) => ({
-                id: callId,
-                type: "function",
-                function: {
-                  name: tc.function.name,
-                  arguments: tc.function.arguments,
-                },
-              })),
-            });
+            //    推理回传：DeepSeek 等要求在带 tools 的请求中回传本轮 reasoning_content；
+            //    Anthropic 要求回传 thinking block + signature。统一走 buildAssistantReplayMessage。
+            apiMessages.push(
+              buildAssistantReplayMessage(result, {
+                toolCalls: completedCalls.map(({ tc, callId }) => ({
+                  id: callId,
+                  type: "function",
+                  function: {
+                    name: tc.function.name,
+                    arguments: tc.function.arguments,
+                  },
+                })),
+              })
+            );
 
             for (const { callId, execResult } of completedCalls) {
               // 过滤前端对比专用的大体积旧文件快照字段，避免浪费大模型上下文 Token

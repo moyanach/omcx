@@ -714,7 +714,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         </div>
 
         {/* 快速搜索框 */}
-        <div className="flex-1 h-7 rounded-lg bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] flex items-center px-2.5 gap-1.5 focus-within:border-[color:var(--ui-accent-blue-border)] transition-colors">
+        <div className="ui-focus-ring flex-1 h-7 rounded-lg bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] flex items-center px-2.5 gap-1.5 focus-within:bg-[var(--ui-input-hover-bg)] transition-colors">
           <Search size={12} className="text-[var(--ui-text-faint)] flex-shrink-0" />
           <input
             type="text"

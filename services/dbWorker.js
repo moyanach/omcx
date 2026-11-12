@@ -167,6 +167,7 @@ function initDb() {
     `),
     deleteSessionReasonings: db.prepare("DELETE FROM message_reasonings WHERE session_id = ?"),
     deleteReasoningsAfter: db.prepare("DELETE FROM message_reasonings WHERE session_id = ? AND created_at > ?"),
+    deleteReasoningByMessage: db.prepare("DELETE FROM message_reasonings WHERE message_id = ?"),
 
     getSessionOutputs: db.prepare("SELECT * FROM session_outputs WHERE session_id = ? ORDER BY created_at ASC"),
     insertOutput: db.prepare(`
@@ -248,11 +249,15 @@ parentPort.on("message", (msg) => {
       }
 
       case "UPSERT_MESSAGE": {
-        const { message, reasoning, now } = payload;
+        const { message, reasoning, now, dropReasoning } = payload;
         const upsertTx = db.transaction(() => {
           statements.upsertMessage.run(message);
           if (reasoning && reasoning.reasoning_content) {
             statements.upsertMessageReasoning.run(reasoning);
+          } else if (dropReasoning) {
+            // persistence=off：同一消息在流式快照期间可能已写入过思考行，
+            // 终稿必须把它清除，确保重启后折叠条彻底消失。
+            statements.deleteReasoningByMessage.run(message.id);
           }
           statements.touchSession.run(now, message.session_id);
         });

@@ -69,6 +69,14 @@ function calculateContextMetrics({
     if (msg.tool_calls) {
       messagesTokens += estimateTokens(msg.tool_calls);
     }
+    // 推理内容在开启回传后会随请求体上传，必须计入预算，
+    // 否则 maybeCompact 阈值会系统性低估并触发 provider 上下文溢出。
+    if (typeof msg.reasoning_content === "string" && msg.reasoning_content) {
+      messagesTokens += estimateTokens(msg.reasoning_content);
+    }
+    if (typeof msg.reasoning === "string" && msg.reasoning) {
+      messagesTokens += estimateTokens(msg.reasoning);
+    }
   }
 
   // 2. System tools Token

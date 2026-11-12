@@ -313,7 +313,7 @@ export const BtwPanel: React.FC<{ sessionId: string }> = ({ sessionId }) => {
             </div>
           </div>
         )}
-        <div className="flex items-end gap-1.5 rounded-xl border border-[color:var(--ui-border-hairline)] bg-[var(--ui-input-bg)] px-2 py-1.5 focus-within:border-[color:var(--ui-accent-sky-border)] transition-colors">
+        <div className="ui-focus-ring flex items-end gap-1.5 rounded-xl border border-[color:var(--ui-border-hairline)] bg-[var(--ui-input-bg)] px-2 py-1.5 focus-within:bg-[var(--ui-input-hover-bg)] transition-colors">
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}

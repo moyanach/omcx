@@ -216,13 +216,16 @@ export function useStreamChat() {
       await addMessage(targetSessionId, assistantMsg, true);
 
       const currentMsgs = useChatStore.getState().messages[targetSessionId] || [];
+      // 保留 id 供主进程按需回填历史思考（window 回传模式），
+      // 主进程会在组装请求体前剥离该字段，不会污染上游 protocol payload。
       const contextMsgs = currentMsgs
         .filter((m) => m.id !== assistantMsgId)
         .map((m) => {
           const attachmentList = m.metadata?.attachments;
+          const base = { id: m.id, role: m.role, content: m.content };
           return Array.isArray(attachmentList) && attachmentList.length > 0
-            ? { role: m.role, content: m.content, attachments: attachmentList }
-            : { role: m.role, content: m.content };
+            ? { ...base, attachments: attachmentList }
+            : base;
         });
 
       let accumulatedContent = "";
@@ -515,9 +518,11 @@ export function useStreamChat() {
           .filter((m) => m.id !== assistantMsgId)
           .map((m) => {
             const attachmentList = m.metadata?.attachments;
+            // 同 sendMessage：携带 id 供主进程做 window 模式历史思考回填
+            const base = { id: m.id, role: m.role, content: m.content };
             return Array.isArray(attachmentList) && attachmentList.length > 0
-              ? { role: m.role, content: m.content, attachments: attachmentList }
-              : { role: m.role, content: m.content };
+              ? { ...base, attachments: attachmentList }
+              : base;
           });
 
         let accumulatedContent = "";

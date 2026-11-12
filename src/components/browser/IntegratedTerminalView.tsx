@@ -316,7 +316,7 @@ export const IntegratedTerminalView: React.FC = () => {
             <select
               value={cwd || workDir}
               onChange={(e) => setCwd(e.target.value)}
-              className="h-6 px-2 rounded-md bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] font-mono text-[var(--ui-text-primary)] outline-none"
+              className="ui-focus-ring h-6 px-2 rounded-md bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] font-mono text-[var(--ui-text-primary)] outline-none transition-colors focus:bg-[var(--ui-input-hover-bg)]"
               title="切换终端所在的工作空间 Root 目录"
             >
               {workspaceRoots.map((root) => (

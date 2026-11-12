@@ -1,4 +1,5 @@
 const { estimateTokens } = require("./contextCalculator");
+const storageService = require("./storageService");
 
 const DEFAULTS = {
   outputReserve: 4096,
@@ -75,6 +76,13 @@ function estimateMessagesTokens(messages = []) {
       } catch {
         // 忽略无法序列化的 tool_calls
       }
+    }
+    // 推理随请求回传时同样占用上下文预算，必须计入阈值判断
+    if (typeof message.reasoning_content === "string" && message.reasoning_content) {
+      tokens += estimateTokens(message.reasoning_content);
+    }
+    if (typeof message.reasoning === "string" && message.reasoning) {
+      tokens += estimateTokens(message.reasoning);
     }
   }
   return tokens;
@@ -248,10 +256,9 @@ function buildTranscript(messages, maxChars) {
 
 function cleanSummaryText(raw) {
   if (!raw || typeof raw !== "string") return "";
-  const withoutThink = raw
-    .replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, "")
-    .replace(/<(?:think|thinking)>[\s\S]*$/gi, "")
-    .trim();
+  // 复用 storageService 的安全剥离实现：只移除「成对且闭合」的思考标签，
+  // 未闭合标签一律按字面文本保留在正文中，彻底消除“吞尾截断”复发面。
+  const withoutThink = storageService.extractLegacyThinking(raw).content.trim();
   if (!withoutThink || withoutThink.toLowerCase() === "task ready") {
     return "";
   }

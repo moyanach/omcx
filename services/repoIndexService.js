@@ -9,15 +9,13 @@
  */
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { listWorkspaceFiles } = require("../utils/tools/fileIndexer");
+const projectArtifactService = require("./projectArtifactService");
 
-const INDEX_DIR = path.join(
-  process.env.OMCX_HOME || path.join(os.homedir(), ".omcx"),
-  "index"
-);
+// 索引是仓库派生产物：默认随项目落盘到 <workDir>/.omcx/index/，可通过配置回退全局
+const KIND = projectArtifactService.KIND.INDEX;
 const SCAN_TTL_MS = 45 * 1000;
 const DISK_TTL_MS = 5 * 60 * 1000;
 const MAX_SCAN_FILES = 4000;
@@ -169,8 +167,9 @@ function scanRepo(workDir, { force = false } = {}) {
     return cached.value;
   }
 
-  const diskPath = path.join(INDEX_DIR, `${hashKey(resolved)}.json`);
-  if (!force) {
+  const indexTarget = projectArtifactService.resolveDir(KIND, resolved);
+  const diskPath = indexTarget.dir ? path.join(indexTarget.dir, `${hashKey(resolved)}.json`) : null;
+  if (!force && diskPath) {
     try {
       const stat = fs.statSync(diskPath);
       if (now - stat.mtimeMs < DISK_TTL_MS) {
@@ -182,6 +181,25 @@ function scanRepo(workDir, { force = false } = {}) {
       }
     } catch {
       // 缓存不存在或已损坏，继续全量扫描
+    }
+  }
+
+  // 项目内缓存未命中时，读取升级前的全局旧索引兜底
+  if (!force) {
+    for (const legacyDir of projectArtifactService.readCandidates(KIND, resolved)) {
+      const legacyPath = path.join(legacyDir, `${hashKey(resolved)}.json`);
+      if (legacyPath === diskPath) continue;
+      try {
+        const stat = fs.statSync(legacyPath);
+        if (now - stat.mtimeMs >= DISK_TTL_MS) continue;
+        const disk = JSON.parse(fs.readFileSync(legacyPath, "utf-8"));
+        if (disk && disk.workDir === resolved && Array.isArray(disk.files)) {
+          scanCache.set(cacheKey, { at: now, value: disk });
+          return disk;
+        }
+      } catch {
+        // 继续尝试下一个候选目录
+      }
     }
   }
 
@@ -237,8 +255,10 @@ function scanRepo(workDir, { force = false } = {}) {
   }
 
   try {
-    fs.mkdirSync(INDEX_DIR, { recursive: true });
-    fs.writeFileSync(diskPath, JSON.stringify(value), "utf-8");
+    if (diskPath) {
+      projectArtifactService.prepareDir(KIND, resolved);
+      fs.writeFileSync(diskPath, JSON.stringify(value), "utf-8");
+    }
   } catch {
     // 索引落盘失败不影响内存可用性
   }
@@ -451,6 +471,14 @@ function findReferences(workDir, symbol, { limit = 60, maxFiles = 5000 } = {}) {
   return result;
 }
 
+/**
+ * 索引落盘目录（按项目解析）。
+ * @param {string} [workDir] 工作目录；缺省时返回全局旧目录，仅作兼容用途
+ */
+function getIndexDir(workDir) {
+  return projectArtifactService.resolveDir(KIND, workDir || "").dir;
+}
+
 module.exports = {
   scanRepo,
   buildRepoMap,
@@ -458,5 +486,6 @@ module.exports = {
   findReferences,
   getRepoStats,
   extractSymbols,
-  INDEX_DIR,
+  getIndexDir,
+  INDEX_DIR: projectArtifactService.globalDir(KIND),
 };

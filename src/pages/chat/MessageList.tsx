@@ -1787,8 +1787,8 @@ const MessageBubble: React.FC<{
           </div>
         ) : null}
 
-        {/* 悬浮操作栏 */}
-        {(hasContent || isUser) && (
+        {/* 悬浮操作栏：当前回合仍在执行时不提供复制/重试，避免复制到半截内容或误触发重跑 */}
+        {(hasContent || isUser) && !(isGenerating && isActiveTurn) && (
           <div className='flex gap-1.5 mt-1 px-1 opacity-0 group-hover:opacity-100 transition-opacity'>
             <button
               onClick={handleCopyText}
@@ -2262,7 +2262,7 @@ export const MessageList: React.FC<Props> = ({
         onWheel={handleWheel}
         onMouseUp={rememberSelection}
         onContextMenu={handleContextMenu}
-        className='flex-1 overflow-y-auto pl-6 pr-5 pt-3 pb-3.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
+        className='flex-1 overflow-y-auto pl-8 pr-7 pt-3 pb-3.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
       >
         {(() => {
           const virtualActive = messages.length > VIRTUAL_THRESHOLD;

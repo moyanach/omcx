@@ -286,6 +286,8 @@ function buildAppearanceCss(cfg: AppearanceConfig): string {
   // 开启「内容面通透」后放宽下限，让壁纸渐变透进内容块，并辅以毛玻璃保证文字清晰。
   const wrapPct = Math.max(20, pct - 18);
   const panelPct = Math.max(46, pct - 8);
+  // 模态浮层不随面板一起变透：遮罩后面是整页内容，太透会透出鬼影
+  const modalPct = Math.max(92, pct);
   const stagePct = Math.max(58, pct);
   const cardPct = cfg.contentTranslucent
     ? Math.max(40, Math.min(96, pct + 4))
@@ -299,6 +301,7 @@ function buildAppearanceCss(cfg: AppearanceConfig): string {
       --sidebar-bg: color-mix(in srgb, #111111 ${wrapPct}%, transparent) !important;
       --ui-app-bg: transparent !important;
       --ui-panel-bg: color-mix(in srgb, #141414 ${panelPct}%, transparent) !important;
+      --ui-modal-bg: color-mix(in srgb, #141414 ${modalPct}%, transparent) !important;
       --ui-stage-wrap-bg: color-mix(in srgb, #131313 ${wrapPct}%, transparent) !important;
       --ui-stage-bg: color-mix(in srgb, #171717 ${stagePct}%, transparent) !important;
       --ui-card-bg: color-mix(in srgb, #1b1b1b ${cardPct}%, transparent) !important;
@@ -322,6 +325,7 @@ function buildAppearanceCss(cfg: AppearanceConfig): string {
       --sidebar-bg: color-mix(in srgb, #f1f5f9 ${wrapPct}%, transparent) !important;
       --ui-app-bg: transparent !important;
       --ui-panel-bg: color-mix(in srgb, #f8fafc ${panelPct}%, transparent) !important;
+      --ui-modal-bg: color-mix(in srgb, #ffffff ${modalPct}%, transparent) !important;
       --ui-stage-wrap-bg: color-mix(in srgb, #f1f5f9 ${wrapPct}%, transparent) !important;
       --ui-stage-bg: color-mix(in srgb, #ffffff ${stagePct}%, transparent) !important;
       --ui-card-bg: color-mix(in srgb, #ffffff ${cardPct}%, transparent) !important;

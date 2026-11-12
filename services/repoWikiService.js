@@ -1,29 +1,22 @@
 /**
  * RepoWikiService — 基于仓库索引自动生成可缓存的 Repo Wiki
  *
- * 产物保存在 ~/.omcx/wiki/<workDirHash>/wiki.md，不污染用户仓库；
+ * 产物默认保存在 <workDir>/.omcx/wiki/，跟随项目一起归档；
+ * 可通过 artifact_scope_wiki=global 回退到 <OMCX_HOME>/wiki/<workDirHash>/。
  * 生成输入由 Repo Map + README + 包清单组成，避免把整个仓库塞进上下文。
  */
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
-const crypto = require("crypto");
 const { buildRepoMap, scanRepo } = require("./repoIndexService");
+const projectArtifactService = require("./projectArtifactService");
 const { isAnthropicProvider, completeAnthropicMessage } = require("./anthropicClient");
 
-const WIKI_ROOT = path.join(
-  process.env.OMCX_HOME || path.join(os.homedir(), ".omcx"),
-  "wiki"
-);
+const KIND = projectArtifactService.KIND.WIKI;
 const MAX_INPUT_CHARS = 18000;
 
-function hashWorkDir(workDir) {
-  return crypto.createHash("sha1").update(path.resolve(workDir)).digest("hex").slice(0, 20);
-}
-
 function wikiDir(workDir) {
-  return path.join(WIKI_ROOT, hashWorkDir(workDir));
+  return projectArtifactService.resolveDir(KIND, workDir).dir;
 }
 
 function readFirstExisting(workDir, names, maxChars) {
@@ -166,6 +159,10 @@ async function generateRepoWiki({ workDir, modelConfig, signal } = {}) {
   };
 
   const dir = wikiDir(workDir);
+  if (!dir) {
+    return { success: false, error: "无法解析 Wiki 落盘目录" };
+  }
+  projectArtifactService.prepareDir(KIND, workDir);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "wiki.md"), content, "utf-8");
   fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2), "utf-8");
@@ -175,9 +172,15 @@ async function generateRepoWiki({ workDir, modelConfig, signal } = {}) {
 
 function getRepoWiki(workDir) {
   if (!workDir) return { success: false, error: "缺少工作目录" };
-  const dir = wikiDir(workDir);
-  const mdPath = path.join(dir, "wiki.md");
-  const metaPath = path.join(dir, "meta.json");
+  // 项目内优先，读不到时回退到升级前的全局目录，避免历史 Wiki 失效
+  const candidates = projectArtifactService
+    .readCandidates(KIND, workDir)
+    .map((dir) => path.join(dir, "wiki.md"));
+  const mdPath = candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+  if (!mdPath) {
+    return { success: true, exists: false, content: "", meta: null };
+  }
+  const metaPath = path.join(path.dirname(mdPath), "meta.json");
   if (!fs.existsSync(mdPath)) {
     return { success: true, exists: false, content: "", meta: null };
   }
@@ -197,5 +200,6 @@ module.exports = {
   generateRepoWiki,
   getRepoWiki,
   buildWikiPrompt,
-  WIKI_ROOT,
+  wikiDir,
+  WIKI_ROOT: projectArtifactService.globalDir(KIND),
 };

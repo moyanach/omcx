@@ -634,7 +634,7 @@ export const GitChangesView: React.FC<GitChangesViewProps> = ({
                 ? "暂无待提交的变更"
                 : "输入 Git Commit 提交说明 (默认暂存全部改动 git add -A)..."
             }
-            className="flex-1 h-8 px-3 rounded-xl bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] text-xs text-[var(--ui-text-primary)] placeholder-[var(--ui-text-faint)] outline-none focus:border-[color:var(--ui-accent-amber-border)] disabled:opacity-50"
+            className="ui-focus-ring flex-1 h-8 px-3 rounded-xl bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] text-xs text-[var(--ui-text-primary)] placeholder-[var(--ui-text-faint)] outline-none transition-colors focus:bg-[var(--ui-input-hover-bg)] disabled:opacity-50"
           />
           <button
             onClick={handleCommit}

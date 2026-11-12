@@ -11,22 +11,32 @@
  *  - 仅允许 http/https，拒绝 file/javascript/data 等协议
  *  - 自动化窗口禁用 nodeIntegration / preload，开启 contextIsolation + sandbox
  *  - 禁止 window.open 弹出新窗口与全部权限请求
+ *
+ * 产物目录：默认随项目落盘到 <workDir>/.omcx/browser-shots/，可通过
+ * artifact_scope_browser_shots=global 回退到 <OMCX_HOME>/browser-shots/。
  */
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const { BrowserWindow, nativeImage } = require("electron");
+const projectArtifactService = require("./projectArtifactService");
 
+const KIND = projectArtifactService.KIND.BROWSER_SHOTS;
 const NAV_TIMEOUT_MS = 30000;
 const MAX_TEXT_CHARS = 6000;
 
-function omcxHome() {
-  return process.env.OMCX_HOME || path.join(os.homedir(), ".omcx");
+// 当前绑定的工作目录：由 open() 或显式 setWorkDir() 设定，决定截图落盘位置
+let activeWorkDir = null;
+
+function setWorkDir(workDir) {
+  const normalized = projectArtifactService.normalizeWorkDir(workDir);
+  if (normalized) activeWorkDir = normalized;
+  return activeWorkDir;
 }
 
 function shotsDir() {
-  return path.join(omcxHome(), "browser-shots");
+  const target = projectArtifactService.resolveDir(KIND, activeWorkDir);
+  return target.dir || projectArtifactService.globalDir(KIND, activeWorkDir);
 }
 
 function baselinesDir() {
@@ -37,6 +47,9 @@ function ensureDir(dir) {
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch {}
+  if (projectArtifactService.isProjectArtifact(activeWorkDir, dir)) {
+    projectArtifactService.ensureGitignore(activeWorkDir);
+  }
 }
 
 let win = null;
@@ -175,8 +188,9 @@ async function readPageInfo(wc) {
   }
 }
 
-async function open({ url, settleMs = 600 } = {}) {
+async function open({ url, workDir, settleMs = 600 } = {}) {
   const target = normalizeUrl(url);
+  if (workDir) setWorkDir(workDir);
   const browser = ensureWindow();
   const wc = browser.webContents;
   lastError = "";
@@ -411,7 +425,8 @@ function compareBuffers(shotPng, baselinePath) {
   };
 }
 
-async function snapshot({ fullPage = false, baseline = "", threshold = 0.001, live = false, settleMs } = {}) {
+async function snapshot({ fullPage = false, baseline = "", threshold = 0.001, live = false, settleMs, workDir } = {}) {
+  if (workDir) setWorkDir(workDir);
   const browser = ensureWindow();
   const wc = browser.webContents;
   ensureDir(shotsDir());
@@ -440,9 +455,14 @@ async function snapshot({ fullPage = false, baseline = "", threshold = 0.001, li
     let compare = null;
     if (baseline && !useLive) {
       const name = safeBaselineName(baseline);
-      const baselinePath = path.join(baselinesDir(), `${name}.png`);
-      if (!fs.existsSync(baselinePath)) {
-        compare = { match: false, error: `基线不存在: ${baselinePath}`, baselineName: name };
+      // 项目内基线优先，读不到时回退到升级前的全局目录
+      const baselineCandidates = projectArtifactService
+        .readCandidates(KIND, activeWorkDir)
+        .map((dir) => path.join(dir, "baselines", `${name}.png`));
+      const baselinePath =
+        baselineCandidates.find((candidate) => fs.existsSync(candidate)) || baselineCandidates[0];
+      if (!baselinePath || !fs.existsSync(baselinePath)) {
+        compare = { match: false, error: `基线不存在: ${baselinePath || name}`, baselineName: name };
       } else {
         const result = compareBuffers(img, baselinePath);
         if (result.diffBuf) {
@@ -482,7 +502,8 @@ async function snapshot({ fullPage = false, baseline = "", threshold = 0.001, li
   }
 }
 
-function saveBaseline({ name = "default", shotPath } = {}) {
+function saveBaseline({ name = "default", shotPath, workDir } = {}) {
+  if (workDir) setWorkDir(workDir);
   const source = shotPath || lastShotPath;
   if (!source || !fs.existsSync(source)) {
     return { ok: false, error: "没有可保存的截图，请先执行 snapshot" };
@@ -498,17 +519,23 @@ function saveBaseline({ name = "default", shotPath } = {}) {
   }
 }
 
+/**
+ * 列出可用基线：项目内目录优先，并合并升级前全局目录中的同名基线（去重）。
+ */
 function listBaselines() {
+  const nameSet = new Set();
+  for (const base of projectArtifactService.readCandidates(KIND, activeWorkDir)) {
+    const dir = path.join(base, "baselines");
+    try {
+      for (const file of fs.readdirSync(dir)) {
+        if (file.endsWith(".png")) nameSet.add(file.replace(/\.png$/i, ""));
+      }
+    } catch {
+      // 目录不存在或不可读时跳过
+    }
+  }
   ensureDir(baselinesDir());
-  let names = [];
-  try {
-    names = fs
-      .readdirSync(baselinesDir())
-      .filter((f) => f.endsWith(".png"))
-      .map((f) => f.replace(/\.png$/i, ""))
-      .sort();
-  } catch {}
-  return names;
+  return [...nameSet].sort();
 }
 
 function getState() {
@@ -524,6 +551,8 @@ function getState() {
     lastShotPath,
     lastError,
     lastActionAt,
+    workDir: activeWorkDir,
+    shotsDir: shotsDir(),
     baselines: listBaselines(),
   };
 }
@@ -625,6 +654,8 @@ module.exports = {
   reload,
   close,
   normalizeUrl,
+  setWorkDir,
+  getWorkDir: () => activeWorkDir,
   shotsDir,
   baselinesDir,
 };

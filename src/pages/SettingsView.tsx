@@ -293,6 +293,15 @@ const SettingsView: React.FC<SettingsViewProps> = ({ variant = "page", onClose }
   const [compactThreshold, setCompactThreshold] = useState(85);
   const [compactKeepTokens, setCompactKeepTokens] = useState(20000);
 
+  // 思考内容（Reasoning）保存与协议回传策略
+  const [reasoningPersistence, setReasoningPersistence] = useState<
+    "full" | "truncated" | "off"
+  >("full");
+  const [reasoningReplayScope, setReasoningReplayScope] = useState<
+    "current-run" | "window" | "off"
+  >("window");
+  const [reasoningReplayWindow, setReasoningReplayWindow] = useState(3);
+
   // 全局 Store 状态提取至顶层 (杜绝在条件 JSX 中调用 Hook 导致白屏崩溃)
 
   // 模型管理配置状态
@@ -805,6 +814,30 @@ const SettingsView: React.FC<SettingsViewProps> = ({ variant = "page", onClose }
       const savedKeepTokens = await window.electronAPI.getConfig("context_compact_keep_tokens");
       if (savedKeepTokens) setCompactKeepTokens(Number(savedKeepTokens) || 20000);
 
+      // 思考内容策略：默认 full 落盘 + window(3) 回传；读取时做取值兜底，
+      // 避免历史版本写入的脏值把落盘或回传行为打到意外分支。
+      const savedReasoningPersistence = await window.electronAPI.getConfig(
+        "reasoning_persistence"
+      );
+      if (
+        savedReasoningPersistence === "full" ||
+        savedReasoningPersistence === "truncated" ||
+        savedReasoningPersistence === "off"
+      ) {
+        setReasoningPersistence(savedReasoningPersistence);
+      }
+
+      const savedReplayScope = await window.electronAPI.getConfig("reasoning_replay_scope");
+      if (savedReplayScope === "current-run" || savedReplayScope === "window" || savedReplayScope === "off") {
+        setReasoningReplayScope(savedReplayScope);
+      }
+
+      const savedReplayWindow = await window.electronAPI.getConfig("reasoning_replay_window");
+      const parsedReplayWindow = Number(savedReplayWindow);
+      if (Number.isFinite(parsedReplayWindow) && parsedReplayWindow > 0) {
+        setReasoningReplayWindow(Math.min(20, Math.max(1, Math.floor(parsedReplayWindow))));
+      }
+
       const savedPrompt = await window.electronAPI.getConfig("custom_system_prompt");
       if (savedPrompt) setCustomSystemPrompt(savedPrompt);
 
@@ -869,6 +902,20 @@ const SettingsView: React.FC<SettingsViewProps> = ({ variant = "page", onClose }
       );
       await window.electronAPI.setConfig("context_compact_keep_tokens", String(compactKeepTokens));
       showToast("上下文压缩配置已保存");
+    } catch {
+      showToast("保存失败");
+    }
+  };
+
+  const handleSaveReasoningConfig = async () => {
+    if (!window.electronAPI) return;
+    try {
+      const safeWindow = Math.min(20, Math.max(1, Math.floor(Number(reasoningReplayWindow) || 3)));
+      setReasoningReplayWindow(safeWindow);
+      await window.electronAPI.setConfig("reasoning_persistence", reasoningPersistence);
+      await window.electronAPI.setConfig("reasoning_replay_scope", reasoningReplayScope);
+      await window.electronAPI.setConfig("reasoning_replay_window", String(safeWindow));
+      showToast("思考内容策略已保存，将在下一次对话请求生效");
     } catch {
       showToast("保存失败");
     }
@@ -2152,6 +2199,119 @@ const SettingsView: React.FC<SettingsViewProps> = ({ variant = "page", onClose }
                     >
                       <Save size={13} />
                       <span>保存压缩配置</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 思考内容保存与回传策略 (Reasoning Persistence & Replay) */}
+                <div className="bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl p-6 shadow-sm space-y-4">
+                  <div className="border-b border-[#282828] pb-3">
+                    <h3 className="text-xs font-bold text-neutral-100 tracking-wide">
+                      思考内容策略 (Reasoning Persistence &amp; Replay)
+                    </h3>
+                    <p className="text-[11px] text-neutral-500 mt-0.5">
+                      分别控制「思考内容是否落盘」与「是否把思考回传给上游模型」；回传是协议正确性所需（DeepSeek 带工具调用、Anthropic 多轮工具循环），落盘仅影响历史回溯
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-xs font-medium text-neutral-300">持久化策略</div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                      {[
+                        {
+                          key: "full" as const,
+                          title: "全量保存",
+                          desc: "完整落盘思考全文，支持历史回溯与续跑",
+                        },
+                        {
+                          key: "truncated" as const,
+                          title: "压缩保存",
+                          desc: "保留头 8000 + 尾 2000 字符，控制库体积",
+                        },
+                        {
+                          key: "off" as const,
+                          title: "不保存",
+                          desc: "仅本次运行内存保留，重启后折叠条消失",
+                        },
+                      ].map((option) => (
+                        <label
+                          key={option.key}
+                          className={`flex flex-col gap-1 p-3 rounded-xl border cursor-pointer select-none transition-colors ${
+                            reasoningPersistence === option.key
+                              ? "bg-blue-500/10 border-blue-500/40"
+                              : "bg-[#181818] border-[#292929] hover:border-[#343434]"
+                          }`}
+                        >
+                          <span className="flex items-center gap-2">
+                            <input
+                              type="radio"
+                              name="reasoning_persistence"
+                              checked={reasoningPersistence === option.key}
+                              onChange={() => setReasoningPersistence(option.key)}
+                              className="accent-blue-600 cursor-pointer"
+                            />
+                            <span className="text-xs font-medium text-neutral-200">
+                              {option.title}
+                            </span>
+                          </span>
+                          <span className="text-[11px] text-neutral-500 leading-relaxed">
+                            {option.desc}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-neutral-500">
+                      注意：选择「不保存」只影响落盘，不影响当前回合的实时展示与协议回传正确性
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                    <div className="space-y-1.5">
+                      <label className="block text-xs font-medium text-neutral-300">
+                        推理回传范围
+                      </label>
+                      <select
+                        value={reasoningReplayScope}
+                        onChange={(e) =>
+                          setReasoningReplayScope(
+                            e.target.value as "current-run" | "window" | "off"
+                          )
+                        }
+                        className="w-full bg-[#171717] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 cursor-pointer"
+                      >
+                        <option value="current-run">仅当前运行（成本最低）</option>
+                        <option value="window">最近 N 个用户轮次（质量更好）</option>
+                        <option value="off">不回传（不推荐，可能掉质量）</option>
+                      </select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="block text-xs font-medium text-neutral-300">
+                        回传窗口轮次
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={reasoningReplayWindow}
+                        disabled={reasoningReplayScope !== "window"}
+                        onChange={(e) =>
+                          setReasoningReplayWindow(Number(e.target.value) || 3)
+                        }
+                        className="w-full bg-[#171717] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs font-mono text-neutral-200 outline-none focus:border-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-neutral-500 leading-relaxed">
+                    回传行为随模型厂商自适应：Anthropic 的 thinking block + signature 属协议必需项（始终在同一轮内回传，不受上方开关影响）；OpenAI 兼容端点仅在携带工具时回传 reasoning_content。回填窗口默认为最近 {reasoningReplayWindow} 个用户轮次。
+                  </p>
+
+                  <div className="flex justify-end">
+                    <button
+                      onClick={handleSaveReasoningConfig}
+                      className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all shadow-md flex items-center gap-1.5"
+                    >
+                      <Save size={13} />
+                      <span>保存思考策略</span>
                     </button>
                   </div>
                 </div>

@@ -22,9 +22,12 @@ class BrowserOpenTool extends StructuredTool {
     });
   }
 
-  async _call({ url }) {
+  async _call({ url, __toolContext }) {
     try {
-      const result = await browserAutomation.open({ url });
+      const result = await browserAutomation.open({
+        url,
+        workDir: __toolContext?.workDir || null,
+      });
       return JSON.stringify(result);
     } catch (err) {
       return JSON.stringify({ ok: false, error: err.message });
@@ -107,12 +110,13 @@ class BrowserSnapshotTool extends StructuredTool {
     });
   }
 
-  async _call({ full_page, baseline, threshold }) {
+  async _call({ full_page, baseline, threshold, __toolContext }) {
     try {
       const result = await browserAutomation.snapshot({
         fullPage: Boolean(full_page),
         baseline: baseline || "",
         threshold,
+        workDir: __toolContext?.workDir || null,
       });
       // dataUrl 体积较大，工具结果中只保留路径，避免挤占上下文
       const { dataUrl, ...rest } = result;

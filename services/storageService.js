@@ -16,6 +16,7 @@ const crypto = require("crypto");
 const { execFile } = require("child_process");
 const { Worker } = require("worker_threads");
 const Database = require("better-sqlite3");
+const reasoningPolicy = require("./reasoningPolicy");
 
 const USER_HOME = os.homedir();
 let OMCX_HOME = process.env.OMCX_HOME || path.join(USER_HOME, ".omcx");
@@ -271,7 +272,7 @@ function executeFallbackAction(action, payload) {
       break;
     }
     case "UPSERT_MESSAGE": {
-      const { message, reasoning, now } = payload;
+      const { message, reasoning, now, dropReasoning } = payload;
       const tx = d.transaction(() => {
         d.prepare(`
           INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, metadata, reasoning_chars, created_at)
@@ -291,6 +292,8 @@ function executeFallbackAction(action, payload) {
             ON CONFLICT(message_id) DO UPDATE SET
               reasoning_content = excluded.reasoning_content
           `).run(reasoning);
+        } else if (dropReasoning) {
+          d.prepare("DELETE FROM message_reasonings WHERE message_id = ?").run(message.id);
         }
         d.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(now, message.session_id);
       });
@@ -1025,9 +1028,23 @@ function addMessage(sessionId, message) {
     }
   }
 
-  const reasoningChars = reasoning
-    ? reasoning.length
-    : Number(message.reasoning_chars || message.reasoningChars || message.metadata?.reasoningChars || 0);
+  // 思考内容落盘策略分流（full / truncated / off）：
+  // - off：仅内存保留（供当前回合协议回传与流式展示），真正不写盘，重启后折叠条消失；
+  // - truncated：保留头 8000 + 尾 2000 字符，中间打标记；
+  // - full：全量落盘，单条超过 200k 字符时强制按 truncated 行为降级。
+  const reasoningPersistence = reasoningPolicy.normalizePersistence(
+    getConfig("reasoning_persistence")
+  );
+  const shapedReasoning = reasoningPolicy.shapeForPersistence(reasoning, reasoningPersistence);
+  const reasoningOriginalChars = shapedReasoning.chars;
+  reasoning = shapedReasoning.text;
+
+  const reasoningChars =
+    reasoningPersistence === "off"
+      ? 0
+      : reasoningOriginalChars > 0
+      ? reasoningOriginalChars
+      : Number(message.reasoning_chars || message.reasoningChars || message.metadata?.reasoningChars || 0);
 
   let metadataObj = message.metadata;
   if (reasoningChars > 0) {
@@ -1035,6 +1052,10 @@ function addMessage(sessionId, message) {
       ...(metadataObj && typeof metadataObj === "object" ? metadataObj : {}),
       reasoningChars,
     };
+  } else if (metadataObj && typeof metadataObj === "object" && "reasoningChars" in metadataObj) {
+    // off 档：必须同时抹掉 metadata 里的历史计数字段，否则重启后折叠条仍会残留
+    const { reasoningChars: _droppedReasoningChars, ...restMeta } = metadataObj;
+    metadataObj = restMeta;
   }
 
   const toolCallsStr = message.tool_calls ? JSON.stringify(message.tool_calls) : null;
@@ -1063,9 +1084,12 @@ function addMessage(sessionId, message) {
   }
   touchLruCache(memoryMessagesBySession, sessionId, currentList, MAX_CACHED_MESSAGE_SESSIONS);
 
-  // 缓存思考文本到 LRU 池
+  // 缓存思考文本到 LRU 池；off 档必须同时从内存池移除，
+  // 否则当前进程内仍能读到思考内容，违背“仅内存保留”之外的语义一致性预期。
   if (reasoning) {
     touchLruCache(memoryReasoningsByMsgId, msgId, reasoning, MAX_CACHED_REASONINGS);
+  } else if (reasoningPersistence === "off") {
+    memoryReasoningsByMsgId.delete(msgId);
   }
 
   // 同步更新内存中该会话的 updated_at
@@ -1095,6 +1119,9 @@ function addMessage(sessionId, message) {
           created_at: createdAt,
         }
       : null,
+    // off 档：不仅本次不写盘，还要清掉同一消息此前快照期间遗留的思考行，
+    // 保证 SELECT COUNT(*) FROM message_reasonings WHERE message_id = ? 归零。
+    dropReasoning: reasoningPersistence === "off",
     now,
   });
 
@@ -1113,6 +1140,7 @@ function persistMessageSync(sessionId, message) {
 
   const record = res.message;
   const reasoning = memoryReasoningsByMsgId.get(record.id) || null;
+  const persistenceMode = reasoningPolicy.normalizePersistence(getConfig("reasoning_persistence"));
   try {
     executeFallbackAction("UPSERT_MESSAGE", {
       message: {
@@ -1134,6 +1162,7 @@ function persistMessageSync(sessionId, message) {
             created_at: record.created_at,
           }
         : null,
+      dropReasoning: persistenceMode === "off",
       now: Date.now(),
     });
   } catch (err) {

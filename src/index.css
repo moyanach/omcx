@@ -100,6 +100,11 @@ html[data-theme="dark"],
   --ui-accent-blue: #60a5fa;
   --ui-accent-blue-soft: rgba(59, 130, 246, 0.12);
   --ui-accent-blue-border: rgba(59, 130, 246, 0.25);
+  /* 输入框聚焦光晕：柔和不描边，深浅主题都清晰可见 */
+  --ui-focus-ring: rgba(96, 165, 250, 0.42);
+  --ui-modal-overlay: rgba(0, 0, 0, 0.66);
+  /* 模态浮层底色：比普通面板更实，避免壁纸/页面内容透出成"鬼影" */
+  --ui-modal-bg: #141414;
 
   --ui-accent-emerald: #34d399;
   --ui-accent-emerald-soft: rgba(16, 185, 129, 0.12);
@@ -208,6 +213,9 @@ html[data-theme="light"] {
   --ui-accent-blue: #2563eb;
   --ui-accent-blue-soft: rgba(37, 99, 235, 0.08);
   --ui-accent-blue-border: rgba(37, 99, 235, 0.18);
+  --ui-focus-ring: rgba(37, 99, 235, 0.30);
+  --ui-modal-overlay: rgba(15, 23, 42, 0.32);
+  --ui-modal-bg: #ffffff;
 
   --ui-accent-emerald: #047857;
   --ui-accent-emerald-soft: rgba(16, 185, 129, 0.10);
@@ -535,5 +543,26 @@ html[data-theme="light"] .omcx-border-beam-glow {
 
 .omcx-icon-pulse-glow {
   animation: omcx-pulse-glow 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ─── 表单控件聚焦态统一 ───
+ * Chromium 原生 focus ring 是方形亮蓝描边，落在圆角输入容器内部会显得割裂；
+ * 这里统一屏蔽，聚焦反馈交给外层容器的 focus-within 或输入框自身的边框过渡。
+ */
+input:not([type="checkbox"]):not([type="radio"]):focus,
+input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+textarea:focus,
+textarea:focus-visible,
+select:focus,
+select:focus-visible {
+  outline: none !important;
+}
+
+/* 统一输入框聚焦光晕：外扩 2px 柔和光圈，代替生硬描边；
+   亮色主题下 --ui-input-hover-bg 与 --ui-input-bg 接近，必须有这层可见反馈 */
+.ui-focus-ring:focus-within,
+.ui-focus-ring:focus {
+  outline: none !important;
+  box-shadow: 0 0 0 2px var(--ui-focus-ring);
 }
 

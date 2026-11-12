@@ -6,18 +6,16 @@
  * 2. 同一回合内同一文件只记录第一次的原始内容，回滚即回到该回合开始前；
  * 3. 新建文件记录 existed=false，回滚时直接删除；
  * 4. 单文件超过 2MB 不做内容备份，仅记录元数据并在回滚时明确提示；
- * 5. 所有数据落盘至 ~/.omcx/checkpoints/<sessionId>/<turnId>/，与消息库解耦。
+ * 5. 新会话数据落盘至 <workDir>/.omcx/checkpoints/<sessionId>/<turnId>/，与消息库解耦；
+ *    升级前已存在的会话仍从旧的全局 <OMCX_HOME>/checkpoints/ 读取，保证历史回滚可用。
  */
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const projectArtifactService = require("./projectArtifactService");
 
-const CHECKPOINT_ROOT = path.join(
-  process.env.OMCX_HOME || path.join(os.homedir(), ".omcx"),
-  "checkpoints"
-);
+const KIND = projectArtifactService.KIND.CHECKPOINTS;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_FILES_PER_TURN = 300;
 const MAX_TURNS_PER_SESSION = 80;
@@ -45,16 +43,59 @@ function isInside(parent, target) {
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
-function sessionDir(sessionId) {
-  return path.join(CHECKPOINT_ROOT, safeSegment(sessionId));
+/**
+ * 解析会话绑定的工作目录：显式传入优先，其次从会话记录读取。
+ * 早期版本没有落 workDir 的会话会返回 null，此时自然回落到全局旧目录。
+ */
+function resolveWorkDir(sessionId, workDir) {
+  if (workDir) return workDir;
+  if (!sessionId) return null;
+  try {
+    const session = require("./storageService").getSession(sessionId);
+    return session?.work_dir || session?.workDir || null;
+  } catch {
+    return null;
+  }
 }
 
-function turnDir(sessionId, turnId) {
-  return path.join(sessionDir(sessionId), safeSegment(turnId));
+/**
+ * 会话目录候选序列：解析出的落盘目录优先，其次是另一侧目录（用于旧会话兜底）。
+ */
+function sessionDirCandidates(sessionId, workDir) {
+  const resolved = resolveWorkDir(sessionId, workDir);
+  const segment = safeSegment(sessionId);
+  return projectArtifactService
+    .readCandidates(KIND, resolved)
+    .map((base) => path.join(base, segment));
 }
 
-function manifestPath(sessionId, turnId) {
-  return path.join(turnDir(sessionId, turnId), "manifest.json");
+/** 写入目标会话目录（始终优先项目内，并按需补齐 .gitignore） */
+function writeSessionDir(sessionId, workDir) {
+  const resolved = resolveWorkDir(sessionId, workDir);
+  const target = projectArtifactService.prepareDir(KIND, resolved);
+  const base = target.dir || projectArtifactService.globalDir(KIND, resolved);
+  return path.join(base, safeSegment(sessionId));
+}
+
+/** 读取时优先命中已存在的会话目录，兼容升级前的全局旧数据 */
+function resolveSessionDir(sessionId, workDir) {
+  const candidates = sessionDirCandidates(sessionId, workDir);
+  for (const dir of candidates) {
+    if (fs.existsSync(dir)) return dir;
+  }
+  return candidates[0];
+}
+
+function turnDir(sessionId, turnId, workDir) {
+  return path.join(resolveSessionDir(sessionId, workDir), safeSegment(turnId));
+}
+
+function writeTurnDir(sessionId, turnId, workDir) {
+  return path.join(writeSessionDir(sessionId, workDir), safeSegment(turnId));
+}
+
+function manifestPath(sessionId, turnId, workDir) {
+  return path.join(turnDir(sessionId, turnId, workDir), "manifest.json");
 }
 
 function readJson(filePath, fallback = null) {
@@ -88,18 +129,18 @@ function normalizeFileRecord(absPath, workDir) {
   return { absPath: resolved, relative };
 }
 
-function readManifest(sessionId, turnId) {
-  return readJson(manifestPath(sessionId, turnId), null);
+function readManifest(sessionId, turnId, workDir) {
+  return readJson(manifestPath(sessionId, turnId, workDir), null);
 }
 
-function listTurns(sessionId) {
-  const dir = sessionDir(sessionId);
+function listTurns(sessionId, workDir) {
+  const dir = resolveSessionDir(sessionId, workDir);
   if (!fs.existsSync(dir)) return [];
   try {
     return fs
       .readdirSync(dir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => readManifest(sessionId, entry.name))
+      .map((entry) => readManifest(sessionId, entry.name, workDir))
       .filter(Boolean)
       .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
   } catch {
@@ -107,12 +148,12 @@ function listTurns(sessionId) {
   }
 }
 
-function pruneSession(sessionId) {
-  const turns = listTurns(sessionId);
+function pruneSession(sessionId, workDir) {
+  const turns = listTurns(sessionId, workDir);
   if (turns.length <= MAX_TURNS_PER_SESSION) return;
   for (const turn of turns.slice(MAX_TURNS_PER_SESSION)) {
     try {
-      fs.rmSync(turnDir(sessionId, turn.id), { recursive: true, force: true });
+      fs.rmSync(turnDir(sessionId, turn.id, workDir), { recursive: true, force: true });
     } catch {
       // 清理失败不影响主流程
     }
@@ -147,8 +188,8 @@ function recordFile({ sessionId, turnId, filePath, workDir = null, tool = "" } =
     stat = null;
   }
 
-  fs.mkdirSync(turnDir(sessionId, turnId), { recursive: true });
-  const mPath = manifestPath(sessionId, turnId);
+  fs.mkdirSync(writeTurnDir(sessionId, turnId, workDir), { recursive: true });
+  const mPath = manifestPath(sessionId, turnId, workDir);
   const now = Date.now();
   const manifest = readJson(mPath, null) || {
     id: turnId,
@@ -192,7 +233,7 @@ function recordFile({ sessionId, turnId, filePath, workDir = null, tool = "" } =
       .digest("hex")
       .slice(0, 16);
     const backupName = `${digest}.bak`;
-    const backupsDir = path.join(turnDir(sessionId, turnId), "files");
+    const backupsDir = path.join(writeTurnDir(sessionId, turnId, workDir), "files");
     fs.mkdirSync(backupsDir, { recursive: true });
     try {
       fs.copyFileSync(absPath, path.join(backupsDir, backupName));
@@ -209,7 +250,7 @@ function recordFile({ sessionId, turnId, filePath, workDir = null, tool = "" } =
   manifest.files.push(record);
   manifest.updatedAt = now;
   writeJsonAtomic(mPath, manifest);
-  pruneSession(sessionId);
+  pruneSession(sessionId, workDir);
   return { recorded: true, existed: record.existed, skipped: record.skipped };
 }
 
@@ -302,10 +343,12 @@ function deleteCheckpoint(sessionId, turnId) {
 }
 
 module.exports = {
-  CHECKPOINT_ROOT,
+  // 兼容旧调用方：指向升级前的全局目录，仅作只读兜底用途
+  CHECKPOINT_ROOT: projectArtifactService.globalDir(KIND),
   recordFile,
   getCheckpoint,
   listCheckpoints,
   restoreCheckpoint,
   deleteCheckpoint,
+  resolveSessionDir,
 };

@@ -227,30 +227,30 @@ const SkillMarketModal: React.FC<SkillMarketModalProps> = ({ open, onClose, onIn
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[99999] flex items-center justify-center p-6 bg-black/65 backdrop-blur-sm"
+      className="fixed inset-0 z-[99999] flex items-center justify-center p-6 bg-[var(--ui-modal-overlay)] backdrop-blur-sm"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-4xl h-[82vh] flex flex-col overflow-hidden rounded-2xl border border-[#2a2a2a] bg-[#141414] shadow-2xl">
+      <div className="w-full max-w-4xl h-[82vh] flex flex-col overflow-hidden rounded-2xl border border-[color:var(--ui-border-subtle)] bg-[var(--ui-modal-bg)] backdrop-blur-2xl shadow-2xl">
         {/* 头部 */}
-        <div className="h-12 px-4 flex items-center justify-between border-b border-[#242424] flex-shrink-0">
+        <div className="h-12 px-4 flex items-center justify-between border-b border-[color:var(--ui-divider-hairline)] flex-shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 flex-shrink-0">
+            <div className="w-7 h-7 rounded-lg bg-[var(--ui-accent-emerald-soft)] border border-[color:var(--ui-accent-emerald-border)] flex items-center justify-center text-[var(--ui-accent-emerald)] flex-shrink-0">
               <Store size={14} />
             </div>
             <div className="min-w-0">
-              <div className="text-sm font-semibold text-neutral-100">技能市场</div>
-              <div className="text-[10px] text-neutral-500 truncate">
+              <div className="text-sm font-semibold text-[var(--ui-text-primary)]">技能市场</div>
+              <div className="text-[10px] text-[var(--ui-text-muted)] truncate">
                 粘贴 JSON 接口 / GitHub 仓库 / SKILL.md 链接，分页加载并一键下载
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
-            <span className="text-[10px] font-mono text-neutral-600">Esc</span>
+            <span className="text-[10px] font-mono text-[var(--ui-text-faint)]">Esc</span>
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-100 hover:bg-white/5 transition-colors"
+              className="p-1.5 rounded-lg text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)] transition-colors"
               title="关闭"
             >
               <X size={15} />
@@ -259,9 +259,9 @@ const SkillMarketModal: React.FC<SkillMarketModalProps> = ({ open, onClose, onIn
         </div>
 
         {/* 链接与搜索 */}
-        <div className="px-4 py-3 flex items-center gap-2 border-b border-[#1f1f1f] flex-shrink-0">
-          <div className="flex-1 min-w-0 flex items-center gap-2 h-9 px-3 rounded-xl bg-[#1c1c1c] border border-[#2c2c2c] focus-within:border-emerald-500/40">
-            <Store size={13} className="text-neutral-500 flex-shrink-0" />
+        <div className="px-4 py-3 flex items-center gap-2 border-b border-[color:var(--ui-divider-hairline)] flex-shrink-0">
+          <div className="ui-focus-ring flex-1 min-w-0 flex items-center gap-2 h-9 px-3 rounded-xl bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] focus-within:bg-[var(--ui-input-hover-bg)] transition-colors">
+            <Store size={13} className="text-[var(--ui-text-faint)] flex-shrink-0" />
             <input
               value={url}
               onChange={(event) => setUrl(event.target.value)}
@@ -269,11 +269,11 @@ const SkillMarketModal: React.FC<SkillMarketModalProps> = ({ open, onClose, onIn
                 if (event.key === "Enter") loadPage(1, true, query, url);
               }}
               placeholder="https://example.com/api/skills 或 https://github.com/owner/repo"
-              className="flex-1 min-w-0 bg-transparent text-xs text-neutral-200 placeholder:text-neutral-600 outline-none"
+              className="flex-1 min-w-0 bg-transparent text-xs text-[var(--ui-text-primary)] placeholder:text-[var(--ui-text-faint)] outline-none"
             />
           </div>
-          <div className="w-40 flex items-center gap-2 h-9 px-3 rounded-xl bg-[#1c1c1c] border border-[#2c2c2c] focus-within:border-emerald-500/40">
-            <Search size={13} className="text-neutral-500 flex-shrink-0" />
+          <div className="ui-focus-ring w-40 flex items-center gap-2 h-9 px-3 rounded-xl bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-hairline)] focus-within:bg-[var(--ui-input-hover-bg)] transition-colors">
+            <Search size={13} className="text-[var(--ui-text-faint)] flex-shrink-0" />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
@@ -281,63 +281,68 @@ const SkillMarketModal: React.FC<SkillMarketModalProps> = ({ open, onClose, onIn
                 if (event.key === "Enter") loadPage(1, true, query, url);
               }}
               placeholder="搜索"
-              className="flex-1 min-w-0 bg-transparent text-xs text-neutral-200 placeholder:text-neutral-600 outline-none"
+              className="flex-1 min-w-0 bg-transparent text-xs text-[var(--ui-text-primary)] placeholder:text-[var(--ui-text-faint)] outline-none"
             />
           </div>
           <button
             onClick={() => loadPage(1, true, query, url)}
             disabled={loading}
-            className="h-9 px-3.5 rounded-xl bg-emerald-600/90 hover:bg-emerald-600 text-white text-xs font-medium flex items-center gap-1.5 disabled:opacity-60 transition-colors"
+            className="h-9 px-3.5 rounded-xl bg-[var(--ui-accent-emerald)] hover:opacity-90 text-[var(--ui-panel-bg)] text-xs font-medium flex items-center gap-1.5 disabled:opacity-60 transition-opacity"
           >
             {loading && page === 0 ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
             <span>加载</span>
           </button>
         </div>
 
-        {/* 状态条 */}
-        <div className="px-4 py-2 flex items-center justify-between text-[10.5px] text-neutral-500 border-b border-[#1c1c1c] flex-shrink-0">
-          <span className="truncate">
-            {sourceLabel ? `来源 ${sourceLabel} · ` : ""}
-            {total > 0
-              ? `${hasMore ? "至少" : "共"} ${total} 项 / 已加载 ${items.length}`
-              : loadedOnce
-              ? "无匹配结果"
-              : "等待加载"}
-          </span>
-          {notice && (
-            <span className="flex items-center gap-1 text-emerald-400 flex-shrink-0">
-              <CheckCircle2 size={11} />
-              {notice}
+        {/* 状态条：无内容可报时整行收起，避免留一条空的「等待加载」横条 */}
+        {(loadedOnce || Boolean(sourceLabel) || Boolean(error) || Boolean(notice)) && (
+          <div className="px-4 h-8 flex items-center justify-between gap-3 text-[10.5px] text-[var(--ui-text-muted)] flex-shrink-0 border-b border-[color:var(--ui-divider-hairline)]">
+            <span className="truncate flex items-center gap-1.5">
+              {loading && <Loader2 size={10} className="animate-spin flex-shrink-0" />}
+              {sourceLabel ? `来源 ${sourceLabel} · ` : ""}
+              {total > 0
+                ? `${hasMore ? "至少" : "共"} ${total} 项 / 已加载 ${items.length}`
+                : loading
+                ? "正在拉取技能市场…"
+                : loadedOnce
+                ? "无匹配结果"
+                : "等待加载"}
             </span>
-          )}
-          {!notice && error && (
-            <span className="flex items-center gap-1 text-rose-400 flex-shrink-0 max-w-[55%] truncate" title={error}>
-              <AlertCircle size={11} />
-              {error}
-            </span>
-          )}
-        </div>
+            {notice && (
+              <span className="flex items-center gap-1 text-[var(--ui-accent-emerald)] flex-shrink-0">
+                <CheckCircle2 size={11} />
+                {notice}
+              </span>
+            )}
+            {!notice && error && (
+              <span className="flex items-center gap-1 text-[var(--ui-accent-rose)] flex-shrink-0 max-w-[55%] truncate" title={error}>
+                <AlertCircle size={11} />
+                {error}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* 列表 */}
         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4">
           {items.length === 0 && loading && (
-            <div className="h-full flex items-center justify-center text-xs text-neutral-500 gap-2">
+            <div className="h-full flex items-center justify-center text-xs text-[var(--ui-text-muted)] gap-2">
               <Loader2 size={14} className="animate-spin" />
               正在拉取技能市场…
             </div>
           )}
 
           {items.length === 0 && !loading && loadedOnce && !error && (
-            <div className="h-full flex items-center justify-center text-xs text-neutral-500">
+            <div className="h-full flex items-center justify-center text-xs text-[var(--ui-text-muted)]">
               该市场暂时没有可用技能
             </div>
           )}
 
           {items.length === 0 && !loading && !loadedOnce && (
             <div className="h-full flex flex-col items-center justify-center gap-2 text-center px-6">
-              <Store size={22} className="text-neutral-700" />
-              <div className="text-xs text-neutral-400">填入技能市场链接后点击「加载」</div>
-              <div className="text-[10.5px] text-neutral-600 leading-relaxed max-w-sm">
+              <Store size={22} className="text-[var(--ui-text-faint)]" />
+              <div className="text-xs text-[var(--ui-text-secondary)]">填入技能市场链接后点击「加载」</div>
+              <div className="text-[10.5px] text-[var(--ui-text-faint)] leading-relaxed max-w-sm">
                 支持分页 JSON 接口（page / pageSize / q）、GitHub 仓库或目录、单个 SKILL.md 直链
               </div>
             </div>
@@ -350,19 +355,19 @@ const SkillMarketModal: React.FC<SkillMarketModalProps> = ({ open, onClose, onIn
               return (
                 <div
                   key={item.id}
-                  className="p-3.5 rounded-xl bg-[#1a1a1a] border border-[#282828] hover:border-[#383838] transition-colors flex flex-col gap-2"
+                  className="p-3.5 rounded-xl bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] transition-colors flex flex-col gap-2"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="text-sm font-semibold text-neutral-100 truncate">{item.name}</span>
+                        <span className="text-sm font-semibold text-[var(--ui-text-primary)] truncate">{item.name}</span>
                         {item.version && (
-                          <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-[#252525] text-neutral-400 border border-[#333] flex-shrink-0">
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-[var(--ui-chip-bg)] text-[var(--ui-text-secondary)] border border-[color:var(--ui-border-subtle)] flex-shrink-0">
                             v{item.version}
                           </span>
                         )}
                       </div>
-                      <div className="text-[10px] text-neutral-500 truncate mt-0.5">
+                      <div className="text-[10px] text-[var(--ui-text-muted)] truncate mt-0.5">
                         {[item.author, item.sourceLabel || item.repo, item.dirPath]
                           .filter(Boolean)
                           .join(" · ") || item.source}
@@ -373,8 +378,8 @@ const SkillMarketModal: React.FC<SkillMarketModalProps> = ({ open, onClose, onIn
                       disabled={isInstalling}
                       className={`h-7 px-2.5 rounded-lg text-[11px] font-medium flex items-center gap-1 flex-shrink-0 border transition-colors ${
                         isInstalled
-                          ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/25"
-                          : "bg-[#232323] text-neutral-200 border-[#333] hover:bg-[#2a2a2a]"
+                          ? "bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border-[color:var(--ui-accent-emerald-border)]"
+                          : "bg-[var(--ui-chip-bg)] text-[var(--ui-text-primary)] border-[color:var(--ui-border-subtle)] hover:bg-[var(--ui-chip-hover-bg)]"
                       } disabled:opacity-60`}
                       title={isInstalled ? "已安装，可再次下载覆盖" : "下载并安装到 ~/.omcx/skills"}
                     >
@@ -389,7 +394,7 @@ const SkillMarketModal: React.FC<SkillMarketModalProps> = ({ open, onClose, onIn
                     </button>
                   </div>
 
-                  <p className="text-[11px] text-neutral-400 leading-relaxed line-clamp-3 min-h-[2.6em]">
+                  <p className="text-[11px] text-[var(--ui-text-secondary)] leading-relaxed line-clamp-3 min-h-[2.6em]">
                     {item.description || "暂无描述"}
                   </p>
 
@@ -398,7 +403,7 @@ const SkillMarketModal: React.FC<SkillMarketModalProps> = ({ open, onClose, onIn
                       {item.tags.slice(0, 4).map((tag) => (
                         <span
                           key={tag}
-                          className="px-1.5 py-0.2 rounded bg-[#242424] border border-[#303030] text-[9.5px] font-mono text-neutral-400"
+                          className="px-1.5 py-0.2 rounded bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[9.5px] font-mono text-[var(--ui-text-muted)]"
                         >
                           {tag}
                         </span>
@@ -411,14 +416,14 @@ const SkillMarketModal: React.FC<SkillMarketModalProps> = ({ open, onClose, onIn
           </div>
 
           {items.length > 0 && (
-            <div ref={sentinelRef} className="h-10 flex items-center justify-center text-[10.5px] text-neutral-600">
+            <div ref={sentinelRef} className="h-10 flex items-center justify-center text-[10.5px] text-[var(--ui-text-faint)]">
               {loading ? (
                 <span className="flex items-center gap-1.5">
                   <Loader2 size={11} className="animate-spin" />
                   加载中…
                 </span>
               ) : hasMore ? (
-                <button onClick={loadMore} className="text-neutral-400 hover:text-neutral-200 transition-colors">
+                <button onClick={loadMore} className="text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] transition-colors">
                   加载更多
                 </button>
               ) : (
