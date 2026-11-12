@@ -1111,6 +1111,9 @@ app.whenReady().then(() => {
       headers.set("Access-Control-Allow-Origin", "*");
       headers.set("Content-Security-Policy", RENDERER_CSP);
       headers.set("X-Content-Type-Options", "nosniff");
+      // 本地静态资源不做磁盘缓存：重新 build 后重启/刷新必须立刻拿到新产物，
+      // 否则旧 index.html 仍指向已删除的 hash 资源，界面停留在旧样式
+      headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
       if (filePath.endsWith(".html")) {
         headers.set("Content-Type", "text/html; charset=utf-8");
       } else if (filePath.endsWith(".js") || filePath.endsWith(".mjs")) {

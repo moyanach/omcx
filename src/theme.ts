@@ -152,11 +152,14 @@ const LIGHT_THEME_CSS = `
   html[data-theme="light"] textarea::placeholder {
     color: #94a3b8 !important;
   }
-  html[data-theme="light"] input:not([type="range"]):not([type="checkbox"]):focus,
-  html[data-theme="light"] textarea:not(.chat-textarea-seamless):focus,
-  html[data-theme="light"] select:focus {
-    border-color: #3b82f6 !important;
-    box-shadow: 0 0 0 1px #3b82f6 !important;
+  /* 聚焦反馈统一交给容器的 .ui-focus-ring 柔光；
+     绝不给原生控件再叠一层方形 box-shadow —— 内层 input 通常无圆角，
+     这层光圈会被画成一个硬邦邦的蓝色矩形，与外层圆角容器割裂 */
+  html[data-theme="light"] input:not([type="range"]):not([type="checkbox"]):not(.ui-focus-ring):focus,
+  html[data-theme="light"] textarea:not(.chat-textarea-seamless):not(.ui-focus-ring):focus,
+  html[data-theme="light"] select:not(.ui-focus-ring):focus {
+    border-color: var(--ui-accent-blue-border) !important;
+    box-shadow: none !important;
   }
   html[data-theme="light"] option {
     background-color: #ffffff !important;
