@@ -235,7 +235,8 @@ function resolveMentionTarget(mention, workDir, allowedFolders) {
 
 function buildMentionContext(text, workDir, allowedFolders = [], extraContext = {}) {
   const mentions = extractMentions(text);
-  const result = { block: "", files: [], dirs: [], skills: [], mcps: [], subagents: [], skipped: [] };
+  const result = { block: "", files: [], dirs: [], skills: [], mcps: [], subagents: [], skipped: [], allowedTools: [] };
+  const skillAllowedToolLists = [];
   if (mentions.length === 0) return result;
 
   const skills = Array.isArray(extraContext.skills) ? extraContext.skills : [];
@@ -279,10 +280,15 @@ function buildMentionContext(text, workDir, allowedFolders = [], extraContext = 
       if (matchedSkill) {
         const fence = fenceFor(matchedSkill.prompt || "");
         const toolList = (matchedSkill.tools || []).join(", ") || "无特定依赖工具";
+        const allowedList = (matchedSkill.allowedTools || []).join(", ");
+        if (Array.isArray(matchedSkill.allowedTools) && matchedSkill.allowedTools.length > 0) {
+          skillAllowedToolLists.push(matchedSkill.allowedTools);
+        }
         const section = [
           `### 用户显式激活的专家技能: ${matchedSkill.name} (${matchedSkill.scope || "global"})`,
           `描述: ${matchedSkill.description || "无"}`,
           `依赖工具: ${toolList}`,
+          allowedList ? `本次技能允许使用的工具范围: ${allowedList}` : "",
           `【执行指示】用户在本次提问中显式激活此技能，请以此技能最高工作流标准优先开展分析与执行：`,
           `${fence}markdown\n${matchedSkill.prompt || "无额外提示词说明"}\n${fence}`,
         ].join("\n");
@@ -377,6 +383,16 @@ function buildMentionContext(text, workDir, allowedFolders = [], extraContext = 
   }
 
   if (parts.length === 0) return result;
+
+  // 仅当本次激活的所有技能都声明了 allowed-tools 时才收敛工具白名单，
+  // 避免未声明权限的技能意外限制 Agent 能力。
+  if (
+    skillAllowedToolLists.length > 0 &&
+    skillAllowedToolLists.length === result.skills.length
+  ) {
+    const [first, ...rest] = skillAllowedToolLists;
+    result.allowedTools = first.filter((name) => rest.every((list) => list.includes(name)));
+  }
 
   const header = [
     "【用户通过 @ 显式引用的统一上下文资源】",

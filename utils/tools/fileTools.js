@@ -9,15 +9,17 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { StringDecoder } = require("string_decoder");
+const { execFileSync } = require("child_process");
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 const { resolveWorkspacePath } = require("./pathResolver");
 const {
   PERMISSION_MODES,
   getPermissionModePolicy,
   checkSensitivePath,
 } = require("../../services/sandboxPolicyService");
+const { fileLockService } = require("../../services/fileLockService");
 
 // ─── 路径安全 ────────────────────────────────────────────────
 
@@ -125,6 +127,55 @@ async function checkSafePath(
 
 // ─── 工具: read_file ─────────────────────────────────────────
 
+const READ_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * 以固定大小分块扫描文件，仅保留目标行区间，避免把超大文件整体读入内存。
+ * 返回与 `content.split("\n")` 一致的行语义（含末尾空行）。
+ * @returns {{ lines: string[], totalLines: number, bytes: number }}
+ */
+function readLinesRange(targetPath, offset = 0, maxLines = 200) {
+  const startLine = Math.max(0, Math.floor(Number(offset) || 0));
+  const unlimited = maxLines === -1;
+  const limit = unlimited ? Infinity : Math.max(1, Math.floor(Number(maxLines) || 1));
+  const endExclusive = startLine + limit;
+
+  const fd = fs.openSync(targetPath, "r");
+  const decoder = new StringDecoder("utf-8");
+  const buf = Buffer.alloc(READ_CHUNK_BYTES);
+  const collected = [];
+  let remainder = "";
+  let lineIndex = 0;
+  let bytes = 0;
+
+  const pushLine = (line) => {
+    if (lineIndex >= startLine && lineIndex < endExclusive) collected.push(line);
+    lineIndex += 1;
+  };
+
+  try {
+    while (true) {
+      const read = fs.readSync(fd, buf, 0, buf.length, null);
+      if (read <= 0) break;
+      bytes += read;
+      const text = remainder + decoder.write(buf.subarray(0, read));
+      let cursor = 0;
+      let nl = text.indexOf("\n");
+      while (nl !== -1) {
+        pushLine(text.slice(cursor, nl));
+        cursor = nl + 1;
+        nl = text.indexOf("\n", cursor);
+      }
+      remainder = text.slice(cursor);
+    }
+    pushLine(remainder + decoder.end());
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  return { lines: collected, totalLines: lineIndex, bytes };
+}
+
 class ReadFileTool extends StructuredTool {
   constructor() {
     super();
@@ -137,10 +188,28 @@ class ReadFileTool extends StructuredTool {
     });
   }
 
-  async _call({ path: filePath, maxLines = 200, offset = 0, __workDir, __allowedFolders, __checkPermission, __toolContext }) {
+  async _call(rawArgs) {
+    const {
+      path: filePath,
+      maxLines = 200,
+      offset = 0,
+      __workDir,
+      __allowedFolders,
+      __checkPermission,
+      __toolContext,
+    } = rawArgs || {};
+
+    const targetFilePath = filePath ?? rawArgs?.filepath ?? rawArgs?.file_path ?? rawArgs?.file;
+    if (!targetFilePath || typeof targetFilePath !== "string" || !targetFilePath.trim()) {
+      return JSON.stringify({
+        success: false,
+        error: `read_file 调用失败: 缺少有效的文件路径 path 参数。`,
+      });
+    }
+
     let targetPath;
     try {
-      targetPath = await checkSafePath(filePath, __workDir, __allowedFolders, __checkPermission, "读取", {
+      targetPath = await checkSafePath(targetFilePath, __workDir, __allowedFolders, __checkPermission, "读取", {
         mode: "read",
         toolContext: __toolContext,
       });
@@ -149,44 +218,44 @@ class ReadFileTool extends StructuredTool {
     }
 
     if (!fs.existsSync(targetPath)) {
-      return JSON.stringify({ success: false, error: `文件不存在: ${filePath}` });
+      return JSON.stringify({ success: false, error: `文件不存在: ${targetFilePath}` });
     }
     const stat = fs.statSync(targetPath);
     if (!stat.isFile()) {
-      return JSON.stringify({ success: false, error: `路径不是文件: ${filePath}` });
+      return JSON.stringify({ success: false, error: `路径不是文件: ${targetFilePath}` });
     }
 
-    const content = fs.readFileSync(targetPath, "utf-8");
-    const lines = content.split("\n");
+    const { lines, totalLines } = readLinesRange(targetPath, offset, maxLines);
 
     if (maxLines === -1) {
+      const content = lines.join("\n");
       // 读取全部
       return JSON.stringify({
         success: true,
         path: filePath,
-        totalLines: lines.length,
+        totalLines,
         content,
         size: content.length,
         truncated: false,
       });
     }
 
-    const start = offset;
-    const end = Math.min(offset + maxLines, lines.length);
-    const limited = lines.slice(start, end);
-    const isTruncated = lines.length > end;
+    const start = Math.max(0, Math.floor(Number(offset) || 0));
+    const end = Math.min(start + Math.floor(Number(maxLines) || 1), totalLines);
+    const limited = lines.slice(0, Math.max(0, end - start)).join("\n");
+    const isTruncated = totalLines > end;
 
     return JSON.stringify({
       success: true,
       path: filePath,
-      totalLines: lines.length,
+      totalLines,
       startLine: start,
       endLine: end,
-      content: limited.join("\n"),
-      size: limited.join("\n").length,
+      content: limited,
+      size: limited.length,
       truncated: isTruncated,
       note: isTruncated
-        ? `文件共 ${lines.length} 行，当前显示 ${start + 1}-${end} 行（共 ${maxLines} 行）。使用 offset 参数继续读取。`
+        ? `文件共 ${totalLines} 行，当前显示 ${start + 1}-${end} 行（共 ${Math.floor(Number(maxLines) || 1)} 行）。使用 offset 参数继续读取。`
         : undefined,
     });
   }
@@ -206,10 +275,61 @@ class WriteFileTool extends StructuredTool {
     });
   }
 
-  async _call({ path: filePath, content, description, __workDir, __allowedFolders, __checkPermission, __toolContext }) {
+  async _call(rawArgs) {
+    const {
+      path: filePath,
+      content,
+      description,
+      __workDir,
+      __allowedFolders,
+      __checkPermission,
+      __toolContext,
+    } = rawArgs || {};
+
+    // 1. 兼容文件路径别名
+    const targetFilePath = filePath ?? rawArgs?.filepath ?? rawArgs?.file_path ?? rawArgs?.file;
+    if (!targetFilePath || typeof targetFilePath !== "string" || !targetFilePath.trim()) {
+      return JSON.stringify({
+        success: false,
+        error: `write_file 调用失败: 缺少有效的文件路径 path 参数。`,
+      });
+    }
+
+    // 2. 参数防御与常见大模型别名吸收 (text / data / code / file_content 等)
+    let finalContent = content;
+    if (finalContent === undefined || finalContent === null) {
+      finalContent =
+        rawArgs?.text ??
+        rawArgs?.data ??
+        rawArgs?.code ??
+        rawArgs?.file_content ??
+        rawArgs?.fileContent ??
+        rawArgs?.body;
+    }
+
+    if (finalContent === undefined || finalContent === null) {
+      return JSON.stringify({
+        success: false,
+        error: `write_file 调用失败: 缺少必需参数 content (接收到的内容为 undefined)。请在 content 参数中提供要写入的完整文件内容（字符串形式）后重试。`,
+      });
+    }
+
+    // 3. 自动转换非字符串形式的内容 (如大模型把 JSON 对象直接塞入参数)
+    if (typeof finalContent !== "string") {
+      if (typeof finalContent === "object") {
+        try {
+          finalContent = JSON.stringify(finalContent, null, 2);
+        } catch {
+          finalContent = String(finalContent);
+        }
+      } else {
+        finalContent = String(finalContent);
+      }
+    }
+
     let targetPath;
     try {
-      targetPath = await checkSafePath(filePath, __workDir, __allowedFolders, __checkPermission, "写入/创建", {
+      targetPath = await checkSafePath(targetFilePath, __workDir, __allowedFolders, __checkPermission, "写入/创建", {
         mode: "write",
         toolContext: __toolContext,
       });
@@ -223,32 +343,35 @@ class WriteFileTool extends StructuredTool {
       fs.mkdirSync(parentDir, { recursive: true });
     }
 
-    const isNew = !fs.existsSync(targetPath);
-    let originalContent = "";
-    if (!isNew) {
-      originalContent = fs.readFileSync(targetPath, "utf-8");
-    }
+    // 路径级异步排他并发锁：同文件排他，不同文件天然并发，杜绝交叉修改覆盖
+    return await fileLockService.withLock(targetPath, async () => {
+      const isNew = !fs.existsSync(targetPath);
+      let originalContent = "";
+      if (!isNew) {
+        originalContent = fs.readFileSync(targetPath, "utf-8");
+      }
 
-    fs.writeFileSync(targetPath, content, "utf-8");
+      fs.writeFileSync(targetPath, finalContent, "utf-8");
 
-    const MAX_SNAPSHOT_CHARS = 30000;
-    const originalTruncated = originalContent.length > MAX_SNAPSHOT_CHARS;
-    const originalSnapshot = !isNew
-      ? originalTruncated
-        ? originalContent.slice(0, MAX_SNAPSHOT_CHARS)
-        : originalContent
-      : undefined;
+      const MAX_SNAPSHOT_CHARS = 30000;
+      const originalTruncated = originalContent.length > MAX_SNAPSHOT_CHARS;
+      const originalSnapshot = !isNew
+        ? originalTruncated
+          ? originalContent.slice(0, MAX_SNAPSHOT_CHARS)
+          : originalContent
+        : undefined;
 
-    return JSON.stringify({
-      success: true,
-      path: filePath,
-      action: isNew ? "created" : "modified",
-      description: description || (isNew ? "创建新文件" : "修改已有文件"),
-      size: Buffer.byteLength(content, "utf-8"),
-      originalSize: originalContent ? Buffer.byteLength(originalContent, "utf-8") : 0,
-      diffHint: isNew ? null : "(文件已修改，建议使用 git diff 查看具体变更)",
-      ...(originalSnapshot !== undefined ? { originalContent: originalSnapshot } : {}),
-      ...(originalTruncated ? { originalTruncated: true } : {}),
+      return JSON.stringify({
+        success: true,
+        path: targetFilePath,
+        action: isNew ? "created" : "modified",
+        description: description || (isNew ? "创建新文件" : "修改已有文件"),
+        size: Buffer.byteLength(finalContent, "utf-8"),
+        originalSize: originalContent ? Buffer.byteLength(originalContent, "utf-8") : 0,
+        diffHint: isNew ? null : "(文件已修改，建议使用 git diff 查看具体变更)",
+        ...(originalSnapshot !== undefined ? { originalContent: originalSnapshot } : {}),
+        ...(originalTruncated ? { originalTruncated: true } : {}),
+      });
     });
   }
 }
@@ -356,22 +479,26 @@ class SearchCodeTool extends StructuredTool {
       const safeFolders = folderCandidates.filter(
         (f) => f && fs.existsSync(f) && !checkSensitivePath(f, sessionId).blocked
       );
-      const searchTargets = (safeFolders.length > 0 ? safeFolders : [rootPath])
-        .map((f) => `"${path.resolve(f)}"`)
-        .join(" ");
+      const searchTargets = (safeFolders.length > 0 ? safeFolders : [rootPath]).map((f) =>
+        path.resolve(f)
+      );
 
-      let cmd = `rg -n --no-heading`;
-      if (contextLines > 0) {
-        cmd += ` -C ${contextLines}`;
+      // 安全加固：全程使用参数数组调用 rg，绝不经过 shell，彻底杜绝命令注入
+      const normalizedContextLines = Number.isFinite(Number(contextLines))
+        ? Math.max(0, Math.min(20, Math.floor(Number(contextLines))))
+        : 0;
+      const rgArgs = ["-n", "--no-heading"];
+      if (normalizedContextLines > 0) {
+        rgArgs.push("-C", String(normalizedContextLines));
       }
-      cmd += ` "${query.replace(/"/g, '\\"')}"`;
-      if (include) {
-        cmd += ` -g "${include}"`;
+      rgArgs.push("-g", "!node_modules", "-g", "!.git", "-g", "!dist");
+      if (include && String(include).trim()) {
+        rgArgs.push("-g", String(include));
       }
-      cmd += ` --glob '!node_modules' --glob '!.git' --glob '!dist'`;
-      cmd += ` ${searchTargets}`;
+      // 显式 -- 结束选项解析：查询词以 - 开头时（如 --pre=...）不得被 rg 当成参数执行
+      rgArgs.push("--", String(query), ...searchTargets);
 
-      const stdout = execSync(cmd, {
+      const stdout = execFileSync("rg", rgArgs, {
         encoding: "utf-8",
         maxBuffer: 1024 * 1024,
         timeout: 15000,
@@ -402,10 +529,10 @@ class SearchCodeTool extends StructuredTool {
         truncated: lines.length > maxResults,
       });
     } catch (err) {
-      if (err.status === 1 && err.stdout === "") {
+      if (err.status === 1 && (err.stdout === "" || err.stdout == null)) {
         return JSON.stringify({ success: true, total: 0, results: [], truncated: false });
       }
-      if (err.stderr && err.stderr.includes("not found")) {
+      if (err.code === "ENOENT" || (err.stderr && err.stderr.includes("not found"))) {
         return JSON.stringify({ success: false, error: "需要安装 ripgrep (rg) 来使用代码搜索功能" });
       }
       return JSON.stringify({ success: false, error: `搜索失败: ${err.message}` });

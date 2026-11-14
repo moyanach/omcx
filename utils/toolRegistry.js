@@ -16,6 +16,16 @@ const { WebSearchTool, WebFetchTool } = require("./tools/webTools");
 const { RunCommandTool } = require("./tools/shellTools");
 const { TodoWriteTool } = require("./tools/todoTool");
 const { DispatchSubagentTool } = require("./tools/subagentTool");
+const { RepoMapTool, SearchSymbolsTool, FindReferencesTool } = require("./tools/repoIndexTools");
+const { RunSkillScriptTool } = require("./tools/skillTools");
+const { SpecWriteTool } = require("./tools/specTool");
+const {
+  BrowserOpenTool,
+  BrowserInspectTool,
+  BrowserInteractTool,
+  BrowserLogsTool,
+  BrowserSnapshotTool,
+} = require("./tools/browserTools");
 const { getPermissionModePolicy } = require("../services/sandboxPolicyService");
 
 const WRITE_FILE_TOOL_NAMES = new Set(["write_file", "edit_file"]);
@@ -79,7 +89,8 @@ class ToolRegistry {
       if (blockFileWrite && WRITE_FILE_TOOL_NAMES.has(tool.name)) {
         continue;
       }
-      if (allowedToolNames && !allowedToolNames.has(tool.name) && !String(tool.name).startsWith("mcp__")) {
+      // 白名单对内置工具与 MCP 工具一视同仁，Subagent 权限收敛不允许出现 mcp__ 旁路
+      if (allowedToolNames && !allowedToolNames.has(tool.name)) {
         continue;
       }
       defs.push({
@@ -346,6 +357,16 @@ const ALL_TOOLS = [
   fromLangChainTool(new WebFetchTool()),
   fromLangChainTool(new TodoWriteTool()),
   fromLangChainTool(new DispatchSubagentTool({}, toolRegistry)),
+  fromLangChainTool(new RepoMapTool()),
+  fromLangChainTool(new SearchSymbolsTool()),
+  fromLangChainTool(new FindReferencesTool()),
+  fromLangChainTool(new SpecWriteTool()),
+  fromLangChainTool(new RunSkillScriptTool()),
+  fromLangChainTool(new BrowserOpenTool()),
+  fromLangChainTool(new BrowserInspectTool()),
+  fromLangChainTool(new BrowserInteractTool()),
+  fromLangChainTool(new BrowserLogsTool()),
+  fromLangChainTool(new BrowserSnapshotTool()),
 ];
 
 // web_search 需要一个可选的 searchConfig，注册时不传参使用默认配置

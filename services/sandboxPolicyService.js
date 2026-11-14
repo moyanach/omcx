@@ -95,7 +95,7 @@ function getPermissionModePolicy(mode) {
 /**
  * 解析物理真实路径（兼容尚未创建的文件与多级符号链接，例如 macOS /tmp -> /private/tmp）
  */
-function resolveRealPathSafe(targetPath) {
+function resolveRealPathSafe(targetPath, depth = 0) {
   if (!targetPath || typeof targetPath !== "string") return "";
   const abs = path.resolve(targetPath);
   const realpathFn = fs.realpathSync.native || fs.realpathSync;
@@ -103,6 +103,18 @@ function resolveRealPathSafe(targetPath) {
   try {
     if (fs.existsSync(abs)) {
       return realpathFn(abs);
+    }
+    // 悬挂符号链接：existsSync 会因目标不存在而返回 false，但写入仍会跟随链接落到工作区外。
+    // 先解析链接目标再做边界判定（限定递归深度，防止符号链接环）。
+    if (depth < 16) {
+      const lst = fs.lstatSync(abs);
+      if (lst.isSymbolicLink()) {
+        const linkTarget = fs.readlinkSync(abs);
+        return resolveRealPathSafe(
+          path.resolve(path.dirname(abs), linkTarget),
+          depth + 1
+        );
+      }
     }
   } catch {
     // 忽略权限或瞬态异常，向下走祖先回溯
@@ -142,7 +154,11 @@ function isUnderFolderReal(targetPath, folderPath) {
   const realFolder = resolveRealPathSafe(folderPath);
   if (!realTarget || !realFolder) return false;
 
-  const rel = path.relative(realFolder, realTarget);
+  const isCaseInsensitive = process.platform === "darwin" || process.platform === "win32";
+  const compareTarget = isCaseInsensitive ? realTarget.toLowerCase() : realTarget;
+  const compareFolder = isCaseInsensitive ? realFolder.toLowerCase() : realFolder;
+
+  const rel = path.relative(compareFolder, compareTarget);
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
@@ -174,14 +190,24 @@ function getBuiltinReadOnlyTrustedDirs(sessionId = null) {
  * 宿主机高敏凭据与客户端私密配置黑名单（禁止读取与写入）
  */
 function getSensitiveBlacklistPaths() {
+  const omcxHomes = [path.join(USER_HOME, ".omcx"), DEFAULT_OMCX_HOME, LOCAL_OMCX_FALLBACK];
+  const omcxDbFiles = [];
+  const omcxConfigFiles = [];
+  for (const home of omcxHomes) {
+    // SQLite 主库与 WAL/SHM 伴随文件包含全部会话历史、产物索引与明文 API Key
+    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+      omcxDbFiles.push(path.join(home, `omcx.db${suffix}`));
+    }
+    omcxConfigFiles.push(path.join(home, "config.json"), path.join(home, "mcp.json"));
+  }
+
   return [
+    // 客户端 SQLite 核心数据库（含明文 API Key 与全部会话内容）
+    ...omcxDbFiles,
     // 客户端自身核心配置（包含明文 API Key 与全局 MCP 配置）
-    path.join(USER_HOME, ".omcx", "config.json"),
-    path.join(USER_HOME, ".omcx", "mcp.json"),
-    path.join(DEFAULT_OMCX_HOME, "config.json"),
-    path.join(DEFAULT_OMCX_HOME, "mcp.json"),
-    path.join(LOCAL_OMCX_FALLBACK, "config.json"),
-    path.join(LOCAL_OMCX_FALLBACK, "mcp.json"),
+    ...omcxConfigFiles,
+    // 注：~/.omcx/sessions 交由下方 checkSensitivePath 第 2 步精细校验，
+    // 严格保护会话历史/元数据文件，同时放行 attachments 附件目录预览与只读读取
     // 宿主机 SSH / 云厂商 / GPG / 密钥链凭据
     path.join(USER_HOME, ".ssh"),
     path.join(USER_HOME, ".aws"),
@@ -213,7 +239,7 @@ function checkSensitivePath(targetPath, sessionId = null) {
     }
   }
 
-  // 2. 保护 ~/.omcx/sessions 下除当前会话 attachments 之外的会话历史文件
+  // 2. 保护 ~/.omcx/sessions 下除 attachments 之外的会话历史与配置元数据文件
   const sessionRoots = [
     path.join(USER_HOME, ".omcx", "sessions"),
     path.join(DEFAULT_OMCX_HOME, "sessions"),
@@ -221,15 +247,18 @@ function checkSensitivePath(targetPath, sessionId = null) {
   ];
   for (const sRoot of sessionRoots) {
     if (isUnderFolderReal(realTarget, sRoot)) {
-      if (sessionId) {
-        const allowedAttachDir = path.join(sRoot, String(sessionId), "attachments");
-        if (isUnderFolderReal(realTarget, allowedAttachDir)) {
-          return { blocked: false };
-        }
+      // 允许访问会话 attachments 附件静态媒体资源 (图片、文本、文档预览)，兼顾 macOS APFS 大小写不敏感
+      const isCaseInsensitive = process.platform === "darwin" || process.platform === "win32";
+      const compareRoot = isCaseInsensitive ? sRoot.toLowerCase() : sRoot;
+      const compareTarget = isCaseInsensitive ? realTarget.toLowerCase() : realTarget;
+      const relative = path.relative(compareRoot, compareTarget);
+      const segments = relative.split(path.sep);
+      if (segments.length >= 2 && segments[1] === "attachments") {
+        return { blocked: false };
       }
       return {
         blocked: true,
-        reason: `安全沙箱已拦截直接访问会话存储目录: ${targetPath}`,
+        reason: `安全沙箱已拦截直接访问会话核心数据文件: ${targetPath}`,
       };
     }
   }

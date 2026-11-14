@@ -1,0 +1,11 @@
+[return_code] 1
+
+[stdout]
+[storageService] 已启用纯内存存储模式 (无 SQLite 原生依赖)
+[toolRegistry] 已注册 20 个工具: read_file, edit_file, write_file, list_directory, search_code, run_command, web_fetch, todo_write, dispatch_subagent, repo_map, search_symbols, find_references, spec_write, run_skill_script, browser_open, browser_inspect, browser_interact, browser_logs, browser_snapshot, web_search
+[error] 请先在【设置】中配置该模型的 API Key
+[omcx-cli] ok=false rounds=0 durationMs=833 tokens(in=0,cached=0,out=0) costUsd=0
+
+
+[stderr]
+

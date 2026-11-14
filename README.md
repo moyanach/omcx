@@ -41,7 +41,7 @@
 
 ### 🧰 2. 完备的工程工具链与开放扩展生态
 
-#### 🛠️ 内置 9 大工程级工具
+#### 🛠️ 内置 18 大工程级工具
 
 | 工具名称 | 功能描述 |
 | :--- | :--- |
@@ -54,17 +54,40 @@
 | `web_search` | 多引擎互联网检索（支持 Tavily / Mojeek / DuckDuckGo / Google 自动回退） |
 | `web_fetch` | 深度网页内容抓取与清洗，自动将网页转录为清晰的 Markdown 结构文本 |
 | `todo_write` | Agent 专属任务规划工具，实时向界面同步待办工单的推进状态 |
+| `repo_map` | 仓库符号地图：按目录列出高价值文件与类/函数/接口符号，快速建立全局认知 |
+| `search_symbols` | 符号级检索（类/函数/接口/类型/方法），返回 `文件:行号` 与符号类型 |
+| `find_references` | 引用/调用图检索：区分 definition / call / reference，评估改动影响面 |
+| `dispatch_subagent` | 派发 `explore` / `planner` / `reviewer` / `general` 子代理，隔离长链路探索上下文 |
+| `run_skill_script` | 在权限与路径沙箱内执行目录式 Skill 的 `scripts/` 脚本 |
+| `browser_open` | 内置 Chromium 隐藏窗口打开 http/https 页面 |
+| `browser_interact` | 点击、填表、按键、滚动、等待等页面自动化交互 |
+| `browser_snapshot` | 页面截图与整页截图，支持像素级视觉基线回归 |
+| `spec_write` | Quest/规格模式：把需求、方案、验收标准与实施步骤落盘为规格文档 |
 
 #### 🔌 标准 MCP 协议动态桥接
 
 * **完全兼容行业标准**：无缝兼容 Claude Desktop 和 Cursor 的 MCP (Model Context Protocol) 规范。
-* **连接池与热重载**：支持基于 `JSON-RPC 2.0 over Stdio` 的动态连接池管理，自动合并全局（`~/.omcx/mcp.json`）与项目级（`<workDir>/.omcx/mcp.json`）配置，随配随用。
-* **工具即时发现**：握手后自动拉取远端工具 Schema 并以 `mcp__<server>__<tool>` 形式无缝注入大模型调用链。
+* **多传输协议**：同时支持 `JSON-RPC 2.0 over Stdio`、Streamable HTTP 与旧版 SSE，自动合并全局（`~/.omcx/mcp.json`）与项目级（`<workDir>/.omcx/mcp.json`）配置。
+* **OAuth 2.1 授权**：远程服务支持授权码 + PKCE + 动态客户端注册（RFC 7591/7636/8707），令牌自动刷新并安全落盘（`~/.omcx/mcp-oauth.json`）。
+* **工具即时发现与权限中心**：握手后自动拉取远端工具 Schema，以 `mcp__<server>__<tool>` 注入调用链，并支持按服务器/按工具独立启停。
+* **Resources / Prompts**：支持发现并读取 MCP Resources，列出并复制 Prompts 提示模板；项目级配置必须经用户显式信任后才生效。
 
 #### 🧩 声明式 Markdown Skills 技能库
 
 * **Prompt 级能力拓展**：编写纯 Markdown（支持 YAML Frontmatter 元数据）即可赋予 Agent 专属领域经验，如特定框架编码规范、API 测试模板或安全审查规约。
 * **多层级生效**：支持全局技能（`~/.omcx/skills/`）与项目私有技能（`<workDir>/.omcx/skills/`）隔离生效与自动识别。
+* **目录式技能**：支持 `SKILL.md` + `scripts/` 可执行脚本 + `allowed-tools` 工具白名单，采用渐进式加载（平时仅注入名称与描述，按需读取正文）。
+
+#### 🧭 工程工作流与安全护栏
+
+* **斜杠命令**：内置 `/btw`、`/review`（未提交 / `--base` / `--commit` / `--pr` 四种作用域）、`/test`、`/fix`、`/explain`、`/commit`、`/pr`、`/spec`、`/execute-spec`，并支持 `~/.omcx/commands/*.md` 与项目级自定义命令（`$ARGUMENTS`）。
+* **旁路问答 (/btw)**：主任务流式生成中也可随时提问，首次提问自动打开右侧工作台「旁路问答」抽屉，并可直接在抽屉内连续追问（自动携带最近 3 轮旁路 Q/A）；不写入主会话历史、不触发上下文压缩/标题生成/产物记录。旁路通道仅启用 `read_file`、`search_code`、`find_references`、`repo_map` 四个只读工具，最多 20 轮，外部路径无审批直接拒绝，取消旁路不影响主任务。在主会话中选中任意文本后右键「旁路会话」，即可把该片段作为只读引用带入抽屉提问（引用随提问一次性消费，不落盘）。
+* **Quest 规格模式**：`/spec` 只读分析后生成「需求 / 方案 / 验收标准 / 实施步骤」，确认后由 `/execute-spec` 自主执行。
+* **生命周期 Hooks**：`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`（兼容 `beforeToolUse` / `afterFileWrite` 别名），支持阻断、附加上下文与自动格式化 / lint。
+* **Git 精细化**：Hunk 级暂存、取消暂存与丢弃，文件级暂存，Conventional Commits 提交，PR 创建，Git Worktree 隔离，会话 fork / export。
+* **检查点与回滚**：每次 Agent 写入前快照文件，支持按回合一键 Rewind。
+* **诊断与测试**：自动识别 TypeScript / Python / Go / Rust 项目，结构化回注编译、Lint 与测试结果。
+* **运行观测**：本地 JSONL trace 记录每次运行的 token、缓存命中、成本与工具轨迹，并提供评测集与浏览器视觉回归。
 
 ---
 
@@ -78,7 +101,7 @@
   * 自动追踪当前工作区 Git 分支、未暂存与已修改文件清单。
   * 实时统计代码增删行数（`+` / `-` 指标）。
   * 内置专业级 **Side-by-Side / Inline Code Diff** 差异高亮视图，每一行代码变更均了然于胸。
-* **集成交互式终端（Integrated Terminal）**：嵌入免切窗口的交互式终端环境，可在当前会话的工作目录中即时输入任意命令调试程序。
+* **集成交互式终端（Integrated Terminal）**：基于 `node-pty` + `xterm.js` 的真实 PTY 会话，支持登录 Shell、窗口自适应与任意交互式命令，可在当前会话的工作目录中直接调试程序。
 
 ---
 
@@ -107,6 +130,10 @@
   * *Git 变更卡*：展示当前会话引发的代码变动总览。
   * *产出物清单卡（Outputs）*：实时收录本次对话中 Agent 新建或修改的所有代码文件，支持一键在 Finder 中定位。
   * *连接器卡（Connectors）*：显示当前已激活的 Skills 和 MCP 外部服务。
+  * *检查卡（Checks）*：一键运行类型检查、Lint 与测试，并结构化展示诊断。
+  * *检查点卡（Checkpoints）*：按回合查看并回滚 Agent 的写入。
+  * *Repo Wiki 卡*：基于符号索引生成仓库级文档并缓存。
+  * *规格与工作树卡*：查看 Quest 规格文档，创建 / 删除隔离 Git Worktree。
 * **高质感 Markdown 与代码块渲染**：内置语法高亮、代码一键复制、KaTeX 复杂数学公式解析、Mermaid 架构流程图渲染与 ANSI 彩色终端输出。
 
 ---
@@ -115,7 +142,7 @@
 
 * **全格式 API 协议兼容**：
   * **OpenAI 兼容协议**：原生支持 GPT-4o、DeepSeek-V3/R1、Moonshot、GLM 等各类标准端点。
-  * **Anthropic 协议**：原生支持 Claude 3.5 Sonnet 等业界顶尖 Coding 模型。
+  * **Anthropic 协议**：原生 Messages API（非 OpenAI 兼容层），支持 prompt caching、thinking 与按模型成本统计。
   * **本地私有化大模型**：一键直连本地 Ollama（如 `qwen2.5-coder`、`llama3` 等），敏感代码不出局域网。
 * **可视化模型管理**：支持随时增删模型、调整 Temperature、Max Tokens、Context Window 上限及自定义 Headers。
 * **智能会话命名**：每次首轮对话结束后，异步旁路小模型自动提炼生成精炼的中文会话标题。
@@ -173,15 +200,22 @@ omcx-desktop/
 ├── preload.js               # 安全沙箱桥接（contextBridge 暴露 window.electronAPI）
 ├── services/                # 主进程核心服务层
 │   ├── storageService.js    # 本地数据持久化（~/.omcx/ JSON + Write-through 内存缓存）
-│   ├── mcpClientService.js  # 标准 MCP 连接池与工具动态路由
+│   ├── mcpClientService.js  # 标准 MCP 连接池与工具动态路由（Stdio / HTTP / SSE）
+│   ├── mcpOAuthService.js   # MCP OAuth 2.1（授权码 + PKCE + 动态客户端注册）
 │   ├── contextCompactor.js  # 三级上下文自动压缩引擎
 │   ├── contextCalculator.js # Token 计量与分布统计
 │   ├── workspaceGitService.js # 工作区 Git 状态与行数变更统计
+│   ├── gitHunkService.js    # Hunk 级暂存 / 取消暂存 / 丢弃与 PR 创建
+│   ├── gitWorktreeService.js# Git Worktree 隔离
+│   ├── checkpointService.js # 文件检查点与按回合回滚
+│   ├── specService.js       # Quest 规格文档存储
+│   ├── hookService.js       # 生命周期 Hooks
+│   ├── diagnosticsService.js# 项目诊断与测试运行
 │   └── subagentService.js   # 子代理生命周期管理
 ├── utils/                   # Agent 工具链与上下文组装
 │   ├── toolRegistry.js      # 工具注册中心（会话级隔离与权限收敛）
 │   ├── contextBuilder.js    # 动态上下文组装（规则/技能/记忆/Git/Todo）
-│   └── tools/               # 9 大内置工程工具实现
+│   └── tools/               # 18 大内置工程工具实现（文件/搜索/终端/子代理/浏览器/规格）
 ├── src/                     # React 渲染进程源码
 │   ├── pages/               # 核心视图页面（ChatView, Workspaces, Tools, Settings）
 │   ├── components/

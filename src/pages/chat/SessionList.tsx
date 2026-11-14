@@ -52,20 +52,20 @@ const SessionList: React.FC<Props> = ({
   const activeSessions = sessions.filter((s) => !s.archived);
 
   return (
-    <div className="w-[260px] h-full bg-[#141414] border-r border-[#222222] flex flex-col flex-shrink-0 select-none">
-      {/* 顶部现代化新建会话按钮 (彻底去掉图 6 突兀的聊天标题和右侧加号) */}
-      <div className="p-3 border-b border-[#202020] flex-shrink-0">
+    <div className="w-[260px] h-full bg-[var(--ui-panel-bg)] border-r border-[color:var(--ui-divider-hairline)] flex flex-col flex-shrink-0 select-none">
+      {/* 顶部现代化新建会话按钮 */}
+      <div className="p-3 border-b border-[color:var(--ui-divider-hairline)] flex-shrink-0">
         <button
           onClick={onAddSession}
-          className="w-full h-9 px-3 rounded-xl bg-[#1c1c1c] hover:bg-[#242424] active:bg-[#1a1a1a] border border-[#2b2b2b] hover:border-[#383838] text-neutral-200 hover:text-white flex items-center justify-between transition-all duration-150 shadow-sm group"
+          className="w-full h-9 px-3 rounded-xl bg-[var(--ui-card-inner-bg)] hover:bg-[var(--ui-block-hover-bg)] border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] flex items-center justify-between transition-all duration-150 shadow-sm group"
         >
           <div className="flex items-center gap-2">
-            <div className="w-5 h-5 rounded-md bg-blue-500/10 text-blue-400 flex items-center justify-center">
+            <div className="w-5 h-5 rounded-md bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] flex items-center justify-center">
               <Plus size={13} />
             </div>
             <span className="text-xs font-semibold">新建会话</span>
           </div>
-          <span className="text-[10px] text-neutral-500 font-mono group-hover:text-neutral-400">
+          <span className="text-[10px] text-[var(--ui-text-faint)] font-mono group-hover:text-[var(--ui-text-muted)]">
             ⌘N
           </span>
         </button>

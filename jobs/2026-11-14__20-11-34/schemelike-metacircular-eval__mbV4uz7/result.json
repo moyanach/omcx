@@ -1,0 +1,129 @@
+{
+    "schema_version": 1,
+    "id": "87b41690-5d52-48a6-9d61-234eda8caf36",
+    "task_name": "terminal-bench/schemelike-metacircular-eval",
+    "trial_name": "schemelike-metacircular-eval__mbV4uz7",
+    "trial_uri": "file:///opt/apps/agnesAI/jobs/2026-11-14__20-11-34/schemelike-metacircular-eval__mbV4uz7",
+    "task_id": {
+        "org": "terminal-bench",
+        "name": "schemelike-metacircular-eval",
+        "ref": "sha256:58130c2166c3115276dc8592f358e326ff2d81ea852e3d88636c82fd1dff57e6"
+    },
+    "source": "frontier-harness-eval/frontier-harness-eval",
+    "task_checksum": "e4525988ae20585b6b90a2f1af2fcc9d18d6363d3cfcdd7be5305199428883d2",
+    "config": {
+        "schema_version": 1,
+        "task": {
+            "path": null,
+            "git_url": null,
+            "git_commit_id": null,
+            "name": "terminal-bench/schemelike-metacircular-eval",
+            "ref": "sha256:58130c2166c3115276dc8592f358e326ff2d81ea852e3d88636c82fd1dff57e6",
+            "overwrite": false,
+            "download_dir": null,
+            "source": "frontier-harness-eval/frontier-harness-eval"
+        },
+        "trial_name": "schemelike-metacircular-eval__mbV4uz7",
+        "trials_dir": "jobs/2026-11-14__20-11-34",
+        "install_only": false,
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": "eval.harbor.omcx_agent:OmcxAgent",
+            "import_path": null,
+            "model_name": "openrouter/deepseek/deepseek-chat",
+            "base_url": null,
+            "model_api_key_name": null,
+            "model_api_format": null,
+            "skip_model_parsing": false,
+            "n_concurrent": null,
+            "concurrency_group": null,
+            "skills": [],
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "resume_trajectory": false,
+            "load_trajectory": null,
+            "extra_allowed_hosts": [],
+            "kwargs": {},
+            "mcp_servers": []
+        },
+        "user_agent": null,
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "stream": false,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "override_tpu": null,
+            "mounts": null,
+            "extra_docker_compose": [],
+            "kwargs": {},
+            "extra_allowed_hosts": []
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "disable": false
+        },
+        "override_error_policy": {},
+        "artifacts": [],
+        "extra_instruction_paths": [],
+        "extra_instructions": [],
+        "job_id": "4b2fec6c-3b92-4d10-a0ae-59f02fcd754a",
+        "source_trial": null
+    },
+    "agent_info": {
+        "name": "omcx",
+        "version": "2.1.11",
+        "model_info": {
+            "name": "deepseek/deepseek-chat",
+            "provider": "openrouter"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 0,
+        "n_cache_tokens": 0,
+        "n_output_tokens": 0,
+        "cost_usd": 0.0,
+        "model_usage": null,
+        "rollout_details": null,
+        "metadata": null
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 0.0
+        }
+    },
+    "verifier_environment_mode": "shared",
+    "exception_info": null,
+    "started_at": "2026-11-14T12:11:41.156564Z",
+    "finished_at": "2026-11-14T12:12:51.330785Z",
+    "environment_setup": {
+        "started_at": "2026-11-14T12:11:41.231633Z",
+        "finished_at": "2026-11-14T12:11:43.223573Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-11-14T12:11:43.224088Z",
+        "finished_at": "2026-11-14T12:11:50.409036Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-11-14T12:11:50.410298Z",
+        "finished_at": "2026-11-14T12:11:52.666569Z"
+    },
+    "verifier": {
+        "started_at": "2026-11-14T12:11:53.165748Z",
+        "finished_at": "2026-11-14T12:12:39.816575Z"
+    },
+    "step_results": null,
+    "reward_valid": true
+}

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   Plus,
   FolderGit2,
@@ -13,10 +14,15 @@ import {
   Settings,
   Check,
   Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { useChatStore, type Session } from "@/stores/chatStore";
 import { useAppStore } from "@/stores/appStore";
+import { usePanelResize } from "@/hooks/usePanelResize";
 import { formatRelativeTime } from "@/lib/relativeTime";
+import { useDeleteSessionWithWorktree } from "./DeleteSessionModal";
+import { useNewSessionModal } from "./NewSessionModal";
 
 interface ProjectGroup {
   key: string;
@@ -36,12 +42,64 @@ const LeftSidebar: React.FC = () => {
     generatingBySession,
     workspaces,
     setActiveSession,
-    addSession,
-    addSessionInWorkspace,
-    deleteSession,
     updateSessionTitle,
-  } = useChatStore();
-  const { activeNavTab, setActiveNavTab } = useAppStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      activeWorkspaceId: s.activeWorkspaceId,
+      generatingBySession: s.generatingBySession,
+      workspaces: s.workspaces,
+      setActiveSession: s.setActiveSession,
+      updateSessionTitle: s.updateSessionTitle,
+    }))
+  );
+  const { requestDeleteSession, deleteSessionModal } = useDeleteSessionWithWorktree();
+  const { requestNewSession, newSessionModal } = useNewSessionModal();
+  const {
+    activeNavTab,
+    setActiveNavTab,
+    settingsOpen,
+    openSettings,
+    leftSidebarWidth,
+    setLeftSidebarWidth,
+    leftSidebarCollapsed,
+    toggleLeftSidebarCollapsed,
+  } = useAppStore(
+    useShallow((s) => ({
+      activeNavTab: s.activeNavTab,
+      setActiveNavTab: s.setActiveNavTab,
+      settingsOpen: s.settingsOpen,
+      openSettings: s.openSettings,
+      leftSidebarWidth: s.leftSidebarWidth,
+      setLeftSidebarWidth: s.setLeftSidebarWidth,
+      leftSidebarCollapsed: s.leftSidebarCollapsed,
+      toggleLeftSidebarCollapsed: s.toggleLeftSidebarCollapsed,
+    }))
+  );
+
+  // 侧边栏右侧边缘拖拽调宽：rAF 直写 DOM，松手提交一次
+  const {
+    targetRef: sidebarRef,
+    onPointerDown: startSidebarResize,
+    widthRef: sidebarWidthRef,
+    isResizingRef: sidebarResizingRef,
+    isDragging: sidebarResizing,
+  } = usePanelResize({
+    edge: "right",
+    min: 220,
+    max:
+      typeof window !== "undefined"
+        ? Math.min(520, Math.floor(window.innerWidth * 0.4))
+        : 520,
+    getWidth: () => leftSidebarWidth,
+    onCommit: (width) => setLeftSidebarWidth(width),
+  });
+
+  const liveSidebarWidth =
+    sidebarResizingRef.current && sidebarWidthRef.current != null
+      ? sidebarWidthRef.current
+      : null;
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -161,14 +219,14 @@ const LeftSidebar: React.FC = () => {
     setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const handleNewTask = async () => {
+  const handleNewTask = () => {
     const activeSession = sessions.find((session) => session.id === activeSessionId);
-    await addSession({
+    requestNewSession({
       workspaceId: activeWorkspaceId || activeSession?.workspaceId,
       workDir: activeSession?.workDir,
       model: activeSession?.model,
+      onCreated: () => setActiveNavTab("sessions"),
     });
-    setActiveNavTab("sessions");
   };
 
   useEffect(() => {
@@ -180,16 +238,18 @@ const LeftSidebar: React.FC = () => {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [sessions, activeSessionId]);
+  }, [sessions, activeSessionId, activeWorkspaceId, workspaces]);
 
   const handleSelectSession = async (id: string) => {
     setActiveNavTab("sessions");
     await setActiveSession(id);
   };
 
-  const handleNewInWorkspace = async (workspaceId: string) => {
-    const createdId = await addSessionInWorkspace(workspaceId);
-    if (createdId) setActiveNavTab("sessions");
+  const handleNewInWorkspace = (workspaceId: string) => {
+    requestNewSession({
+      workspaceId,
+      onCreated: () => setActiveNavTab("sessions"),
+    });
   };
 
   const startRename = (session: Session) => {
@@ -221,12 +281,12 @@ const LeftSidebar: React.FC = () => {
       >
         {isRunning ? (
           <Loader2
-            size={12}
+            size={14}
             className="flex-shrink-0 text-[var(--ui-accent-blue)] animate-spin"
           />
         ) : (
           <MessageSquare
-            size={12}
+            size={14}
             className={`flex-shrink-0 ${isActive ? "text-[var(--ui-accent-blue)]" : "text-[var(--ui-text-faint)]"}`}
           />
         )}
@@ -249,14 +309,14 @@ const LeftSidebar: React.FC = () => {
               }
             }}
             onBlur={() => finishRename(session.id)}
-            className="flex-1 min-w-0 h-5 px-1 text-[11px] rounded bg-[var(--ui-card-inner-bg)] text-[var(--ui-text-primary)] border border-blue-500 outline-none"
+            className="flex-1 min-w-0 h-6 px-1 text-xs rounded bg-[var(--ui-card-inner-bg)] text-[var(--ui-text-primary)] border border-blue-500 outline-none"
           />
         ) : (
           <>
-            <span className="flex-1 min-w-0 text-[11px] truncate tracking-tight">
+            <span className="flex-1 min-w-0 text-xs font-normal truncate">
               {session.title || "新的 Agent 会话"}
             </span>
-            <span className="text-[10px] text-[var(--ui-text-faint)] flex-shrink-0 group-hover/session:hidden">
+            <span className="text-[11px] text-[var(--ui-text-faint)] flex-shrink-0 group-hover/session:hidden">
               {formatRelativeTime(session.updatedAt)}
             </span>
             <div className="hidden group-hover/session:flex items-center gap-0.5 flex-shrink-0">
@@ -268,17 +328,17 @@ const LeftSidebar: React.FC = () => {
                 className="p-0.5 rounded text-[var(--ui-text-faint)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)]"
                 title="重命名"
               >
-                <Pencil size={10} />
+                <Pencil size={12} />
               </button>
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  deleteSession(session.id);
+                  requestDeleteSession(session);
                 }}
                 className="p-0.5 rounded text-[var(--ui-text-faint)] hover:text-[var(--ui-accent-rose)] hover:bg-[var(--ui-accent-rose-soft)]"
                 title="删除会话"
               >
-                <Trash2 size={10} />
+                <Trash2 size={12} />
               </button>
             </div>
           </>
@@ -302,12 +362,12 @@ const LeftSidebar: React.FC = () => {
           }`}
         >
           {isExpanded ? (
-            <ChevronDown size={12} className="text-[var(--ui-text-faint)] flex-shrink-0" />
+            <ChevronDown size={13} className="text-[var(--ui-text-faint)] flex-shrink-0" />
           ) : (
-            <ChevronRight size={12} className="text-[var(--ui-text-faint)] flex-shrink-0" />
+            <ChevronRight size={13} className="text-[var(--ui-text-faint)] flex-shrink-0" />
           )}
-          <FolderGit2 size={14} className={isCurrentActive ? "text-blue-400 flex-shrink-0" : "text-[var(--ui-accent-blue)] flex-shrink-0"} />
-          <span className="flex-1 min-w-0 text-xs truncate">{group.name}</span>
+          <FolderGit2 size={15} className={isCurrentActive ? "text-blue-400 flex-shrink-0" : "text-[var(--ui-accent-blue)] flex-shrink-0"} />
+          <span className="flex-1 min-w-0 text-xs font-medium truncate">{group.name}</span>
           {isCurrentActive && (
             <span className="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" title="当前活跃工作空间" />
           )}
@@ -342,10 +402,94 @@ const LeftSidebar: React.FC = () => {
 
   const initial = (username || "本").trim().charAt(0).toUpperCase();
 
+  if (leftSidebarCollapsed) {
+    const railBtnClass = (active: boolean) =>
+      `w-9 h-9 flex items-center justify-center rounded-lg transition-colors ${
+        active
+          ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)]"
+          : "text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)]"
+      }`;
+
+    return (
+      <aside className="relative w-14 h-full bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150 border-r border-[color:var(--ui-divider-hairline)] flex flex-col items-center flex-shrink-0 select-none">
+        {/* 顶部留出 macOS 原生红绿灯安全间距与窗口拖拽区 */}
+        <div className="h-9 w-full titlebar-drag flex-shrink-0" />
+
+        {/* 收起态：仅展示一列图标 */}
+        <div className="flex-1 w-full py-2 flex flex-col items-center gap-1.5 titlebar-no-drag">
+          <button
+            onClick={toggleLeftSidebarCollapsed}
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)] transition-colors"
+            title="展开左侧菜单"
+          >
+            <PanelLeftOpen size={16} />
+          </button>
+
+          <div className="w-6 h-px bg-[var(--ui-divider-hairline)] my-0.5" />
+
+          <button
+            onClick={handleNewTask}
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)] transition-colors"
+            title="新建任务 (⌘N)"
+          >
+            <Plus size={16} className="text-[var(--ui-text-muted)]" />
+          </button>
+
+          <button
+            onClick={() => setActiveNavTab("workspaces")}
+            className={railBtnClass(activeNavTab === "workspaces")}
+            title="工作空间"
+          >
+            <FolderGit2 size={16} />
+          </button>
+
+          <button
+            onClick={() => setActiveNavTab("tools")}
+            className={railBtnClass(activeNavTab === "tools")}
+            title="工具与技能"
+          >
+            <Wrench size={16} />
+          </button>
+        </div>
+
+        <div className="border-t border-[color:var(--ui-divider-hairline)] w-full py-2.5 flex flex-col items-center gap-2 flex-shrink-0 titlebar-no-drag">
+          <div
+            className="w-7 h-7 rounded-full bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] flex items-center justify-center text-[11px] font-bold"
+            title={username}
+          >
+            {initial}
+          </div>
+          <button
+            onClick={() => openSettings()}
+            className={railBtnClass(settingsOpen)}
+            title="设置"
+          >
+            <Settings size={15} />
+          </button>
+        </div>
+      </aside>
+    );
+  }
+
   return (
-    <aside className="w-[280px] h-full bg-[var(--ui-panel-bg)] border-r border-[color:var(--ui-divider-hairline)] flex flex-col flex-shrink-0 select-none">
+    <aside
+      ref={sidebarRef as React.RefObject<HTMLElement>}
+      style={{
+        width: liveSidebarWidth != null ? `${liveSidebarWidth}px` : leftSidebarWidth,
+        maxWidth: "40vw",
+      }}
+      className="relative h-full bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150 border-r border-[color:var(--ui-divider-hairline)] flex flex-col flex-shrink-0 select-none"
+    >
       {/* 顶部留出 macOS 原生红绿灯安全间距与窗口拖拽区 */}
-      <div className="h-9 w-full titlebar-drag flex-shrink-0" />
+      <div className="h-9 w-full titlebar-drag flex-shrink-0 flex items-center justify-end px-2">
+        <button
+          onClick={toggleLeftSidebarCollapsed}
+          className="w-6 h-6 flex items-center justify-center rounded-md text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)] transition-colors titlebar-no-drag"
+          title="收起为图标列"
+        >
+          <PanelLeftClose size={14} />
+        </button>
+      </div>
 
       <div className="p-2.5 pb-2 space-y-0.5 border-b border-[color:var(--ui-divider-hairline)] titlebar-no-drag">
         <button
@@ -396,7 +540,7 @@ const LeftSidebar: React.FC = () => {
               <SlidersHorizontal size={13} />
             </button>
             {filterOpen && (
-              <div className="absolute right-0 top-7 z-50 w-28 py-1 rounded-lg bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-[var(--ui-popover-shadow)]">
+              <div className="absolute right-0 top-7 z-50 w-28 py-1 rounded-lg bg-[var(--ui-popover-bg)] backdrop-blur-xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] shadow-[var(--ui-popover-shadow)]">
                 {[
                   { value: "active" as const, label: "活动任务" },
                   { value: "archived" as const, label: "已归档" },
@@ -470,9 +614,9 @@ const LeftSidebar: React.FC = () => {
         </div>
         <span className="flex-1 min-w-0 text-xs text-[var(--ui-text-secondary)] truncate">{username}</span>
         <button
-          onClick={() => setActiveNavTab("settings")}
+          onClick={() => openSettings()}
           className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors ${
-            activeNavTab === "settings"
+            settingsOpen
               ? "text-[var(--ui-accent-blue)] bg-[var(--ui-accent-blue-soft)]"
               : "text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)]"
           }`}
@@ -481,6 +625,20 @@ const LeftSidebar: React.FC = () => {
           <Settings size={15} />
         </button>
       </div>
+
+      {/* 右侧拖拽调宽手柄（双击恢复默认 280px） */}
+      <div
+        onPointerDown={startSidebarResize}
+        onDoubleClick={() => setLeftSidebarWidth(280)}
+        className={`absolute right-0 top-0 bottom-0 w-2.5 translate-x-1/2 cursor-col-resize z-40 titlebar-no-drag transition-colors ${
+          sidebarResizing
+            ? "bg-[var(--ui-accent-blue)]/60"
+            : "hover:bg-[var(--ui-accent-blue-soft)]"
+        }`}
+        title="拖拽调整侧边栏宽度（双击恢复默认）"
+      />
+      {deleteSessionModal}
+      {newSessionModal}
     </aside>
   );
 };

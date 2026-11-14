@@ -1,21 +1,43 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
+import { Loader2 } from 'lucide-react';
 import LeftSidebar from '@/components/navigation/LeftSidebar';
 import { useAppStore } from '@/stores/appStore';
 import ChatView from '@/pages/ChatView';
-import ToolsView from '@/pages/ToolsView';
-import WorkspacesView from '@/pages/WorkspacesView';
-import SettingsView from '@/pages/SettingsView';
+import SettingsModal from '@/components/settings/SettingsModal';
+
+const ToolsView = lazy(() => import('@/pages/ToolsView'));
+const WorkspacesView = lazy(() => import('@/pages/WorkspacesView'));
+const SettingsView = lazy(() => import('@/pages/SettingsView'));
+
+const ViewFallback: React.FC = () => (
+  <div className='flex-1 h-full flex items-center justify-center text-xs text-[var(--ui-text-muted)] gap-2'>
+    <Loader2 size={15} className='animate-spin text-[var(--ui-accent-blue)]' />
+    <span>加载视图中...</span>
+  </div>
+);
 
 const MainContent: React.FC = () => {
-  const { activeNavTab } = useAppStore();
+  const activeNavTab = useAppStore((s) => s.activeNavTab);
 
   switch (activeNavTab) {
     case 'tools':
-      return <ToolsView />;
+      return (
+        <Suspense fallback={<ViewFallback />}>
+          <ToolsView />
+        </Suspense>
+      );
     case 'workspaces':
-      return <WorkspacesView />;
+      return (
+        <Suspense fallback={<ViewFallback />}>
+          <WorkspacesView />
+        </Suspense>
+      );
     case 'settings':
-      return <SettingsView />;
+      return (
+        <Suspense fallback={<ViewFallback />}>
+          <SettingsView />
+        </Suspense>
+      );
     case 'sessions':
     default:
       return <ChatView />;
@@ -32,6 +54,9 @@ const Layout: React.FC = () => {
       <main className='flex h-full flex-1 min-w-0 overflow-hidden'>
         <MainContent />
       </main>
+
+      {/* 设置弹出层：覆盖在当前视图之上，Esc / 点击遮罩 / 右上角关闭 */}
+      <SettingsModal />
     </div>
   );
 };

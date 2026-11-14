@@ -1,24 +1,29 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '@/stores/chatStore';
 
 export const ContextCard: React.FC = () => {
   const [isOpen, setIsOpen] = useState(true);
-  const { contextMetrics, messages, activeSessionId, lastCompaction } = useChatStore();
-
-  const activeMsgs = activeSessionId ? messages[activeSessionId] || [] : [];
+  const { contextMetrics, activeMsgsCount, lastCompaction } = useChatStore(
+    useShallow((s) => ({
+      contextMetrics: s.contextMetrics,
+      activeMsgsCount: s.activeSessionId ? s.messages[s.activeSessionId]?.length || 0 : 0,
+      lastCompaction: s.lastCompaction,
+    }))
+  );
 
   // 如果主进程尚未推送指标，提供基于当前消息数量的初始默认估算
   const metrics = contextMetrics || {
     totalLimit: 1000000,
     totalLimitFormatted: '1M',
-    usedTokens: Math.max(120, activeMsgs.length * 80),
-    usedTokensFormatted: activeMsgs.length > 0 ? `${(activeMsgs.length * 0.1).toFixed(1)}k` : '0.1k',
-    usedPercent: activeMsgs.length > 0 ? Math.min(100, parseFloat(((activeMsgs.length * 80 / 1000000) * 100).toFixed(1))) : 0.1,
+    usedTokens: Math.max(120, activeMsgsCount * 80),
+    usedTokensFormatted: activeMsgsCount > 0 ? `${(activeMsgsCount * 0.1).toFixed(1)}k` : '0.1k',
+    usedPercent: activeMsgsCount > 0 ? Math.min(100, parseFloat(((activeMsgsCount * 80 / 1000000) * 100).toFixed(1))) : 0.1,
     breakdown: {
       messages: {
-        tokens: activeMsgs.length * 60,
-        formatted: `${(activeMsgs.length * 0.06).toFixed(1)}k`,
+        tokens: activeMsgsCount * 60,
+        formatted: `${(activeMsgsCount * 0.06).toFixed(1)}k`,
         percent: 0.1,
         color: '#3b82f6',
         label: 'Messages',
@@ -64,7 +69,7 @@ export const ContextCard: React.FC = () => {
   ];
 
   return (
-    <div className='bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-hairline)] rounded-2xl overflow-hidden transition-all duration-200 select-none titlebar-no-drag'>
+    <div className='border-b border-[color:var(--ui-divider-hairline)] transition-colors select-none titlebar-no-drag last:border-b-0'>
       {/* 头部标题与折叠开关 */}
       <button
         onClick={() => setIsOpen(!isOpen)}
@@ -147,6 +152,35 @@ export const ContextCard: React.FC = () => {
               </div>
             ))}
           </div>
+
+          {/* 本轮模型用量与成本 (原生 Anthropic/兼容端点 usage 归一化后) */}
+          {metrics.usage && (
+            <div className='flex flex-col gap-1 pt-2.5 border-t border-[color:var(--ui-divider-hairline)] text-[10.5px] font-mono text-[var(--ui-text-muted)]'>
+              <div className='flex items-center justify-between'>
+                <span>本轮 Tokens</span>
+                <span className='text-[var(--ui-text-secondary)]'>
+                  ↑{metrics.usage.prompt_tokens.toLocaleString()} / ↓
+                  {metrics.usage.completion_tokens.toLocaleString()}
+                </span>
+              </div>
+              {metrics.usage.cached_tokens > 0 && (
+                <div className='flex items-center justify-between'>
+                  <span>Prompt Cache 命中</span>
+                  <span className='text-[var(--ui-accent-emerald)]'>
+                    {metrics.usage.cached_tokens.toLocaleString()} tokens
+                  </span>
+                </div>
+              )}
+              {typeof metrics.costUsd === 'number' && metrics.costUsd > 0 && (
+                <div className='flex items-center justify-between'>
+                  <span>本轮成本</span>
+                  <span className='text-[var(--ui-accent-amber)]'>
+                    ${metrics.costUsd.toFixed(4)}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

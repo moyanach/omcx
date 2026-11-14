@@ -1,4 +1,5 @@
 import React from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   FileDiff,
   Terminal,
@@ -8,17 +9,23 @@ import {
   FileText,
   FileCode,
   FolderOpen,
+  Bot,
+  GitBranch,
 } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 
 interface BrowserNewTabToolsProps {
   onOpenTool: (toolId: "changes" | "terminal" | "files") => void;
   onOpenUrl: (url: string, title?: string, filePath?: string) => void;
+  onOpenAutomation?: () => void;
+  onOpenGitGraph?: () => void;
 }
 
 export const BrowserNewTabTools: React.FC<BrowserNewTabToolsProps> = ({
   onOpenTool,
   onOpenUrl,
+  onOpenAutomation,
+  onOpenGitGraph,
 }) => {
   const {
     sessions,
@@ -30,7 +37,19 @@ export const BrowserNewTabTools: React.FC<BrowserNewTabToolsProps> = ({
     autoOpenHtmlOutputs,
     setAutoOpenHtmlOutputs,
     openFileInWorkbench,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      workspaces: s.workspaces,
+      gitStatus: s.gitStatus,
+      outputs: s.outputs,
+      toolCallsBySession: s.toolCallsBySession,
+      autoOpenHtmlOutputs: s.autoOpenHtmlOutputs,
+      setAutoOpenHtmlOutputs: s.setAutoOpenHtmlOutputs,
+      openFileInWorkbench: s.openFileInWorkbench,
+    }))
+  );
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const primaryWorkDir = activeSession?.workDir || "";
@@ -162,6 +181,52 @@ export const BrowserNewTabTools: React.FC<BrowserNewTabToolsProps> = ({
             ^⇧G
           </span>
         </div>
+
+        {/* 卡片 3.5: Git 多分支图谱 (只读视图) */}
+        <div
+          onClick={() => onOpenGitGraph?.()}
+          className="flex items-center justify-between p-3.5 rounded-xl bg-[var(--ui-card-bg)] hover:bg-[var(--ui-block-hover-bg)] border border-[color:var(--ui-border-hairline)] cursor-pointer transition-all duration-150 group"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-[var(--ui-accent-blue-soft)] flex items-center justify-center text-[var(--ui-accent-blue)] border border-[color:var(--ui-accent-blue-border)]">
+              <GitBranch size={16} />
+            </div>
+            <div className="flex flex-col">
+              <span className="font-semibold text-xs text-[var(--ui-text-primary)]">
+                Git 多分支提交图谱 (Git Graph)
+              </span>
+              <span className="text-[11px] text-[var(--ui-text-muted)]">
+                只读查看全部分支提交时间线、合并分叉拓扑与分支/远程胶囊
+              </span>
+            </div>
+          </div>
+          <span className="px-2 py-0.5 rounded-md bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] font-mono text-[11px] border border-[color:var(--ui-border-hairline)]">
+            只读
+          </span>
+        </div>
+
+        {/* 卡片 4: 浏览器自动化 (内置 Chromium + 视觉回归) */}
+        <div
+          onClick={() => onOpenAutomation?.()}
+          className="flex items-center justify-between p-3.5 rounded-xl bg-[var(--ui-card-bg)] hover:bg-[var(--ui-block-hover-bg)] border border-[color:var(--ui-border-hairline)] cursor-pointer transition-all duration-150 group"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-[var(--ui-accent-violet-soft)] flex items-center justify-center text-[var(--ui-accent-violet)] border border-[color:var(--ui-accent-violet-border)]">
+              <Bot size={16} />
+            </div>
+            <div className="flex flex-col">
+              <span className="font-semibold text-xs text-[var(--ui-text-primary)]">
+                浏览器自动化
+              </span>
+              <span className="text-[11px] text-[var(--ui-text-muted)]">
+                内置 Chromium 隐藏窗口 · 页面操作、截图与像素级视觉回归
+              </span>
+            </div>
+          </div>
+          <span className="px-2 py-0.5 rounded-md bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] font-mono text-[11px] border border-[color:var(--ui-border-hairline)]">
+            Agent
+          </span>
+        </div>
       </div>
 
       {/* 当前会话生成的产物列表 (Outputs 快速预览) */}
@@ -182,7 +247,11 @@ export const BrowserNewTabTools: React.FC<BrowserNewTabToolsProps> = ({
                   key={item.id}
                   onClick={() => {
                     if (isHtml) {
-                      const localUrl = `local-media://local${encodeURI(item.filePath)}`;
+                      // .svg 仍按图片文档打开；.html/.htm 需显式 render 参数才允许按文档渲染
+                      const isHtmlDoc = lower.endsWith(".html") || lower.endsWith(".htm");
+                      const localUrl = `local-media://local${encodeURI(item.filePath)}${
+                        isHtmlDoc ? "?render=1" : ""
+                      }`;
                       onOpenUrl(localUrl, item.name, item.filePath);
                     } else {
                       openFileInWorkbench(item.filePath);

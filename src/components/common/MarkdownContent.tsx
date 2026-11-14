@@ -13,13 +13,14 @@ import {
   Loader2,
   Check,
 } from 'lucide-react';
-import { parseMessageContent, parseFileReference } from '@/lib/messageParser';
+import { healStreamingMarkdown, parseFileReference } from '@/lib/messageParser';
 import CodeBlock from './CodeBlock';
 import { useChatStore } from '@/stores/chatStore';
 
 interface Props {
   content: string;
   className?: string;
+  // 兼容旧调用点；思考内容已独立渲染，不再由 MarkdownContent 解析
   hideThinking?: boolean;
 }
 
@@ -31,18 +32,34 @@ export const ThinkingBlock: React.FC<{
   isStreaming: boolean;
   className?: string;
 }> = memo(({ thoughts, isStreaming, className = 'mb-1.5' }) => {
-  const [isOpen, setIsOpen] = useState(true);
+  // 历史消息默认折叠：避免一次挂载多个数万字思考块造成排版/DOM 风暴；
+  // 仅正在流式生成的思考默认展开。
+  const [isOpen, setIsOpen] = useState(isStreaming);
+  const [showFullHistory, setShowFullHistory] = useState(false);
 
   if (thoughts.length === 0) return null;
   const combinedThought = thoughts.join('\n\n');
+  const totalChars = combinedThought.length;
+
+  // 超长思考排版性能保护：超过 12,000 字时，流式期间仅挂载末尾活跃区，避免十万级字符单一文本节点引发排版引擎重排风暴
+  const THRESHOLD = 12000;
+  const TAIL_CHARS = 8000;
+  const isHuge = totalChars > THRESHOLD;
+  const shouldTruncate = isHuge && !showFullHistory && isStreaming;
+
+  const visibleText = shouldTruncate
+    ? combinedThought.slice(-TAIL_CHARS)
+    : combinedThought;
+  const hiddenCount = shouldTruncate ? totalChars - TAIL_CHARS : 0;
 
   return (
     <div
-      className={`${className} w-full rounded-xl border border-[color:var(--ui-border-hairline)] hover:border-[color:var(--ui-border-subtle)] bg-[var(--ui-block-bg)] overflow-hidden select-none transition-colors`}
+      style={{ contain: 'content' }}
+      className={`${className} w-full select-none`}
     >
       <div
         onClick={() => setIsOpen((v) => !v)}
-        className='px-3.5 py-2 flex items-center justify-between cursor-pointer hover:bg-[var(--ui-block-hover-bg)] transition-colors'
+        className='py-1 flex items-center justify-between cursor-pointer text-[var(--ui-text-muted)] hover:text-[var(--ui-text-secondary)] transition-colors'
       >
         <div className='flex items-center gap-2 text-xs'>
           {isStreaming ? (
@@ -54,7 +71,7 @@ export const ThinkingBlock: React.FC<{
             {isStreaming ? '正在深度思考与推演...' : '已深度思考'}
           </span>
           <span className='text-[10px] font-mono text-[var(--ui-text-faint)]'>
-            ({combinedThought.length} 字)
+            ({totalChars.toLocaleString()} 字)
           </span>
         </div>
         <div className='flex items-center gap-1 text-[11px] text-[var(--ui-text-faint)] font-mono'>
@@ -64,8 +81,108 @@ export const ThinkingBlock: React.FC<{
       </div>
 
       {isOpen && (
-        <div className='px-3.5 py-2.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-body-bg)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar'>
-          {combinedThought}
+        <div
+          style={{ contain: 'content' }}
+          className='mt-1 ml-1 pl-3 pr-2 border-l border-[color:var(--ui-divider-hairline)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar flex flex-col gap-2'
+        >
+          {shouldTruncate && (
+            <div className='sticky top-0 z-10 -mt-1 py-1 px-2.5 rounded-lg bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] text-[var(--ui-text-faint)] flex items-center justify-between shadow-sm select-none'>
+              <span>⚡️ 已动态折叠前序 {hiddenCount.toLocaleString()} 字早期推演（实时渲染末尾活跃区）</span>
+              <button
+                type='button'
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowFullHistory(true);
+                }}
+                className='text-[var(--ui-accent-blue)] hover:underline ml-2 flex-shrink-0 cursor-pointer'
+              >
+                查看完整
+              </button>
+            </div>
+          )}
+          <div>{visibleText}</div>
+        </div>
+      )}
+    </div>
+  );
+});
+
+/**
+ * 历史思考块（按需拉取）：
+ * 消息正文经 IPC 瘦身后不再携带数万字思考内容，展开时才向主进程请求原文。
+ */
+export const LazyThinkingBlock: React.FC<{
+  messageId: string;
+  chars: number;
+  isStreaming?: boolean;
+  className?: string;
+}> = memo(({ messageId, chars, isStreaming = false, className = 'mb-1.5' }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [text, setText] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleToggle = async () => {
+    const nextOpen = !isOpen;
+    setIsOpen(nextOpen);
+    if (!nextOpen || text !== null || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const value = await (window as any).electronAPI?.dbGetMessageReasoning?.(messageId);
+      setText(String(value || ''));
+    } catch (err: any) {
+      setError(err?.message || '思考内容加载失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div
+      data-testid='lazy-thinking-block'
+      style={{ contain: 'content' }}
+      className={`${className} w-full select-none`}
+    >
+      <div
+        data-testid='lazy-thinking-header'
+        onClick={handleToggle}
+        className='py-1 flex items-center justify-between cursor-pointer text-[var(--ui-text-muted)] hover:text-[var(--ui-text-secondary)] transition-colors'
+      >
+        <div className='flex items-center gap-2 text-xs'>
+          {isStreaming ? (
+            <Loader2 size={13} className='text-[var(--ui-accent-purple)] animate-spin' />
+          ) : (
+            <BrainCircuit size={13} className='text-[var(--ui-accent-purple)]' />
+          )}
+          <span className='font-medium text-[var(--ui-text-secondary)]'>
+            {isStreaming ? '正在深度思考与推演...' : '已深度思考'}
+          </span>
+          <span className='text-[10px] font-mono text-[var(--ui-text-faint)]'>
+            ({Number(chars || 0).toLocaleString()} 字)
+          </span>
+        </div>
+        <div className='flex items-center gap-1 text-[11px] text-[var(--ui-text-faint)] font-mono'>
+          <span>{isOpen ? '收起' : '展开'}</span>
+          {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </div>
+      </div>
+
+      {isOpen && (
+        <div
+          style={{ contain: 'content' }}
+          className='mt-1 ml-1 pl-3 pr-2 border-l border-[color:var(--ui-divider-hairline)] text-xs text-[var(--ui-text-muted)] leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto custom-scrollbar'
+        >
+          {loading ? (
+            <div className='flex items-center gap-1.5 text-[11px] text-[var(--ui-text-faint)]'>
+              <Loader2 size={11} className='animate-spin' />
+              正在加载思考内容…
+            </div>
+          ) : error ? (
+            <div className='text-[11px] text-[var(--ui-accent-rose)]'>{error}</div>
+          ) : (
+            <div>{text || '（无思考内容）'}</div>
+          )}
         </div>
       )}
     </div>
@@ -103,7 +220,7 @@ const FileReferencePill: React.FC<{
     }
 
     if (isAbs || workDir) {
-      useChatStore.getState().openFileInWorkbench(filePath, { line: lineStart });
+      useChatStore.getState().openFileInWorkbench(filePath, { line: lineStart, lineEnd });
     } else {
       navigator.clipboard.writeText(raw);
       setCopied(true);
@@ -116,7 +233,7 @@ const FileReferencePill: React.FC<{
       type='button'
       onClick={handleClick}
       className='inline-flex items-center gap-1 px-1.5 py-0.5 mx-0.5 rounded-md bg-[var(--ui-accent-blue-soft)] hover:opacity-85 border border-[color:var(--ui-accent-blue-border)] text-[var(--ui-accent-blue)] font-mono text-[12px] leading-tight align-baseline transition-all cursor-pointer'
-      title={`点击在右侧工作台打开 ${filePath}${lineStart ? ` 并跳转到第 ${lineStart} 行` : ''}（按住 ⌘ 点击可在 Finder 中定位）`}
+      title={`点击在右侧工作台打开 ${filePath}${lineStart ? ` 并定位至第 ${lineStart}${lineEnd ? `-${lineEnd}` : ''} 行` : ''}（按住 ⌘ 点击可在 Finder 中定位）`}
     >
       {copied ? (
         <Check size={11} className='text-[var(--ui-accent-emerald)] flex-shrink-0' />
@@ -159,18 +276,14 @@ const SANITIZE_SCHEMA = {
   },
 };
 
-export const MarkdownContent: React.FC<Props> = memo(({ content, className = '', hideThinking = false }) => {
-  const { thinkingBlocks, isThinkingStreaming, markdownContent } = useMemo(
-    () => parseMessageContent(content),
+export const MarkdownContent: React.FC<Props> = memo(({ content, className = '' }) => {
+  const markdownContent = useMemo(
+    () => healStreamingMarkdown(String(content || '')),
     [content]
   );
 
   return (
     <div className={`markdown-body ${className} text-[var(--ui-text-secondary)]`}>
-      {!hideThinking && thinkingBlocks.length > 0 && (
-        <ThinkingBlock thoughts={thinkingBlocks} isStreaming={isThinkingStreaming} />
-      )}
-
       {markdownContent && (
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}

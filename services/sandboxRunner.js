@@ -237,7 +237,7 @@ function detectSandboxViolation(exitCode, stdout = "", stderr = "", errorMsg = "
 /**
  * 执行 Shell 命令（支持 OS 沙箱模式与非沙箱模式）
  */
-function runSandboxedCommand(
+async function runSandboxedCommand(
   command,
   {
     cwd,
@@ -249,55 +249,71 @@ function runSandboxedCommand(
     sessionId = null,
   } = {}
 ) {
-  return new Promise((resolve) => {
-    if (abortSignal?.aborted) {
-      return resolve({
+  if (abortSignal?.aborted) {
+    return {
+      success: false,
+      exitCode: -1,
+      stdout: "",
+      stderr: "",
+      sandboxed: false,
+      error: "命令执行已被用户取消",
+    };
+  }
+
+  const canUseSeatbelt = useSandbox && isMacOsSeatbeltAvailable();
+  let profilePath = null;
+
+  // 安全加固：请求沙箱但内核沙箱不可用时必须拒绝执行（fail-closed），
+  // 绝不允许静默降级为宿主机裸执行。
+  if (useSandbox && !canUseSeatbelt) {
+    return {
+      success: false,
+      exitCode: -1,
+      stdout: "",
+      stderr: "",
+      sandboxed: false,
+      error: "当前系统未提供可用的 macOS Seatbelt 沙箱，已拒绝执行命令。如需在无沙箱环境运行，请显式切换到「完全访问」模式。",
+    };
+  }
+
+  if (canUseSeatbelt) {
+    try {
+      const profileContent = buildSeatbeltProfile({
+        writeMode,
+        writableFolders,
+        sessionId,
+      });
+      const tmpDir = resolveRealPathSafe(os.tmpdir()) || "/tmp";
+      const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      profilePath = path.join(tmpDir, `omcx-sb-${uniqueId}.sb`);
+      await fs.promises.writeFile(profilePath, profileContent, { encoding: "utf-8", mode: 0o600 });
+    } catch (err) {
+      // 安全加固：策略文件生成失败同样 fail-closed，禁止降级为无沙箱执行
+      return {
         success: false,
         exitCode: -1,
         stdout: "",
         stderr: "",
         sandboxed: false,
-        error: "命令执行已被用户取消",
-      });
+        error: `安全沙箱策略初始化失败，已拒绝执行命令: ${err.message || String(err)}`,
+      };
     }
+  }
 
-    const canUseSeatbelt = useSandbox && isMacOsSeatbeltAvailable();
-    let profilePath = null;
-
-    if (canUseSeatbelt) {
-      try {
-        const profileContent = buildSeatbeltProfile({
-          writeMode,
-          writableFolders,
-          sessionId,
-        });
-        const tmpDir = resolveRealPathSafe(os.tmpdir()) || "/tmp";
-        const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        profilePath = path.join(tmpDir, `omcx-sb-${uniqueId}.sb`);
-        fs.writeFileSync(profilePath, profileContent, { encoding: "utf-8", mode: 0o600 });
-      } catch (err) {
-        // 如果生成临时策略失败，安全降级并记录
-        profilePath = null;
-      }
-    }
-
+  return new Promise((resolve) => {
     const cleanupProfile = () => {
       if (profilePath) {
-        try {
-          if (fs.existsSync(profilePath)) {
-            fs.unlinkSync(profilePath);
-          }
-        } catch {
-          // 忽略临时文件清理异常
-        }
+        const target = profilePath;
         profilePath = null;
+        fs.promises.unlink(target).catch(() => {
+          // 忽略临时文件清理异常
+        });
       }
     };
 
     const userShell = process.env.SHELL || "/bin/zsh";
-    const env = buildSanitizedShellEnv(process.env, {
-      stripSecrets: Boolean(canUseSeatbelt),
-    });
+    // 安全加固：无论沙箱是否实际启用，Agent 命令都不得继承宿主机凭据环境变量
+    const env = buildSanitizedShellEnv(process.env, { stripSecrets: true });
 
     let child;
     try {

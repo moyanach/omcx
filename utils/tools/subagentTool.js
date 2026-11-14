@@ -1,4 +1,4 @@
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 const { z } = require("zod");
 const subagentService = require("../../services/subagentService");
 const storageService = require("../../services/storageService");

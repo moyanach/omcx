@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import {
   FolderGit2,
   Plus,
@@ -8,10 +9,10 @@ import {
   Archive,
   ArchiveRestore,
   Trash2,
-  FolderOpen,
-  Check,
 } from 'lucide-react';
 import { useChatStore, Session } from '@/stores/chatStore';
+import { useDeleteSessionWithWorktree } from './DeleteSessionModal';
+import { useNewSessionModal } from './NewSessionModal';
 
 export interface WorkspaceGroup {
   path: string;
@@ -24,12 +25,19 @@ export const WorkspaceSessionsPanel: React.FC = () => {
     sessions,
     activeSessionId,
     setActiveSession,
-    addSession,
     saveWorkspace,
-    setSessionWorkDir,
     archiveSession,
-    deleteSession,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      setActiveSession: s.setActiveSession,
+      saveWorkspace: s.saveWorkspace,
+      archiveSession: s.archiveSession,
+    }))
+  );
+  const { requestDeleteSession, deleteSessionModal } = useDeleteSessionWithWorktree();
+  const { requestNewSession, newSessionModal } = useNewSessionModal();
 
   const [expandedPaths, setExpandedPaths] = useState<Record<string, boolean>>({});
 
@@ -80,24 +88,24 @@ export const WorkspaceSessionsPanel: React.FC = () => {
           name: folderName,
           folders: [{ path: dir, name: folderName, isPrimary: true }],
         });
-        await addSession({ workspaceId: wsId, workDir: dir });
+        requestNewSession({ workspaceId: wsId, workDir: dir });
       }
     }
   };
 
   return (
-    <div className='w-[270px] h-full bg-[#141414] border-r border-[#222222] flex flex-col flex-shrink-0 select-none'>
+    <div className='w-[270px] h-full bg-[var(--ui-panel-bg)] border-r border-[color:var(--ui-divider-hairline)] flex flex-col flex-shrink-0 select-none'>
       {/* 顶部标题与新建工作空间按钮 */}
-      <div className='h-12 px-3.5 border-b border-[#202020] flex items-center justify-between flex-shrink-0'>
+      <div className='h-12 px-3.5 border-b border-[color:var(--ui-divider-hairline)] flex items-center justify-between flex-shrink-0'>
         <div className='flex items-center gap-2'>
-          <FolderGit2 size={15} className='text-blue-400' />
-          <span className='text-xs font-semibold text-neutral-200 tracking-wide uppercase'>
+          <FolderGit2 size={15} className='text-[var(--ui-accent-blue)]' />
+          <span className='text-xs font-semibold text-[var(--ui-text-primary)] tracking-wide uppercase'>
             空间会话树
           </span>
         </div>
         <button
           onClick={handleAddWorkspace}
-          className='w-6 h-6 flex items-center justify-center rounded-lg bg-[#1f1f1f] text-neutral-300 hover:text-white hover:bg-[#282828] border border-[#2d2d2d] transition-colors'
+          className='w-6 h-6 flex items-center justify-center rounded-lg bg-[var(--ui-card-inner-bg)] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)] border border-[color:var(--ui-border-hairline)] transition-colors'
           title='导入新工作空间'
         >
           <Plus size={13} />
@@ -113,33 +121,33 @@ export const WorkspaceSessionsPanel: React.FC = () => {
           return (
             <div
               key={ws.path}
-              className='rounded-xl bg-[#1a1a1a] border border-[#262626] overflow-hidden transition-all'
+              className='rounded-xl bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] overflow-hidden transition-all'
             >
               {/* 工作空间头部项 */}
               <div
                 onClick={() => toggleExpand(ws.path)}
-                className={`px-3 py-2 flex items-center justify-between cursor-pointer hover:bg-white/[0.03] transition-colors ${
-                  hasActiveSession ? 'bg-blue-500/[0.03]' : ''
+                className={`px-3 py-2 flex items-center justify-between cursor-pointer hover:bg-[var(--ui-block-hover-bg)] transition-colors ${
+                  hasActiveSession ? 'bg-[var(--ui-accent-blue-soft)]' : ''
                 }`}
               >
                 <div className='flex items-center gap-2 min-w-0 pr-1'>
-                  <div className='text-neutral-500'>
+                  <div className='text-[var(--ui-text-muted)]'>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   </div>
-                  <span className='font-semibold text-xs text-neutral-200 truncate'>
+                  <span className='font-semibold text-xs text-[var(--ui-text-primary)] truncate'>
                     {ws.name}
                   </span>
                 </div>
-                <span className='text-[10px] font-mono text-neutral-500 bg-[#222] px-1.5 py-0.5 rounded border border-[#2d2d2d] flex-shrink-0'>
+                <span className='text-[10px] font-mono text-[var(--ui-text-muted)] bg-[var(--ui-chip-bg)] px-1.5 py-0.5 rounded border border-[color:var(--ui-border-hairline)] flex-shrink-0'>
                   {ws.sessions.length}
                 </span>
               </div>
 
               {/* 展开展示该工作空间下的所有会话 (支持归档、删除) */}
               {isExpanded && (
-                <div className='border-t border-[#232323] bg-[#161616] p-1.5 flex flex-col gap-1'>
+                <div className='border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-bg)] p-1.5 flex flex-col gap-1'>
                   {ws.sessions.length === 0 ? (
-                    <div className='py-2 text-center text-[10px] text-neutral-500'>
+                    <div className='py-2 text-center text-[10px] text-[var(--ui-text-faint)]'>
                       暂无下属会话
                     </div>
                   ) : (
@@ -152,20 +160,20 @@ export const WorkspaceSessionsPanel: React.FC = () => {
                           onClick={() => setActiveSession(session.id)}
                           className={`group flex items-center justify-between px-2.5 py-1.5 rounded-lg cursor-pointer transition-all border ${
                             isActive
-                              ? 'bg-blue-500/10 text-blue-300 border-blue-500/25 font-medium'
-                              : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.03] border-transparent'
+                              ? 'bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border-[color:var(--ui-accent-blue-border)] font-medium'
+                              : 'text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)] border-transparent'
                           }`}
                         >
                           <div className='flex items-center gap-2 min-w-0 pr-2'>
                             <MessageSquare
                               size={12}
-                              className={isActive ? 'text-blue-400' : 'text-neutral-500'}
+                              className={isActive ? 'text-[var(--ui-accent-blue)]' : 'text-[var(--ui-text-muted)]'}
                             />
                             <span className='text-xs truncate tracking-tight'>
                               {session.title || '新会话'}
                             </span>
                             {session.archived && (
-                              <span className='px-1 py-0.2 rounded text-[9px] bg-neutral-800 text-neutral-400 flex-shrink-0'>
+                              <span className='px-1 py-0.2 rounded text-[9px] bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] flex-shrink-0 border border-[color:var(--ui-border-hairline)]'>
                                 归档
                               </span>
                             )}
@@ -178,7 +186,7 @@ export const WorkspaceSessionsPanel: React.FC = () => {
                                 e.stopPropagation();
                                 archiveSession(session.id, !session.archived);
                               }}
-                              className='p-1 rounded text-neutral-500 hover:text-neutral-200 hover:bg-white/[0.08] transition-colors'
+                              className='p-1 rounded text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)] transition-colors'
                               title={session.archived ? '取消归档' : '归档会话'}
                             >
                               {session.archived ? (
@@ -190,7 +198,7 @@ export const WorkspaceSessionsPanel: React.FC = () => {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                deleteSession(session.id);
+                                requestDeleteSession(session);
                               }}
                               className='p-1 rounded text-neutral-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors'
                               title='删除会话'
@@ -208,6 +216,8 @@ export const WorkspaceSessionsPanel: React.FC = () => {
           );
         })}
       </div>
+      {deleteSessionModal}
+      {newSessionModal}
     </div>
   );
 };
