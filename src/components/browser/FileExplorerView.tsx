@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   Folder,
   FolderOpen,
@@ -215,7 +216,15 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     workspaces,
     setPendingMentionInsert,
     openUrlInWorkbench,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      workspaces: s.workspaces,
+      setPendingMentionInsert: s.setPendingMentionInsert,
+      openUrlInWorkbench: s.openUrlInWorkbench,
+    }))
+  );
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const primaryWorkDir = activeSession?.workDir || "";

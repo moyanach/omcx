@@ -206,9 +206,8 @@ function getSensitiveBlacklistPaths() {
     ...omcxDbFiles,
     // 客户端自身核心配置（包含明文 API Key 与全局 MCP 配置）
     ...omcxConfigFiles,
-    // 会话历史与附件目录：与文件工具的 checkSensitivePath 保持一致，
-    // 防止 run_command 绕过 read_file 的会话数据保护直接 cat 全部历史
-    ...omcxHomes.map((home) => path.join(home, "sessions")),
+    // 注：~/.omcx/sessions 交由下方 checkSensitivePath 第 2 步精细校验，
+    // 严格保护会话历史/元数据文件，同时放行 attachments 附件目录预览与只读读取
     // 宿主机 SSH / 云厂商 / GPG / 密钥链凭据
     path.join(USER_HOME, ".ssh"),
     path.join(USER_HOME, ".aws"),

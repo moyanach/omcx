@@ -11,7 +11,7 @@
 
 const path = require("path");
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 const { resolveWorkspacePath, DEFAULT_ROOT } = require("./pathResolver");
 const {
   PERMISSION_MODES,

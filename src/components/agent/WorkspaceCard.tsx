@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import {
   FolderGit2,
   ChevronDown,
   ChevronRight,
   FolderOpen,
   GitBranch,
-  ExternalLink,
   Plus,
-  Check,
   Folder,
   Edit3,
   Layers,
@@ -32,16 +31,30 @@ export const WorkspaceCard: React.FC = () => {
   const {
     activeSessionId,
     activeWorkspaceId,
-    setActiveWorkspace,
     sessions,
     setSessionWorkDir,
     gitStatus,
+    gitRevision,
     refreshGitStatus,
     workspaces,
     fetchWorkspaces,
     saveWorkspace,
     deleteWorkspace,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      activeSessionId: s.activeSessionId,
+      activeWorkspaceId: s.activeWorkspaceId,
+      sessions: s.sessions,
+      setSessionWorkDir: s.setSessionWorkDir,
+      gitStatus: s.gitStatus,
+      gitRevision: s.gitRevision,
+      refreshGitStatus: s.refreshGitStatus,
+      workspaces: s.workspaces,
+      fetchWorkspaces: s.fetchWorkspaces,
+      saveWorkspace: s.saveWorkspace,
+      deleteWorkspace: s.deleteWorkspace,
+    }))
+  );
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const currentWorkDir = activeSession?.workDir;
@@ -49,10 +62,50 @@ export const WorkspaceCard: React.FC = () => {
   const [folderGitMap, setFolderGitMap] = useState<
     Record<string, { isGit: boolean; branch?: string }>
   >({});
+  const [worktreeInfo, setWorktreeInfo] = useState<{
+    isManagedWorktree: boolean;
+    path?: string;
+    branch?: string;
+    sourceBranch?: string;
+    repoRoot?: string;
+    groupEntries?: Array<{
+      name: string;
+      sourcePath: string;
+      repoRoot: string;
+      worktreePath: string;
+      branch: string;
+      sourceBranch?: string;
+      isPrimary?: boolean;
+    }>;
+  } | null>(null);
 
   useEffect(() => {
     fetchWorkspaces();
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    if (!currentWorkDir || !window.electronAPI?.inspectManagedWorktree) {
+      setWorktreeInfo(null);
+      return;
+    }
+    window.electronAPI
+      .inspectManagedWorktree(currentWorkDir, activeSessionId || '')
+      .then((res: any) => {
+        if (!alive) return;
+        if (res?.success && (res.isManagedWorktree || (Array.isArray(res.groupEntries) && res.groupEntries.length > 0))) {
+          setWorktreeInfo(res);
+        } else {
+          setWorktreeInfo(null);
+        }
+      })
+      .catch(() => {
+        if (alive) setWorktreeInfo(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [currentWorkDir, activeSessionId]);
 
   // 匹配当前会话绑定的工作空间 (优先通过 session.workspaceId 或 activeWorkspaceId，降级匹配目录)
   const currentWorkspace = workspaces.find(
@@ -65,29 +118,33 @@ export const WorkspaceCard: React.FC = () => {
   // 异步获取各工作空间目录当前的 Git 分支状态
   useEffect(() => {
     let alive = true;
-    if (currentWorkspace?.folders && window.electronAPI?.getWorkspaceGitStatus) {
-      Promise.all(
-        currentWorkspace.folders.map(async (folder) => {
-          try {
-            const status = await window.electronAPI.getWorkspaceGitStatus(folder.path);
-            return [folder.path, status] as const;
-          } catch {
-            return [folder.path, { isGit: false }] as const;
+    const loadFolderGitBranches = () => {
+      if (currentWorkspace?.folders && window.electronAPI?.getWorkspaceGitStatus) {
+        Promise.all(
+          currentWorkspace.folders.map(async (folder) => {
+            try {
+              const status = await window.electronAPI.getWorkspaceGitStatus(folder.path);
+              return [folder.path, status] as const;
+            } catch {
+              return [folder.path, { isGit: false }] as const;
+            }
+          })
+        ).then((entries) => {
+          if (!alive) return;
+          const nextMap: Record<string, { isGit: boolean; branch?: string }> = {};
+          for (const [folderPath, status] of entries) {
+            nextMap[folderPath] = { isGit: !!status?.isGit, branch: status?.branch };
           }
-        })
-      ).then((entries) => {
-        if (!alive) return;
-        const nextMap: Record<string, { isGit: boolean; branch?: string }> = {};
-        for (const [folderPath, status] of entries) {
-          nextMap[folderPath] = { isGit: !!status?.isGit, branch: status?.branch };
-        }
-        setFolderGitMap(nextMap);
-      });
-    }
+          setFolderGitMap(nextMap);
+        });
+      }
+    };
+
+    loadFolderGitBranches();
     return () => {
       alive = false;
     };
-  }, [currentWorkspace?.folders, currentWorkDir]);
+  }, [currentWorkspace?.folders, currentWorkDir, activeSessionId, gitStatus?.branch, gitStatus?.isGit, gitRevision]);
 
   // 打开快速切换分支浮层 (完全对齐用户参考截图)
   const handleOpenBranchPopover = (
@@ -127,15 +184,6 @@ export const WorkspaceCard: React.FC = () => {
     };
     setEditingWorkspace(target);
     setIsModalOpen(true);
-  };
-
-  // 切换当前会话绑定的工作空间
-  const handleSwitchWorkspace = async (ws: WorkspaceItem) => {
-    if (!activeSessionId) return;
-    const primaryFolder = ws.folders.find((f) => f.isPrimary) || ws.folders[0];
-    if (primaryFolder) {
-      await setSessionWorkDir(activeSessionId, primaryFolder.path);
-    }
   };
 
   // 保存工作空间 (来自图 8 弹窗)
@@ -194,12 +242,105 @@ export const WorkspaceCard: React.FC = () => {
           </div>
         </div>
 
-        {/* 折叠内容 */}
+        {/* 折叠内容（直接平铺融入监控面板，与上下文/连接器等卡片保持一致） */}
         {isOpen && (
-          <div className='p-3.5 flex flex-col gap-3'>
-            {/* 1. 当前工作空间卡片 (展示工作空间名称 + 挂载的全部源文件夹) */}
-            {currentWorkspace ? (
-              <div className='p-3 rounded-lg bg-[var(--ui-block-bg)] flex flex-col gap-2.5'>
+          <div className='px-4 pb-3.5 pt-0.5 flex flex-col gap-2.5'>
+            {worktreeInfo && (worktreeInfo.isManagedWorktree || (worktreeInfo.groupEntries?.length || 0) > 0) ? (
+              <div className='flex flex-col gap-2'>
+                <div className='flex items-center justify-between gap-2'>
+                  <div className='flex items-center gap-2 min-w-0'>
+                    <div className='w-6 h-6 rounded-md bg-[var(--ui-accent-blue-soft)] border border-[color:var(--ui-accent-blue-border)] flex items-center justify-center text-[var(--ui-accent-blue)] flex-shrink-0'>
+                      <FolderGit2 size={13} />
+                    </div>
+                    <span
+                      className='font-bold text-xs text-[var(--ui-text-primary)] truncate'
+                      title={worktreeInfo.path || currentWorkDir}
+                    >
+                      {currentWorkspace ? `${currentWorkspace.name} · 隔离工作树` : '隔离工作树'}
+                    </span>
+                  </div>
+                  <span className='px-2 py-0.5 rounded-full bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] text-[10px] font-mono border border-[color:var(--ui-accent-blue-border)] flex-shrink-0'>
+                    {worktreeInfo.groupEntries && worktreeInfo.groupEntries.length > 1
+                      ? `${worktreeInfo.groupEntries.length} 个 Worktree`
+                      : 'Worktree'}
+                  </span>
+                </div>
+
+                {worktreeInfo.groupEntries && worktreeInfo.groupEntries.length > 0 ? (
+                  <div className='flex flex-col gap-1 border-t border-[color:var(--ui-divider-hairline)] pt-2 max-h-[140px] overflow-y-auto custom-scrollbar pr-0.5'>
+                    {worktreeInfo.groupEntries.map((item) => (
+                      <div
+                        key={item.worktreePath}
+                        className='flex items-center justify-between py-1 px-1.5 rounded-md hover:bg-[var(--ui-block-hover-bg)] text-xs gap-2'
+                      >
+                        <div className='flex items-center gap-2 min-w-0'>
+                          <Folder size={12} className='text-[var(--ui-accent-blue)] flex-shrink-0' />
+                          <span
+                            className='text-[11px] font-medium text-[var(--ui-text-secondary)] truncate'
+                            title={item.worktreePath}
+                          >
+                            {item.name}
+                          </span>
+                          {item.isPrimary && (
+                            <span className='px-1.5 py-0.2 rounded text-[9px] bg-[var(--ui-chip-bg)] text-[var(--ui-text-secondary)] border border-[color:var(--ui-border-hairline)] flex-shrink-0'>
+                              主要
+                            </span>
+                          )}
+                        </div>
+                        <span
+                          className='flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-mono text-[var(--ui-accent-blue)] bg-[var(--ui-accent-blue-soft)] border border-[color:var(--ui-accent-blue-border)] flex-shrink-0 max-w-[120px]'
+                          title={`分支：${item.branch}\n路径：${item.worktreePath}`}
+                        >
+                          <GitBranch size={10} className='flex-shrink-0' />
+                          <span className='truncate font-medium'>{item.branch}</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className='flex flex-col gap-1 border-t border-[color:var(--ui-divider-hairline)] pt-2'>
+                    <div className='flex items-center justify-between py-1 px-1.5 rounded-md bg-[var(--ui-block-hover-bg)]/40 text-xs gap-2'>
+                      <div className='flex items-center gap-2 min-w-0'>
+                        <Folder size={12} className='text-[var(--ui-accent-blue)] flex-shrink-0' />
+                        <span
+                          className='text-[11px] font-medium text-[var(--ui-text-secondary)] truncate'
+                          title={worktreeInfo.path || currentWorkDir}
+                        >
+                          {(worktreeInfo.path || currentWorkDir || '')
+                            .split(/[\\/]/)
+                            .filter(Boolean)
+                            .pop() || 'worktree'}
+                        </span>
+                        <span className='px-1.5 py-0.2 rounded text-[9px] bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] flex-shrink-0'>
+                          当前
+                        </span>
+                      </div>
+                      {worktreeInfo.branch && (
+                        <span
+                          className='flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-mono text-[var(--ui-accent-blue)] bg-[var(--ui-accent-blue-soft)] border border-[color:var(--ui-accent-blue-border)] flex-shrink-0 max-w-[130px]'
+                          title={`当前工作树分支：${worktreeInfo.branch}`}
+                        >
+                          <GitBranch size={10} className='flex-shrink-0' />
+                          <span className='truncate font-medium'>{worktreeInfo.branch}</span>
+                        </span>
+                      )}
+                    </div>
+                    <p
+                      className='text-[10px] font-mono text-[var(--ui-text-faint)] truncate px-1.5'
+                      title={worktreeInfo.path || currentWorkDir}
+                    >
+                      {worktreeInfo.path || currentWorkDir}
+                    </p>
+                    {worktreeInfo.sourceBranch && (
+                      <p className='text-[10px] text-[var(--ui-text-faint)] px-1.5'>
+                        来源分支：<span className='font-mono'>{worktreeInfo.sourceBranch}</span>
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : currentWorkspace ? (
+              <div className='flex flex-col gap-2.5'>
                 <div className='flex items-center justify-between'>
                   <div className='flex items-center gap-2 min-w-0'>
                     <div className='w-6 h-6 rounded-md bg-[var(--ui-accent-blue-soft)] border border-[color:var(--ui-accent-blue-border)] flex items-center justify-center text-[var(--ui-accent-blue)] flex-shrink-0'>

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import {
   ChevronDown,
   ChevronRight,
@@ -49,7 +50,13 @@ export const SpecCard: React.FC = () => {
   const [items, setItems] = useState<SpecItem[]>([]);
   const [message, setMessage] = useState('');
 
-  const { sessions, activeSessionId, openFileInWorkbench } = useChatStore();
+  const { sessions, activeSessionId, openFileInWorkbench } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      openFileInWorkbench: s.openFileInWorkbench,
+    }))
+  );
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const workDir = activeSession?.workDir || '';
 

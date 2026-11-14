@@ -21,7 +21,9 @@ const { RunSkillScriptTool } = require("./tools/skillTools");
 const { SpecWriteTool } = require("./tools/specTool");
 const {
   BrowserOpenTool,
+  BrowserInspectTool,
   BrowserInteractTool,
+  BrowserLogsTool,
   BrowserSnapshotTool,
 } = require("./tools/browserTools");
 const { getPermissionModePolicy } = require("../services/sandboxPolicyService");
@@ -361,7 +363,9 @@ const ALL_TOOLS = [
   fromLangChainTool(new SpecWriteTool()),
   fromLangChainTool(new RunSkillScriptTool()),
   fromLangChainTool(new BrowserOpenTool()),
+  fromLangChainTool(new BrowserInspectTool()),
   fromLangChainTool(new BrowserInteractTool()),
+  fromLangChainTool(new BrowserLogsTool()),
   fromLangChainTool(new BrowserSnapshotTool()),
 ];
 

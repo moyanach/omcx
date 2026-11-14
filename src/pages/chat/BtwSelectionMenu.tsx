@@ -90,7 +90,7 @@ export const BtwSelectionMenu: React.FC<Props> = ({
       ref={menuRef}
       data-testid='btw-selection-menu'
       style={{ position: 'fixed', left, top, width: MENU_WIDTH, zIndex: 9999 }}
-      className='rounded-xl border border-[color:var(--ui-border-subtle)] bg-[var(--ui-popover-bg)] shadow-[var(--ui-popover-shadow)] p-1 select-none'
+      className='rounded-xl border border-[color:var(--ui-border-subtle)] bg-[var(--ui-popover-bg)] backdrop-blur-xl backdrop-saturate-150 shadow-[var(--ui-popover-shadow)] p-1 select-none'
     >
       <div className='px-2 py-1 text-[9.5px] font-mono text-[var(--ui-text-faint)] truncate'>
         已选中 {text.length} 字符

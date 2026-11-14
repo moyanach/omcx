@@ -43,10 +43,10 @@ const SlashCommandPopover: React.FC<Props> = ({
         maxWidth: "calc(100vw - 16px)",
         transform: position.above ? "translateY(-100%)" : "none",
       }}
-      className="z-[100] bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] rounded-xl shadow-[var(--ui-popover-shadow)] overflow-hidden select-none"
+      className="z-[100] bg-[var(--ui-popover-bg)] backdrop-blur-xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] rounded-xl shadow-[var(--ui-popover-shadow)] overflow-hidden select-none"
       onMouseDown={(e) => e.preventDefault()}
     >
-      <div className="px-3 py-2 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-code-header-bg)] flex items-center justify-between">
+      <div className="px-3 py-2 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between">
         <span className="text-[11px] text-[var(--ui-text-muted)] font-semibold tracking-wide">
           斜杠命令 (工作流 / 自定义 Prompt)
         </span>
@@ -121,7 +121,7 @@ const SlashCommandPopover: React.FC<Props> = ({
         )}
       </div>
 
-      <div className="px-3 py-1.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-code-header-bg)] flex items-center justify-between text-[10px] text-[var(--ui-text-faint)] font-mono">
+      <div className="px-3 py-1.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between text-[10px] text-[var(--ui-text-faint)] font-mono">
         <div className="flex items-center gap-3">
           <span>↑↓ 选择</span>
           <span>Enter 补全</span>

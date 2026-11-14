@@ -44,6 +44,14 @@ function resolveCwd(cwd, workDir) {
   return os.homedir();
 }
 
+function summarizePath(pathValue) {
+  return String(pathValue || "")
+    .split(":")
+    .filter(Boolean)
+    .slice(0, 8)
+    .join(":");
+}
+
 function buildEnv(extraEnv = {}) {
   const env = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -58,6 +66,12 @@ function buildEnv(extraEnv = {}) {
     CLICOLOR: "1",
     CLICOLOR_FORCE: "1",
     OMCX_TERMINAL: "1",
+    // 声明 iTerm2 兼容身份：yazi / viu / imgcat 这类 TUI 只有检测到真终端支持图形协议时
+    // 才会走 IIP（OSC 1337）内联图片，渲染进程由 @xterm/addon-image 负责绘制，
+    // 因此不再依赖本机安装 chafa 之类的外部转换器。
+    TERM_PROGRAM: "iTerm.app",
+    TERM_PROGRAM_VERSION: "3.5.0",
+    LC_TERMINAL: "iTerm2",
   };
 }
 
@@ -79,6 +93,7 @@ class TerminalPtyService {
         shell: existing.shell,
         cols: existing.cols,
         rows: existing.rows,
+        pathHead: summarizePath(existing.envPath),
         reused: true,
       };
     }
@@ -91,6 +106,7 @@ class TerminalPtyService {
     const shellPath = shell || process.env.SHELL || "/bin/zsh";
     const finalCols = clamp(cols, 20, 400, DEFAULT_COLS);
     const finalRows = clamp(rows, 5, 200, DEFAULT_ROWS);
+    const ptyEnv = buildEnv(env);
 
     let proc;
     try {
@@ -99,7 +115,7 @@ class TerminalPtyService {
         cols: finalCols,
         rows: finalRows,
         cwd: resolvedCwd,
-        env: buildEnv(env),
+        env: ptyEnv,
       });
     } catch (err) {
       return { success: false, error: `启动交互式终端失败: ${err.message}` };
@@ -113,6 +129,7 @@ class TerminalPtyService {
       cols: finalCols,
       rows: finalRows,
       sender: null,
+      envPath: ptyEnv.PATH,
       createdAt: Date.now(),
     };
     this.sessions.set(id, session);
@@ -138,6 +155,7 @@ class TerminalPtyService {
       cols: finalCols,
       rows: finalRows,
       pid: proc.pid,
+      pathHead: summarizePath(ptyEnv.PATH),
     };
   }
 

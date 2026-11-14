@@ -12,7 +12,7 @@ const path = require("path");
 const { StringDecoder } = require("string_decoder");
 const { execFileSync } = require("child_process");
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 const { resolveWorkspacePath } = require("./pathResolver");
 const {
   PERMISSION_MODES,

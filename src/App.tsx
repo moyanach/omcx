@@ -61,11 +61,15 @@ function App() {
       ? `url("${appearance.bgImage}")`
       : defaultAmbientGradient;
 
-  // 根据壁纸不透明度动态调节底层护眼柔光遮罩，确保无论壁纸多复杂，前景文字与代码始终高对比清晰
-  const veilOpacity =
-    effectiveTheme === 'light'
-      ? Math.max(0.18, (appearance.surfaceOpacity / 100) * 0.45)
-      : Math.max(0.22, (appearance.surfaceOpacity / 100) * 0.5);
+  // 根据壁纸类型与不透明度保留极轻量柔光保护，把主要通透控制权留给单层面板自身，
+  // 从而让极光/深海/暮光/翡翠等渐变色彩完整透入三栏界面
+  const veilOpacity = presetItem
+    ? effectiveTheme === 'light'
+      ? Math.max(0.04, (appearance.surfaceOpacity / 100) * 0.16)
+      : Math.max(0.06, (appearance.surfaceOpacity / 100) * 0.18)
+    : effectiveTheme === 'light'
+      ? Math.max(0.08, (appearance.surfaceOpacity / 100) * 0.22)
+      : Math.max(0.1, (appearance.surfaceOpacity / 100) * 0.24);
 
   return (
     <div
@@ -82,8 +86,10 @@ function App() {
             style={{
               backgroundImage: backdropImage,
               filter:
-                appearance.bgBlur > 0 ? `blur(${appearance.bgBlur}px)` : undefined,
-              transform: appearance.bgBlur > 0 ? 'scale(1.08)' : 'scale(1.01)',
+                appearance.bgBlur > 0
+                  ? `blur(${Math.max(1, Math.round(appearance.bgBlur * 0.65))}px)`
+                  : undefined,
+              transform: appearance.bgBlur > 0 ? 'scale(1.06)' : 'scale(1.01)',
             }}
           />
           {/* 亮/暗主题自适应护眼对比度遮罩，防止壁纸高光或暗部干扰正文阅读 */}

@@ -1,9 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ChatAttachment } from '../stores/chatStore';
 import { useStreamChat } from '../hooks/useStreamChat';
 import { useBtwChat } from '../hooks/useBtwChat';
 import { useAppStore } from '../stores/appStore';
 import { readFileAsBase64, type DraftChatAttachment } from '@/lib/chatAttachment';
+import {
+  resolveFileMentionsInText,
+  compactFileMentionsInText,
+  type FileIndexEntry,
+} from '@/lib/fileMention';
 import ChatHeader from '@/pages/chat/ChatHeader';
 import MessageList from '@/pages/chat/MessageList';
 import MessageInput from '@/pages/chat/MessageInput';
@@ -30,7 +36,6 @@ const ChatView: React.FC = () => {
     setSessionPermission,
     initStore,
     updateSessionModel,
-    updateSessionTitle,
     setSessionWorkDir,
     setSessionPermissionMode,
     refreshOutputs,
@@ -56,9 +61,46 @@ const ChatView: React.FC = () => {
     clearPromptQueue,
     setBtwQuote,
     openBtwPanel,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      messages: s.messages,
+      toolCallsBySession: s.toolCallsBySession,
+      todosBySession: s.todosBySession,
+      permissionBySession: s.permissionBySession,
+      setSessionPermission: s.setSessionPermission,
+      initStore: s.initStore,
+      updateSessionModel: s.updateSessionModel,
+      setSessionWorkDir: s.setSessionWorkDir,
+      setSessionPermissionMode: s.setSessionPermissionMode,
+      refreshOutputs: s.refreshOutputs,
+      refreshGitStatus: s.refreshGitStatus,
+      refreshMcpAndSkills: s.refreshMcpAndSkills,
+      isWorkspaceModalOpen: s.isWorkspaceModalOpen,
+      activeEditingWorkspace: s.activeEditingWorkspace,
+      openWorkspaceModal: s.openWorkspaceModal,
+      closeWorkspaceModal: s.closeWorkspaceModal,
+      saveWorkspace: s.saveWorkspace,
+      deleteWorkspace: s.deleteWorkspace,
+      models: s.models,
+      fetchModels: s.fetchModels,
+      setLastCompaction: s.setLastCompaction,
+      workbenchOpen: s.workbenchOpen,
+      setWorkbenchOpen: s.setWorkbenchOpen,
+      pendingMentionInsert: s.pendingMentionInsert,
+      setPendingMentionInsert: s.setPendingMentionInsert,
+      promptQueueBySession: s.promptQueueBySession,
+      enqueuePrompt: s.enqueuePrompt,
+      removeQueuedPrompt: s.removeQueuedPrompt,
+      moveQueuedPromptToTop: s.moveQueuedPromptToTop,
+      clearPromptQueue: s.clearPromptQueue,
+      setBtwQuote: s.setBtwQuote,
+      openBtwPanel: s.openBtwPanel,
+    }))
+  );
 
-  const { activeView } = useAppStore();
+  const activeView = useAppStore((s) => s.activeView);
   const { isGenerating, sendMessage, retryMessage, cancelMessage, runQueuedPromptNow, steerMessage } =
     useStreamChat();
   const { askBtw } = useBtwChat();
@@ -66,10 +108,14 @@ const ChatView: React.FC = () => {
   const [input, setInput] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
   const [attachments, setAttachments] = useState<DraftChatAttachment[]>([]);
+  const [fileMentionMap, setFileMentionMap] = useState<Record<string, string>>({});
+  const [workspaceFiles, setWorkspaceFiles] = useState<FileIndexEntry[]>([]);
   const [toastMsg, setToastMsg] = useState('');
 
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
+  const fileMentionMapRef = useRef(fileMentionMap);
+  fileMentionMapRef.current = fileMentionMap;
 
   const showToast = (msg: string, duration = 3000) => {
     setToastMsg(msg);
@@ -104,18 +150,29 @@ const ChatView: React.FC = () => {
   // 2. workbenchOpen: 控制最右侧额外扩展抽屉（内置浏览器/终端/文件树/Git Diff，由 chatStore 全局托管）
   const [inspectorOpen, setInspectorOpen] = useState(true);
 
-  // 当从文件树点击“@引用”时，自动插入到当前输入框
+  // 切换会话时重置待解析的短文件名映射
+  useEffect(() => {
+    setFileMentionMap({});
+  }, [activeSessionId]);
+
+  // 当从文件树点击“@引用”时，自动紧凑化为短文件名后插入当前输入框
   useEffect(() => {
     if (pendingMentionInsert) {
+      const { text: compacted, mentionMap: nextMap } = compactFileMentionsInText(
+        pendingMentionInsert,
+        workspaceFiles,
+        fileMentionMapRef.current
+      );
+      setFileMentionMap(nextMap);
       setInput((prev) => {
         const prefix = prev && !prev.endsWith(' ') ? `${prev} ` : prev;
-        return `${prefix}${pendingMentionInsert}`;
+        return `${prefix}${compacted}`;
       });
       setPendingMentionInsert(null);
     }
-  }, [pendingMentionInsert, setPendingMentionInsert]);
+  }, [pendingMentionInsert, setPendingMentionInsert, workspaceFiles]);
 
-  const [enableTools, setEnableTools] = useState(true);
+  const [enableTools] = useState(true);
 
   const activeMessages = activeSessionId ? messages[activeSessionId] || [] : [];
   const activeToolCalls = activeSessionId ? toolCallsBySession[activeSessionId] || [] : [];
@@ -180,8 +237,8 @@ const ChatView: React.FC = () => {
   };
 
   const handleSend = async () => {
-    if (!input.trim() || !activeSessionId) return;
-    const text = input;
+    if ((!input.trim() && attachments.length === 0) || !activeSessionId) return;
+    const text = resolveFileMentionsInText(input, fileMentionMap, workspaceFiles);
 
     // /btw 旁路问答：优先于附件、排队与主 Agent 流程，绝不写入主会话
     const btwMatch = text.trim().match(/^\/btw(?:\s+([\s\S]*))?$/i);
@@ -237,6 +294,7 @@ const ChatView: React.FC = () => {
     attachments.forEach((item) => URL.revokeObjectURL(item.previewUrl));
     setAttachments([]);
     setInput('');
+    setFileMentionMap({});
 
     const targetModel = selectedModel || availableChatModels[0]?.id || 'model_chat_default';
 
@@ -285,7 +343,13 @@ const ChatView: React.FC = () => {
   const handleEditQueued = (prompt: any) => {
     if (!activeSessionId) return;
     removeQueuedPrompt(activeSessionId, prompt.id);
-    setInput(prompt.content);
+    const { text: compacted, mentionMap: nextMap } = compactFileMentionsInText(
+      prompt.content || '',
+      workspaceFiles,
+      fileMentionMap
+    );
+    setFileMentionMap(nextMap);
+    setInput(compacted);
     showToast('已将排队任务撤回至输入框', 2000);
   };
 
@@ -315,9 +379,11 @@ const ChatView: React.FC = () => {
       showToast('中途追加上下文暂仅支持纯文本，请先移除附件或改为排队发送', 3000);
       return;
     }
-    const ok = steerMessage(activeSessionId, input);
+    const resolved = resolveFileMentionsInText(input, fileMentionMap, workspaceFiles);
+    const ok = steerMessage(activeSessionId, resolved);
     if (ok) {
       setInput('');
+      setFileMentionMap({});
       showToast('已追加至当前执行流程，Agent 将自主结合最新上下文推进', 2600);
     }
   };
@@ -338,10 +404,6 @@ const ChatView: React.FC = () => {
         },
       }
     );
-  };
-
-  const handleRenameSession = (id: string, title: string) => {
-    updateSessionTitle(id, title);
   };
 
   const handleSelectWorkDir = () => {
@@ -375,7 +437,7 @@ const ChatView: React.FC = () => {
         <span className='text-xs font-medium'>{toastMsg}</span>
       </div>
       {/* 当前会话的主交互区 (包含顶部Header、左消息+贴底输入、右绿色框Inspector) */}
-      <div className='flex-1 min-w-0 h-full flex flex-col overflow-hidden bg-[var(--ui-panel-bg)] border-r border-[color:var(--ui-divider-hairline)]'>
+      <div className='flex-1 min-w-0 h-full flex flex-col overflow-hidden bg-transparent border-r border-[color:var(--ui-divider-hairline)]'>
         <ChatHeader
           session={activeSession}
           leftPanelOpen={inspectorOpen}
@@ -387,13 +449,13 @@ const ChatView: React.FC = () => {
 
         {/* 会话内容交互容器 */}
         {!activeSessionId ? (
-          <div className='flex-1 flex items-center justify-center text-[var(--ui-text-faint)] text-sm'>
+          <div className='flex-1 flex items-center justify-center bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150 text-[var(--ui-text-faint)] text-sm'>
             请在左侧选择或创建一个会话
           </div>
         ) : (
-          <div className='flex-1 min-h-0 flex overflow-hidden bg-[var(--ui-panel-bg)]'>
-            {/* 左侧：消息与输入直接平铺在会话背景上，不再外包舞台卡片 */}
-            <div className='flex-1 min-h-0 flex flex-col overflow-hidden'>
+          <div className='flex-1 min-h-0 flex overflow-hidden bg-transparent'>
+            {/* 左侧：消息与输入直接平铺在单层会话背景上，避免与外层和右栏产生多重叠加 */}
+            <div className='flex-1 min-h-0 flex flex-col overflow-hidden bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150'>
               <div className='flex-1 min-h-0 flex flex-col overflow-hidden relative'>
                 <MessageList
                   messages={activeMessages}
@@ -541,6 +603,9 @@ const ChatView: React.FC = () => {
                   onClearQueue={() => {
                     if (activeSessionId) clearPromptQueue(activeSessionId);
                   }}
+                  mentionMap={fileMentionMap}
+                  onChangeMentionMap={setFileMentionMap}
+                  onFileIndexChange={setWorkspaceFiles}
                 />
               </div>
             </div>

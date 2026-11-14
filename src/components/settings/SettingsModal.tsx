@@ -1,7 +1,9 @@
-import React, { useEffect, useRef } from 'react';
+import React, { Suspense, lazy, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { Loader2 } from 'lucide-react';
 import { useAppStore } from '@/stores/appStore';
-import SettingsView from '@/pages/SettingsView';
+
+const SettingsView = lazy(() => import('@/pages/SettingsView'));
 
 /**
  * 覆盖式设置弹出层：
@@ -48,7 +50,7 @@ export const SettingsModal: React.FC = () => {
   return createPortal(
     <div
       data-testid='settings-modal-backdrop'
-      className='fixed inset-0 z-[99999] bg-black/65 backdrop-blur-sm flex items-center justify-center p-4 select-none animate-in fade-in duration-150'
+      className='fixed inset-0 z-[99999] bg-[var(--ui-modal-overlay)] backdrop-blur-sm flex items-center justify-center p-4 select-none animate-in fade-in duration-150'
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) closeSettings();
       }}
@@ -60,9 +62,18 @@ export const SettingsModal: React.FC = () => {
         aria-label='系统设置'
         tabIndex={-1}
         data-testid='settings-modal-panel'
-        className='relative w-full max-w-5xl h-[86vh] max-h-[900px] rounded-2xl overflow-hidden border border-[color:var(--ui-border-subtle)] bg-[var(--ui-panel-bg)] shadow-[0_32px_80px_rgba(0,0,0,0.55)] outline-none animate-in zoom-in-95 duration-150'
+        className='relative w-full max-w-5xl h-[86vh] max-h-[900px] rounded-2xl overflow-hidden border border-[color:var(--ui-border-subtle)] bg-[var(--ui-modal-bg)] backdrop-blur-2xl backdrop-saturate-150 shadow-[var(--ui-popover-shadow)] outline-none animate-in zoom-in-95 duration-150'
       >
-        <SettingsView variant='modal' onClose={closeSettings} />
+        <Suspense
+          fallback={
+            <div className='w-full h-full flex items-center justify-center gap-2 text-xs text-[var(--ui-text-muted)]'>
+              <Loader2 size={15} className='animate-spin text-[var(--ui-accent-blue)]' />
+              <span>正在加载设置面板...</span>
+            </div>
+          }
+        >
+          <SettingsView variant='modal' onClose={closeSettings} />
+        </Suspense>
       </div>
     </div>,
     document.body

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { MessageSquare, Wrench, FolderGit2, Settings } from 'lucide-react';
 import { useAppStore, NavTab } from '@/stores/appStore';
 
@@ -9,7 +10,12 @@ interface NavItemProps {
 }
 
 const NavItem: React.FC<NavItemProps> = ({ tab, label, icon: Icon }) => {
-  const { activeNavTab, setActiveNavTab } = useAppStore();
+  const { activeNavTab, setActiveNavTab } = useAppStore(
+    useShallow((s) => ({
+      activeNavTab: s.activeNavTab,
+      setActiveNavTab: s.setActiveNavTab,
+    }))
+  );
   const isActive = activeNavTab === tab;
 
   return (

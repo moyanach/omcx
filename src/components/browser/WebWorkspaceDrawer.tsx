@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { Suspense, lazy, useState, useEffect, useMemo, useRef } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   Globe,
   Plus,
@@ -22,16 +23,28 @@ import {
   Bot,
   Loader2,
   MessageSquareText,
+  GitBranch,
 } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { usePanelResize } from "@/hooks/usePanelResize";
 import { getEffectiveTheme, subscribeThemeChange, type EffectiveTheme } from "@/theme";
 import BrowserNewTabTools from "./BrowserNewTabTools";
-import FileExplorerView from "./FileExplorerView";
-import IntegratedTerminalView from "./IntegratedTerminalView";
-import GitChangesView from "./GitChangesView";
-import BrowserAutomationView from "./BrowserAutomationView";
-import BtwPanel from "@/pages/chat/BtwPanel";
+
+const FileExplorerView = lazy(() => import("./FileExplorerView"));
+const IntegratedTerminalView = lazy(() => import("./IntegratedTerminalView"));
+const GitChangesView = lazy(() => import("./GitChangesView"));
+const GitGraphView = lazy(() => import("./GitGraphView"));
+const BrowserAutomationView = lazy(() => import("./BrowserAutomationView"));
+const BtwPanel = lazy(() => import("@/pages/chat/BtwPanel"));
+
+const MAX_HTML_PREVIEW_LINES = 3000;
+
+const DrawerViewFallback: React.FC = () => (
+  <div className="flex-1 h-full flex items-center justify-center gap-2 text-xs text-[var(--ui-text-muted)]">
+    <Loader2 size={14} className="animate-spin text-[var(--ui-accent-blue)]" />
+    <span>加载工作台模块...</span>
+  </div>
+);
 
 interface WebWorkspaceDrawerProps {
   isOpen?: boolean;
@@ -72,7 +85,30 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
     openFileInWorkbench,
     openDiffInWorkbench,
     openTerminalInWorkbench,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      workbenchOpen: s.workbenchOpen,
+      workbenchWidth: s.workbenchWidth,
+      workbenchMaximized: s.workbenchMaximized,
+      workbenchTabs: s.workbenchTabs,
+      activeWorkbenchTabId: s.activeWorkbenchTabId,
+      autoOpenHtmlOutputs: s.autoOpenHtmlOutputs,
+      setWorkbenchOpen: s.setWorkbenchOpen,
+      setWorkbenchWidth: s.setWorkbenchWidth,
+      setWorkbenchMaximized: s.setWorkbenchMaximized,
+      setAutoOpenHtmlOutputs: s.setAutoOpenHtmlOutputs,
+      addWorkbenchTab: s.addWorkbenchTab,
+      closeWorkbenchTab: s.closeWorkbenchTab,
+      setActiveWorkbenchTab: s.setActiveWorkbenchTab,
+      updateWorkbenchTab: s.updateWorkbenchTab,
+      openUrlInWorkbench: s.openUrlInWorkbench,
+      openFileInWorkbench: s.openFileInWorkbench,
+      openDiffInWorkbench: s.openDiffInWorkbench,
+      openTerminalInWorkbench: s.openTerminalInWorkbench,
+    }))
+  );
 
   const isOpen = propIsOpen !== undefined ? propIsOpen : workbenchOpen;
   const effectiveTheme = useEffectiveTheme();
@@ -94,6 +130,18 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
   const [copiedSource, setCopiedSource] = useState(false);
   const [frameLoading, setFrameLoading] = useState(false);
   const [frameTimedOut, setFrameTimedOut] = useState(false);
+
+  const htmlLinesMeta = useMemo(() => {
+    if (!htmlSourceContent) return { lines: [] as string[], truncatedCount: 0 };
+    const all = htmlSourceContent.split(/\r?\n/);
+    if (all.length <= MAX_HTML_PREVIEW_LINES) {
+      return { lines: all, truncatedCount: 0 };
+    }
+    return {
+      lines: all.slice(0, MAX_HTML_PREVIEW_LINES),
+      truncatedCount: all.length - MAX_HTML_PREVIEW_LINES,
+    };
+  }, [htmlSourceContent]);
 
   const frameLoadedRef = useRef(false);
 
@@ -282,6 +330,16 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
     addWorkbenchTab({ title: "旁路问答", type: "btw" });
   };
 
+  const handleOpenGitGraph = () => {
+    const existing = workbenchTabs.find((t) => t.type === "gitgraph");
+    if (existing) {
+      setWorkbenchOpen(true);
+      setActiveWorkbenchTab(existing.id);
+      return;
+    }
+    addWorkbenchTab({ title: "Git 图谱", type: "gitgraph" });
+  };
+
   const handleOpenTool = (toolId: "changes" | "terminal" | "files") => {
     if (toolId === "changes") {
       openDiffInWorkbench();
@@ -384,6 +442,8 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
                 <Terminal size={12.5} className="text-[var(--ui-accent-emerald)] flex-shrink-0" />
               ) : tab.type === "changes" ? (
                 <FileDiff size={12.5} className="text-[var(--ui-accent-amber)] flex-shrink-0" />
+              ) : tab.type === "gitgraph" ? (
+                <GitBranch size={12.5} className="text-[var(--ui-accent-blue)] flex-shrink-0" />
               ) : tab.type === "automation" ? (
                 <Bot size={12.5} className="text-[var(--ui-accent-violet)] flex-shrink-0" />
               ) : tab.type === "btw" ? (
@@ -454,6 +514,17 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
             title="Git 变更对比 (⌃⇧G)"
           >
             <FileDiff size={13.5} />
+          </button>
+          <button
+            onClick={handleOpenGitGraph}
+            className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${
+              activeTab?.type === "gitgraph"
+                ? "text-[var(--ui-accent-blue)] bg-[var(--ui-accent-blue-soft)]"
+                : "hover:bg-[var(--ui-block-hover-bg)] hover:text-[var(--ui-text-primary)]"
+            }`}
+            title="Git 多分支图谱 (Git Graph)"
+          >
+            <GitBranch size={13.5} />
           </button>
           <button
             onClick={handleOpenAutomation}
@@ -655,7 +726,9 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
             }
           >
             {workbenchTabs.some((tab) => tab.type === "terminal") && (
-              <IntegratedTerminalView />
+              <Suspense fallback={<DrawerViewFallback />}>
+                <IntegratedTerminalView />
+              </Suspense>
             )}
           </div>
 
@@ -665,24 +738,37 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
               onOpenTool={handleOpenTool}
               onOpenUrl={handleNavigate}
               onOpenAutomation={handleOpenAutomation}
+              onOpenGitGraph={handleOpenGitGraph}
             />
           ) : activeTab?.type === "files" ? (
-            <FileExplorerView
-              initialFilePath={activeTab.filePath}
-              initialLineNumber={activeTab.lineNumber}
-              initialLineEnd={activeTab.lineEnd}
-              initialViewMode={activeTab.viewMode}
-              refreshKey={activeTab.refreshKey}
-            />
+            <Suspense fallback={<DrawerViewFallback />}>
+              <FileExplorerView
+                initialFilePath={activeTab.filePath}
+                initialLineNumber={activeTab.lineNumber}
+                initialLineEnd={activeTab.lineEnd}
+                initialViewMode={activeTab.viewMode}
+                refreshKey={activeTab.refreshKey}
+              />
+            </Suspense>
           ) : activeTab?.type === "changes" ? (
-            <GitChangesView
-              initialFilePath={activeTab.filePath}
-              refreshKey={activeTab.refreshKey}
-            />
+            <Suspense fallback={<DrawerViewFallback />}>
+              <GitChangesView
+                initialFilePath={activeTab.filePath}
+                refreshKey={activeTab.refreshKey}
+              />
+            </Suspense>
+          ) : activeTab?.type === "gitgraph" ? (
+            <Suspense fallback={<DrawerViewFallback />}>
+              <GitGraphView refreshKey={activeTab.refreshKey} />
+            </Suspense>
           ) : activeTab?.type === "automation" ? (
-            <BrowserAutomationView />
+            <Suspense fallback={<DrawerViewFallback />}>
+              <BrowserAutomationView />
+            </Suspense>
           ) : activeTab?.type === "btw" ? (
-            <BtwPanel sessionId={activeSessionId || ""} />
+            <Suspense fallback={<DrawerViewFallback />}>
+              <BtwPanel sessionId={activeSessionId || ""} />
+            </Suspense>
           ) : activeTab?.viewMode === "code" && activeTab.filePath ? (
             <div className="flex-1 flex flex-col overflow-hidden bg-[var(--ui-stage-bg)] select-text">
               <div className="h-9 px-3 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between select-none">
@@ -716,7 +802,7 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
                 </div>
               </div>
               <div className="flex-1 overflow-auto py-2 font-mono text-[12px] leading-[1.6] custom-scrollbar bg-[var(--ui-code-bg)]">
-                {htmlSourceContent.split(/\r?\n/).map((line, idx) => (
+                {htmlLinesMeta.lines.map((line, idx) => (
                   <div
                     key={idx}
                     className="flex px-2 hover:bg-[var(--ui-block-hover-bg)]"
@@ -729,6 +815,11 @@ export const WebWorkspaceDrawer: React.FC<WebWorkspaceDrawerProps> = ({
                     </span>
                   </div>
                 ))}
+                {htmlLinesMeta.truncatedCount > 0 && (
+                  <div className="mx-3 my-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-[11px] text-amber-300">
+                    文件较大，源码预览已安全截断前 {MAX_HTML_PREVIEW_LINES} 行（剩余 {htmlLinesMeta.truncatedCount} 行未渲染，可点击上方“复制源码”或“在文件树中定位”查看完整内容）。
+                  </div>
+                )}
               </div>
             </div>
           ) : (

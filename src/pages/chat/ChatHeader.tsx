@@ -66,7 +66,7 @@ const ChatHeader: React.FC<Props> = ({
   if (!session) return null;
 
   return (
-    <div className="h-[48px] border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-panel-bg)] flex-shrink-0 flex items-center justify-between gap-2 px-3.5 overflow-hidden titlebar-drag select-none z-30">
+    <div className="h-[48px] border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150 flex-shrink-0 flex items-center justify-between gap-2 px-3.5 overflow-hidden titlebar-drag select-none z-30">
       {/* 会话标题与当前工作区路径简略提示（弹性自适应截断，绝不挤压右侧按钮） */}
       <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
         <h1
@@ -97,7 +97,7 @@ const ChatHeader: React.FC<Props> = ({
             {busy ? <Loader2 size={13.5} className="animate-spin" /> : <MoreHorizontal size={14} />}
           </button>
           {menuOpen && (
-            <div className="absolute right-0 top-8 z-[200] w-44 rounded-xl bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-[var(--ui-popover-shadow)] p-1 select-none">
+            <div className="absolute right-0 top-8 z-[200] w-44 rounded-xl bg-[var(--ui-popover-bg)] backdrop-blur-xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] shadow-[var(--ui-popover-shadow)] p-1 select-none">
               <button
                 onClick={handleFork}
                 className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)] transition-colors"

@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useShallow } from 'zustand/react/shallow';
 import {
   BookOpen,
   ChevronDown,
@@ -27,7 +29,9 @@ export const RepoWikiCard: React.FC = () => {
   const [error, setError] = useState('');
   const [showModal, setShowModal] = useState(false);
 
-  const { sessions, activeSessionId } = useChatStore();
+  const { sessions, activeSessionId } = useChatStore(
+    useShallow((s) => ({ sessions: s.sessions, activeSessionId: s.activeSessionId }))
+  );
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const workDir = activeSession?.workDir;
 
@@ -186,16 +190,16 @@ export const RepoWikiCard: React.FC = () => {
         )}
       </div>
 
-      {showModal && (
+      {showModal && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed inset-0 z-[9999] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-150"
+          className="fixed inset-0 z-[99999] bg-[var(--ui-modal-overlay)] backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-150"
           onClick={() => setShowModal(false)}
         >
           <div
-            className="w-full max-w-4xl max-h-[85vh] bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+            className="w-full max-w-4xl max-h-[85vh] bg-[var(--ui-modal-bg)] backdrop-blur-2xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl overflow-hidden flex flex-col text-[var(--ui-text-primary)]"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="px-5 py-3.5 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between flex-shrink-0">
+            <div className="px-5 py-3.5 border-b border-[color:var(--ui-divider-hairline)] flex items-center justify-between flex-shrink-0">
               <div className="flex items-center gap-2 min-w-0">
                 <BookOpen size={16} className="text-[var(--ui-accent-emerald)]" />
                 <h3 className="font-bold text-sm text-[var(--ui-text-primary)] truncate">
@@ -218,7 +222,8 @@ export const RepoWikiCard: React.FC = () => {
               <MarkdownContent content={content} />
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

@@ -1,14 +1,16 @@
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 const browserAutomation = require("../../services/browserAutomationService");
 
 const INTERACT_ACTIONS = [
   "click",
   "fill",
+  "select_option",
   "press",
   "hover",
   "scroll",
   "wait_for",
+  "eval",
 ];
 
 class BrowserOpenTool extends StructuredTool {
@@ -35,19 +37,53 @@ class BrowserOpenTool extends StructuredTool {
   }
 }
 
+class BrowserInspectTool extends StructuredTool {
+  constructor() {
+    super();
+    this.name = "browser_inspect";
+    this.description =
+      "探测当前内置浏览器页面的可交互元素（输入框、按钮、链接、下拉框等），返回带 ref 编号（如 e1、e2）、标签、类型、placeholder 与唯一 CSS 选择器的结构化清单，并附带控制台/网络错误数量。操作页面前建议先调用此工具避免盲猜选择器。";
+    this.schema = z.object({
+      max_elements: z
+        .number()
+        .int()
+        .min(10)
+        .max(150)
+        .optional()
+        .describe("最多返回的可交互元素数量，默认 80"),
+    });
+  }
+
+  async _call({ max_elements }) {
+    try {
+      const result = await browserAutomation.inspect({
+        maxElements: max_elements,
+      });
+      return JSON.stringify(result);
+    } catch (err) {
+      return JSON.stringify({ ok: false, error: err.message });
+    }
+  }
+}
+
 class BrowserInteractTool extends StructuredTool {
   constructor() {
     super();
     this.name = "browser_interact";
     this.description =
-      "操作已打开的内置浏览器页面。action=click/fill/press/hover/scroll/wait_for；selector 使用 CSS 选择器。fill 会触发 input/change 事件以兼容 React 受控组件；press 默认 Enter，可触发表单提交。返回最新页面 URL、标题与正文摘要。";
+      "操作已打开的内置浏览器页面。支持 action=click/fill/select_option/press/hover/scroll/wait_for/eval；可通过 ref（browser_inspect 返回的 e1/e2）或 selector（CSS 选择器）定位元素。fill 兼容 React/Vue 受控组件与 contenteditable；select_option 用于 <select> 下拉框；eval 可执行页面检查 JS。";
     this.schema = z.object({
       action: z.enum(INTERACT_ACTIONS).describe("交互动作"),
+      ref: z
+        .string()
+        .optional()
+        .describe("browser_inspect 返回的元素编号，例如 e1、e2（优先于 selector）"),
       selector: z
         .string()
         .optional()
-        .describe("CSS 选择器，例如 #search、button[type=submit]；wait_for 必填"),
+        .describe("CSS 选择器，例如 #search、button[type=submit]"),
       text: z.string().optional().describe("fill 动作要填入的文本"),
+      value: z.string().optional().describe("select_option 动作要选中的选项值或文本"),
       key: z.string().optional().describe("press 动作的按键名，默认 Enter"),
       amount: z
         .number()
@@ -63,10 +99,11 @@ class BrowserInteractTool extends StructuredTool {
         .max(60000)
         .optional()
         .describe("wait_for 的最长等待时间，默认 8000ms"),
+      script: z.string().optional().describe("eval 动作要在页面执行的 JS 代码片段"),
     });
   }
 
-  async _call({ action, selector, text, key, amount, timeout_ms, __toolContext }) {
+  async _call({ action, ref, selector, text, value, key, amount, timeout_ms, script, __toolContext }) {
     if (String(__toolContext?.permissionMode || "").toLowerCase() === "plan") {
       return JSON.stringify({
         ok: false,
@@ -76,12 +113,36 @@ class BrowserInteractTool extends StructuredTool {
     try {
       const result = await browserAutomation.interact({
         action,
+        ref,
         selector,
         text,
+        value,
         key,
         amount,
         timeout_ms,
+        script,
       });
+      return JSON.stringify(result);
+    } catch (err) {
+      return JSON.stringify({ ok: false, error: err.message });
+    }
+  }
+}
+
+class BrowserLogsTool extends StructuredTool {
+  constructor() {
+    super();
+    this.name = "browser_logs";
+    this.description =
+      "获取当前内置浏览器捕获的页面 Console 警告/报错与失败的网络请求（HTTP >= 400 或请求异常），用于排查前端报错与接口异常。";
+    this.schema = z.object({
+      clear: z.boolean().optional().describe("读取后是否清空缓存日志，默认 false"),
+    });
+  }
+
+  async _call({ clear }) {
+    try {
+      const result = browserAutomation.getLogs({ clear: Boolean(clear) });
       return JSON.stringify(result);
     } catch (err) {
       return JSON.stringify({ ok: false, error: err.message });
@@ -94,7 +155,7 @@ class BrowserSnapshotTool extends StructuredTool {
     super();
     this.name = "browser_snapshot";
     this.description =
-      "对已打开的内置浏览器页面截图（PNG），返回本地文件路径、dataUrl、页面正文摘要；传入 baseline 时会与同名基线做像素级视觉回归对比，返回差异比例与 diff 图路径。";
+      "对已打开的内置浏览器页面截图（PNG），返回本地文件路径、页面正文摘要；若主模型支持 Vision，将自动把画面注入多模态上下文供视觉检查；传入 baseline 时可做像素级视觉回归对比。";
     this.schema = z.object({
       full_page: z.boolean().optional().describe("是否截取完整页面高度，默认仅视口"),
       baseline: z
@@ -118,9 +179,13 @@ class BrowserSnapshotTool extends StructuredTool {
         threshold,
         workDir: __toolContext?.workDir || null,
       });
-      // dataUrl 体积较大，工具结果中只保留路径，避免挤占上下文
+      // dataUrl 体积较大，通过内部字段 __visionImageDataUrl 交由主进程按需注入 Vision 消息
       const { dataUrl, ...rest } = result;
-      return JSON.stringify({ ...rest, hasPreview: Boolean(dataUrl) });
+      return JSON.stringify({
+        ...rest,
+        hasPreview: Boolean(dataUrl),
+        __visionImageDataUrl: dataUrl || undefined,
+      });
     } catch (err) {
       return JSON.stringify({ ok: false, error: err.message });
     }
@@ -129,6 +194,8 @@ class BrowserSnapshotTool extends StructuredTool {
 
 module.exports = {
   BrowserOpenTool,
+  BrowserInspectTool,
   BrowserInteractTool,
+  BrowserLogsTool,
   BrowserSnapshotTool,
 };

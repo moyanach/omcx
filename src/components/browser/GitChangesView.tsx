@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   GitBranch,
   RefreshCw,
@@ -175,7 +176,15 @@ export const GitChangesView: React.FC<GitChangesViewProps> = ({
     gitStatus,
     refreshGitStatus,
     openFileInWorkbench,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      gitStatus: s.gitStatus,
+      refreshGitStatus: s.refreshGitStatus,
+      openFileInWorkbench: s.openFileInWorkbench,
+    }))
+  );
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const workDir = activeSession?.workDir || "";

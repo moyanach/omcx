@@ -1,17 +1,25 @@
 import React, { useState } from 'react';
-import { useChatStore, SkillItem, McpServerItem } from '@/stores/chatStore';
+import { useShallow } from 'zustand/react/shallow';
+import { useChatStore, McpServerItem } from '@/stores/chatStore';
 import {
   Sparkles,
   Network,
   Plus,
   Trash2,
-  Edit2,
   Power,
   X,
 } from 'lucide-react';
 
 export const ToolsPanel: React.FC = () => {
-  const { skills, mcpServers, refreshMcpAndSkills, sessions, activeSessionId } = useChatStore();
+  const { skills, mcpServers, refreshMcpAndSkills, sessions, activeSessionId } = useChatStore(
+    useShallow((s) => ({
+      skills: s.skills,
+      mcpServers: s.mcpServers,
+      refreshMcpAndSkills: s.refreshMcpAndSkills,
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+    }))
+  );
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
   const [activeTab, setActiveTab] = useState<'skills' | 'mcp'>('skills');
@@ -41,17 +49,8 @@ export const ToolsPanel: React.FC = () => {
       .map((t) => t.trim())
       .filter(Boolean);
 
-    const content = `---
-name: ${cleanName}
-description: ${editingSkill.description.trim()}
-tools: [${toolList.join(', ')}]
----
-
-${editingSkill.prompt.trim()}
-`;
-
-    if (window.electronAPI?.saveWorkspace) {
-      console.log('保存技能:', cleanName);
+    if (typeof window.electronAPI?.saveWorkspace === 'function') {
+      console.log('保存技能:', cleanName, toolList.length, editingSkill.prompt.trim().length);
     }
     setEditingSkill(null);
     if (refreshMcpAndSkills) {

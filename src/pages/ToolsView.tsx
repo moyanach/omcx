@@ -1,366 +1,61 @@
-import React, { useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
-import {
-  Sparkles,
-  Network,
-  Wrench,
-  Copy,
-  Check,
-  X,
-  FileCode,
-  FolderGit2,
-  Globe,
-  Power,
-  Bot,
-  Shield,
-  ChevronDown,
-  ChevronRight,
-  Loader2,
-  MessageSquareText,
-  KeyRound,
-  Trash2,
-  Upload,
-  Store,
-} from 'lucide-react';
+import React, { useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
+import { Sparkles, Network, Wrench, Bot } from 'lucide-react';
 import { useChatStore, SkillItem, SubagentItem } from '@/stores/chatStore';
-import SkillMarketModal from '@/components/skills/SkillMarketModal';
+import { SkillsTab } from './tools/SkillsTab';
+import { SubagentsTab } from './tools/SubagentsTab';
+import { McpServersTab } from './tools/McpServersTab';
+import { ToolDetailModals } from './tools/ToolDetailModals';
 
 export const ToolsView: React.FC = () => {
-  const { skills, mcpServers, subagents, refreshMcpAndSkills, sessions, activeSessionId } = useChatStore();
+  const { skills, mcpServers, subagents, refreshMcpAndSkills, sessions, activeSessionId } =
+    useChatStore(
+      useShallow((s) => ({
+        skills: s.skills,
+        mcpServers: s.mcpServers,
+        subagents: s.subagents,
+        refreshMcpAndSkills: s.refreshMcpAndSkills,
+        sessions: s.sessions,
+        activeSessionId: s.activeSessionId,
+      }))
+    );
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
   const [activeTab, setActiveTab] = useState<'skills' | 'subagents' | 'mcp'>('skills');
-  const [skillFilter, setSkillFilter] = useState<'all' | 'project' | 'global'>('all');
   const [inspectingSkill, setInspectingSkill] = useState<SkillItem | null>(null);
   const [inspectingSubagent, setInspectingSubagent] = useState<SubagentItem | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [expandedMcpServer, setExpandedMcpServer] = useState<string | null>(null);
-  const [mcpToolState, setMcpToolState] = useState<
-    Record<string, { loading: boolean; error?: string; tools: any[] }>
-  >({});
-  const [expandedPromptServer, setExpandedPromptServer] = useState<string | null>(null);
-  const [mcpPromptState, setMcpPromptState] = useState<
-    Record<string, { loading: boolean; error?: string; prompts: any[] }>
-  >({});
-  const [promptNotice, setPromptNotice] = useState('');
-  const [oauthState, setOauthState] = useState<Record<string, any>>({});
-  const [oauthBusy, setOauthBusy] = useState('');
-  const [oauthNotices, setOauthNotices] = useState<Record<string, string>>({});
-  const [skillNotice, setSkillNotice] = useState('');
-  const [marketOpen, setMarketOpen] = useState(false);
-
-  // 技能次级筛选
-  const filteredSkills = skills.filter((s) => {
-    if (skillFilter === 'project') return s.scope === 'project';
-    if (skillFilter === 'global') return s.scope === 'global';
-    return true;
-  });
-
-  const projectSkillsCount = skills.filter((s) => s.scope === 'project').length;
-  const globalSkillsCount = skills.filter((s) => s.scope === 'global').length;
-
-  const handleCopyPrompt = (text: string) => {
-    if (!text) return;
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const flashSkillNotice = (text: string) => {
-    setSkillNotice(text);
-    setTimeout(() => setSkillNotice((current) => (current === text ? '' : current)), 3000);
-  };
-
-  const handleToggleSkill = async (skill: SkillItem, event: React.MouseEvent) => {
-    event.stopPropagation();
-    if (!window.electronAPI?.toggleSkill) return;
-    const nextEnabled = skill.enabled === false;
-    const res = await window.electronAPI.toggleSkill(skill.name, nextEnabled);
-    if (!res?.success) {
-      flashSkillNotice(res?.error || '切换技能状态失败');
-      return;
-    }
-    flashSkillNotice(nextEnabled ? `已启用「${skill.name}」` : `已停用「${skill.name}」`);
-    await refreshMcpAndSkills(activeSession?.workDir);
-  };
-
-  const handleDeleteSkill = async (skill: SkillItem, event: React.MouseEvent) => {
-    event.stopPropagation();
-    if (!window.electronAPI?.deleteSkill || !skill.filePath) return;
-    const confirmed = window.confirm(
-      `确认删除技能「${skill.name}」？\n\n将删除磁盘上的技能文件${
-        skill.scope === 'project' ? '（项目专属技能，仅影响当前项目）' : ''
-      }，此操作不可撤销。`
-    );
-    if (!confirmed) return;
-    const res = await window.electronAPI.deleteSkill(skill.filePath, activeSession?.workDir);
-    if (!res?.success) {
-      flashSkillNotice(res?.error || '删除技能失败');
-      return;
-    }
-    flashSkillNotice(`已删除「${skill.name}」`);
-    await refreshMcpAndSkills(activeSession?.workDir);
-  };
-
-  const handleImportSkill = async (mode: 'file' | 'folder') => {
-    if (!window.electronAPI?.importSkill) return;
-    const payload = { mode, workDir: activeSession?.workDir };
-    let res = await window.electronAPI.importSkill(payload);
-    if (res?.canceled) return;
-    if (res?.code === 'exists') {
-      const overwrite = window.confirm(`技能「${res.name}」已存在，是否覆盖安装？`);
-      if (!overwrite) return;
-      res = await window.electronAPI.importSkill({ ...payload, sourcePath: res.sourcePath, overwrite: true });
-    }
-    if (!res?.success) {
-      flashSkillNotice(res?.error || '导入技能失败');
-      return;
-    }
-    flashSkillNotice(`已导入「${res.name}」`);
-    await refreshMcpAndSkills(activeSession?.workDir);
-  };
-
-  const handleDeleteMcpServer = async (server: any) => {
-    if (!window.electronAPI?.deleteMcpServer) return;
-    const confirmed = window.confirm(
-      `确认删除 MCP 服务器「${server.name}」？\n\n将从 ~/.omcx/mcp.json 中移除该配置并断开连接。`
-    );
-    if (!confirmed) return;
-    const res = await window.electronAPI.deleteMcpServer(server.id);
-    if (!res?.success) {
-      console.error('删除 MCP 服务器失败:', res?.error);
-      return;
-    }
-    await refreshMcpAndSkills(activeSession?.workDir);
-  };
-
-  const handleToggleMcpServer = async (serverId: string, currentEnabled: boolean) => {
-    if (!window.electronAPI?.toggleMcpServer) return;
-    const res = await window.electronAPI.toggleMcpServer(serverId, !currentEnabled);
-    if (!res?.success) {
-      console.error('切换 MCP 服务器状态失败:', res?.error);
-      return;
-    }
-    await refreshMcpAndSkills(activeSession?.workDir);
-  };
-
-  const handleTrustProjectMcp = async (trusted: boolean) => {
-    if (!window.electronAPI?.trustProjectMcp || !activeSession?.workDir) return;
-    const res = await window.electronAPI.trustProjectMcp(activeSession.workDir, trusted);
-    if (!res?.success) {
-      console.error('项目级 MCP 信任操作失败:', res?.error);
-      return;
-    }
-    await refreshMcpAndSkills(activeSession.workDir);
-    setMcpToolState({});
-  };
-
-  const loadMcpTools = async (serverId: string) => {
-    if (!window.electronAPI?.getMcpTools) return;
-    setMcpToolState((prev) => ({
-      ...prev,
-      [serverId]: { loading: true, tools: prev[serverId]?.tools || [] },
-    }));
-    const res = await window.electronAPI.getMcpTools(serverId, activeSession?.workDir);
-    setMcpToolState((prev) => ({
-      ...prev,
-      [serverId]: {
-        loading: false,
-        tools: res?.success ? res.tools || [] : [],
-        error: res?.success ? undefined : res?.error || '读取工具失败',
-      },
-    }));
-  };
-
-  const handleToggleMcpTool = async (
-    serverId: string,
-    toolName: string,
-    enabled: boolean
-  ) => {
-    if (!window.electronAPI?.toggleMcpTool) return;
-    const res = await window.electronAPI.toggleMcpTool(
-      serverId,
-      toolName,
-      enabled,
-      activeSession?.workDir
-    );
-    if (!res?.success) {
-      console.error('切换 MCP 工具状态失败:', res?.error);
-      return;
-    }
-    setMcpToolState((prev) => ({
-      ...prev,
-      [serverId]: {
-        ...prev[serverId],
-        tools: (prev[serverId]?.tools || []).map((tool: any) =>
-          tool.name === toolName ? { ...tool, enabled } : tool
-        ),
-      },
-    }));
-  };
-
-  const handleExpandMcp = async (serverId: string) => {
-    if (expandedMcpServer === serverId) {
-      setExpandedMcpServer(null);
-      return;
-    }
-    setExpandedMcpServer(serverId);
-    if (!mcpToolState[serverId]?.tools?.length) {
-      await loadMcpTools(serverId);
-    }
-  };
-
-  const loadMcpPrompts = async (serverId: string) => {
-    if (!window.electronAPI?.listMcpPrompts) return;
-    setMcpPromptState((prev) => ({
-      ...prev,
-      [serverId]: { loading: true, prompts: prev[serverId]?.prompts || [] },
-    }));
-    const list = await window.electronAPI.listMcpPrompts(activeSession?.workDir);
-    const item = Array.isArray(list) ? list.find((entry: any) => entry.serverId === serverId) : null;
-    setMcpPromptState((prev) => ({
-      ...prev,
-      [serverId]: {
-        loading: false,
-        prompts: Array.isArray(item?.prompts) ? item.prompts : [],
-        error: item?.error || (item ? undefined : '读取提示词失败'),
-      },
-    }));
-  };
-
-  const handleExpandPrompts = async (serverId: string) => {
-    if (expandedPromptServer === serverId) {
-      setExpandedPromptServer(null);
-      return;
-    }
-    setExpandedPromptServer(serverId);
-    await loadMcpPrompts(serverId);
-  };
-
-  const handleCopyMcpPrompt = async (serverId: string, prompt: any) => {
-    if (!window.electronAPI?.getMcpPrompt) return;
-    setPromptNotice('');
-    const args: Record<string, string> = {};
-    for (const arg of Array.isArray(prompt?.arguments) ? prompt.arguments : []) {
-      if (arg?.name) args[arg.name] = '';
-    }
-    const res = await window.electronAPI.getMcpPrompt(
-      serverId,
-      prompt.name,
-      args,
-      activeSession?.workDir
-    );
-    if (!res?.success) {
-      setPromptNotice(res?.error || '获取提示词失败');
-      return;
-    }
-    const text = res.text || '';
-    if (!text) {
-      setPromptNotice('该提示词没有可复制的文本内容');
-      return;
-    }
-    await navigator.clipboard.writeText(text);
-    setPromptNotice(`已复制提示词「${prompt.name}」到剪贴板`);
-  };
-
-  const refreshOAuthStatus = async () => {
-    if (!window.electronAPI?.getMcpOAuthStatus) return;
-    try {
-      const list = await window.electronAPI.getMcpOAuthStatus(activeSession?.workDir);
-      const map: Record<string, any> = {};
-      for (const item of Array.isArray(list) ? list : []) map[item.serverId] = item;
-      setOauthState(map);
-    } catch {
-      // 状态读取失败不影响服务器列表
-    }
-  };
-
-  useEffect(() => {
-    refreshOAuthStatus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSession?.workDir, mcpServers.length]);
-
-  const handleAuthorizeOAuth = async (serverId: string) => {
-    if (!window.electronAPI?.authorizeMcpOAuth || oauthBusy) return;
-    setOauthBusy(serverId);
-    setOauthNotices((prev) => ({ ...prev, [serverId]: '' }));
-    try {
-      const res = await window.electronAPI.authorizeMcpOAuth(
-        serverId,
-        activeSession?.workDir
-      );
-      if (!res?.success) {
-        setOauthNotices((prev) => ({
-          ...prev,
-          [serverId]: res?.error || 'OAuth 授权失败',
-        }));
-        return;
-      }
-      setOauthNotices((prev) => ({
-        ...prev,
-        [serverId]: `OAuth 授权成功${res.scope ? `（${res.scope}）` : ''}`,
-      }));
-      await refreshOAuthStatus();
-    } catch (err: any) {
-      setOauthNotices((prev) => ({
-        ...prev,
-        [serverId]: err?.message || String(err),
-      }));
-    } finally {
-      setOauthBusy('');
-    }
-  };
-
-  const handleLogoutOAuth = async (serverId: string) => {
-    if (!window.electronAPI?.logoutMcpOAuth || oauthBusy) return;
-    const confirmed = window.confirm('确认清除该 MCP 服务器的 OAuth 令牌？');
-    if (!confirmed) return;
-    setOauthBusy(serverId);
-    try {
-      await window.electronAPI.logoutMcpOAuth(serverId, activeSession?.workDir);
-      setOauthNotices((prev) => ({ ...prev, [serverId]: '已清除 OAuth 令牌' }));
-      await refreshOAuthStatus();
-    } catch (err: any) {
-      setOauthNotices((prev) => ({
-        ...prev,
-        [serverId]: err?.message || String(err),
-      }));
-    } finally {
-      setOauthBusy('');
-    }
-  };
 
   return (
-    <div className='flex-1 h-full flex flex-col bg-[var(--ui-app-bg)] overflow-hidden text-[var(--ui-text-primary)] select-none'>
-      {/* 顶部 Header：仅保留左侧标题区 */}
-      <div className='h-[56px] border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-panel-bg)] px-6 flex items-center justify-between flex-shrink-0 titlebar-drag'>
+    <div className='flex-1 h-full flex flex-col bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150 overflow-hidden text-[var(--ui-text-primary)] select-none'>
+      {/* 顶部 Header */}
+      <div className='h-[56px] border-b border-[color:var(--ui-divider-hairline)] bg-transparent px-6 flex items-center justify-between flex-shrink-0 titlebar-drag'>
         <div className='flex items-center gap-3'>
-          <div className='w-8 h-8 rounded-lg bg-[var(--ui-accent-blue-soft)] border border-[color:var(--ui-accent-blue-border)] flex items-center justify-center text-[var(--ui-accent-blue)]'>
+          <div className='w-8 h-8 rounded-xl bg-[var(--ui-accent-blue-soft)] border border-[color:var(--ui-accent-blue-border)] flex items-center justify-center text-[var(--ui-accent-blue)]'>
             <Wrench size={16} />
           </div>
           <div>
             <h1 className='text-sm font-semibold text-[var(--ui-text-primary)]'>工具与技能中心</h1>
             <p className='text-[11px] text-[var(--ui-text-muted)]'>
-              管理 Agent 声明式技能与标准 MCP 外部连接器
+              管理 Agent 声明式技能、子代理与标准 MCP 外部连接器
             </p>
           </div>
         </div>
       </div>
 
       {/* 主工作台内容区 */}
-      <div className='flex-1 overflow-y-auto p-6 custom-scrollbar'>
-        <div className='flex flex-col gap-5 max-w-6xl mx-auto'>
-          {/* 内容区顶栏：左侧分类说明，右上角放三 Tab */}
-          <div className='flex items-center justify-between border-b border-[color:var(--ui-divider-hairline)] pb-4'>
-            <div>
-              <h2 className='text-sm font-bold text-[var(--ui-text-primary)]'>
+      <div className='flex-1 overflow-y-auto p-5 md:p-6 custom-scrollbar'>
+        <div className='flex flex-col gap-4 max-w-6xl mx-auto'>
+          {/* 内容区主控台卡片：单层微透表面与外层主题面板自然融合 */}
+          <div className='rounded-2xl bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] px-5 py-3.5 shadow-sm flex flex-wrap items-center justify-between gap-4'>
+            <div className='min-w-0 flex-1'>
+              <h2 className='text-sm font-bold text-[var(--ui-text-primary)] truncate'>
                 {activeTab === 'skills'
                   ? '声明式技能扩展 (Declared Skills)'
                   : activeTab === 'subagents'
                   ? '专家子代理与并行分治引擎 (Autonomous & Parallel Subagents)'
                   : '模型上下文协议服务节点 (Model Context Protocol Servers)'}
               </h2>
-              <p className='text-[11px] text-[var(--ui-text-muted)] mt-0.5'>
+              <p className='text-[11px] text-[var(--ui-text-secondary)] mt-0.5 truncate'>
                 {activeTab === 'skills'
                   ? '支持 ~/.agents/skills 与当前项目 .agents/skills，任务匹配时按需读取指令'
                   : activeTab === 'subagents'
@@ -369,56 +64,74 @@ export const ToolsView: React.FC = () => {
               </p>
             </div>
 
-            {/* 三 Tab 切换器 (置于渲染内容右上角) */}
-            <div className='flex items-center gap-1.5 bg-[var(--ui-card-inner-bg)] p-1 rounded-xl border border-[color:var(--ui-border-hairline)] flex-shrink-0'>
+            {/* 三 Tab 切换器 */}
+            <div className='flex items-center gap-1 bg-[var(--ui-card-inner-bg)] p-1 rounded-xl border border-[color:var(--ui-border-hairline)] flex-shrink-0'>
               <button
                 onClick={() => setActiveTab('skills')}
-                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs transition-all ${
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs transition-all cursor-pointer ${
                   activeTab === 'skills'
                     ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
+                    : 'text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)]'
                 }`}
               >
                 <Sparkles
                   size={14}
-                  className={activeTab === 'skills' ? 'text-yellow-300' : 'text-yellow-400'}
+                  className={activeTab === 'skills' ? 'text-yellow-300' : 'text-[var(--ui-accent-amber)]'}
                 />
                 <span>技能扩展 (Skills)</span>
-                <span className='px-1.5 py-0.2 rounded-full text-[10px] bg-white/20 font-mono'>
+                <span
+                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                    activeTab === 'skills'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)]'
+                  }`}
+                >
                   {skills.length}
                 </span>
               </button>
               <button
                 onClick={() => setActiveTab('subagents')}
-                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs transition-all ${
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs transition-all cursor-pointer ${
                   activeTab === 'subagents'
                     ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
+                    : 'text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)]'
                 }`}
               >
                 <Bot
                   size={14}
-                  className={activeTab === 'subagents' ? 'text-sky-200' : 'text-sky-400'}
+                  className={activeTab === 'subagents' ? 'text-sky-200' : 'text-[var(--ui-accent-sky)]'}
                 />
                 <span>子代理 (Subagents)</span>
-                <span className='px-1.5 py-0.2 rounded-full text-[10px] bg-white/20 font-mono'>
+                <span
+                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                    activeTab === 'subagents'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)]'
+                  }`}
+                >
                   {subagents.length}
                 </span>
               </button>
               <button
                 onClick={() => setActiveTab('mcp')}
-                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs transition-all ${
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs transition-all cursor-pointer ${
                   activeTab === 'mcp'
                     ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
+                    : 'text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)]'
                 }`}
               >
                 <Network
                   size={14}
-                  className={activeTab === 'mcp' ? 'text-emerald-300' : 'text-emerald-400'}
+                  className={activeTab === 'mcp' ? 'text-emerald-200' : 'text-[var(--ui-accent-emerald)]'}
                 />
                 <span>MCP 服务器 (MCP)</span>
-                <span className='px-1.5 py-0.2 rounded-full text-[10px] bg-white/20 font-mono'>
+                <span
+                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                    activeTab === 'mcp'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)]'
+                  }`}
+                >
                   {mcpServers.length}
                 </span>
               </button>
@@ -426,819 +139,38 @@ export const ToolsView: React.FC = () => {
           </div>
 
           {/* ═════════ 1. SKILLS 视图 ═════════ */}
-          {activeTab === 'skills' && (
-            <div className='flex flex-col gap-4'>
-              {/* 次级筛选栏 */}
-              <div className='flex items-center justify-between'>
-                <div className='flex items-center gap-1.5 bg-[#181818] p-1 rounded-xl border border-[#282828]'>
-                  <button
-                    onClick={() => setSkillFilter('all')}
-                    className={`px-3 py-1 rounded-lg text-xs transition-colors ${
-                      skillFilter === 'all'
-                        ? 'bg-[#262626] text-neutral-100 font-semibold'
-                        : 'text-neutral-400 hover:text-neutral-200'
-                    }`}
-                  >
-                    全部 ({skills.length})
-                  </button>
-                  <button
-                    onClick={() => setSkillFilter('project')}
-                    className={`px-3 py-1 rounded-lg text-xs transition-colors flex items-center gap-1.5 ${
-                      skillFilter === 'project'
-                        ? 'bg-emerald-500/15 text-emerald-400 font-semibold border border-emerald-500/25'
-                        : 'text-neutral-400 hover:text-neutral-200'
-                    }`}
-                  >
-                    <FolderGit2 size={12} />
-                    <span>项目专属 ({projectSkillsCount})</span>
-                  </button>
-                  <button
-                    onClick={() => setSkillFilter('global')}
-                    className={`px-3 py-1 rounded-lg text-xs transition-colors flex items-center gap-1.5 ${
-                      skillFilter === 'global'
-                        ? 'bg-blue-500/15 text-blue-400 font-semibold border border-blue-500/25'
-                        : 'text-neutral-400 hover:text-neutral-200'
-                    }`}
-                  >
-                    <Globe size={12} />
-                    <span>系统全局 ~/.agents/skills ({globalSkillsCount})</span>
-                  </button>
-                </div>
-
-                <div className='flex items-center gap-2 flex-shrink-0'>
-                  {skillNotice && (
-                    <span className='text-[11px] text-emerald-400 max-w-[220px] truncate'>{skillNotice}</span>
-                  )}
-                  <button
-                    onClick={() => handleImportSkill('file')}
-                    className='h-7 px-2.5 rounded-lg bg-[#232323] border border-[#333] text-[11px] text-neutral-200 hover:bg-[#2a2a2a] transition-colors flex items-center gap-1.5'
-                    title='导入单个 .md 技能或 .zip 技能包到 ~/.omcx/skills'
-                  >
-                    <Upload size={12} />
-                    <span>上传技能</span>
-                  </button>
-                  <button
-                    onClick={() => handleImportSkill('folder')}
-                    className='h-7 px-2.5 rounded-lg bg-[#232323] border border-[#333] text-[11px] text-neutral-200 hover:bg-[#2a2a2a] transition-colors flex items-center gap-1.5'
-                    title='导入包含 SKILL.md 的技能文件夹'
-                  >
-                    <FolderGit2 size={12} />
-                    <span>导入文件夹</span>
-                  </button>
-                  <button
-                    onClick={() => setMarketOpen(true)}
-                    className='h-7 px-2.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-600 border border-emerald-500/40 text-[11px] text-white font-medium transition-colors flex items-center gap-1.5'
-                    title='粘贴技能市场链接，分页浏览并直接下载'
-                  >
-                    <Store size={12} />
-                    <span>技能市场</span>
-                  </button>
-                </div>
-              </div>
-
-            {/* 卡片网格 */}
-            {filteredSkills.length === 0 ? (
-              <div className='py-16 text-center text-xs text-neutral-500'>
-                当前分类下暂无已声明的技能规范
-              </div>
-            ) : (
-              <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5'>
-                {filteredSkills.map((skill) => {
-                  const isProject = skill.scope === 'project';
-                  return (
-                    <div
-                      key={skill.id}
-                      onClick={() => setInspectingSkill(skill)}
-                      className={`p-4 rounded-2xl bg-[#1c1c1c] border border-[#292929] hover:border-[#383838] hover:bg-[#202020] transition-all duration-150 cursor-pointer flex flex-col justify-between gap-3 group shadow-sm ${
-                        skill.enabled === false ? 'opacity-60' : ''
-                      }`}
-                    >
-                      <div className='flex flex-col gap-2'>
-                        <div className='flex items-center justify-between'>
-                          <div className='flex items-center gap-2 min-w-0'>
-                            <Sparkles size={14} className='text-yellow-400 flex-shrink-0' />
-                            <span className='font-bold text-sm text-neutral-100 group-hover:text-blue-400 transition-colors truncate'>
-                              {skill.name}
-                            </span>
-                          </div>
-                          <div className='flex items-center gap-1.5 flex-shrink-0'>
-                            {skill.version && (
-                              <span className='px-1.5 py-0.2 rounded text-[10px] font-mono bg-[#252525] text-neutral-400 border border-[#333]'>
-                                v{skill.version}
-                              </span>
-                            )}
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wide border ${
-                                isProject
-                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
-                                  : 'bg-[#262626] text-neutral-400 border-[#333]'
-                              }`}
-                            >
-                              {isProject ? 'Project' : 'Global'}
-                            </span>
-                            {skill.enabled === false && (
-                              <span className='px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/25'>
-                                已停用
-                              </span>
-                            )}
-                            <button
-                              onClick={(event) => handleToggleSkill(skill, event)}
-                              className={`p-1 rounded-md border transition-colors ${
-                                skill.enabled === false
-                                  ? 'bg-[#252525] text-neutral-500 border-[#333] hover:text-emerald-400'
-                                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25 hover:bg-emerald-500/20'
-                              }`}
-                              title={skill.enabled === false ? '点击启用（重新注入 Agent 上下文）' : '点击停用（不再进入 Agent 上下文）'}
-                            >
-                              <Power size={12} />
-                            </button>
-                            <button
-                              onClick={(event) => handleDeleteSkill(skill, event)}
-                              className='p-1 rounded-md bg-[#252525] text-neutral-500 border border-[#333] hover:text-rose-400 hover:border-rose-500/30 transition-colors'
-                              title='删除该技能文件'
-                            >
-                              <Trash2 size={12} />
-                            </button>
-                          </div>
-                        </div>
-
-                        <p className='text-xs text-neutral-400 line-clamp-3 leading-relaxed'>
-                          {skill.description || '无详细描述'}
-                        </p>
-                      </div>
-
-                      <div className='space-y-2 pt-2 border-t border-[#262626]'>
-                        {/* 依赖工具列表 */}
-                        <div className='flex items-center gap-1.5 flex-wrap min-h-[20px]'>
-                          {skill.tools && skill.tools.length > 0 ? (
-                            skill.tools.map((t, idx) => (
-                              <span
-                                key={idx}
-                                className='px-2 py-0.5 rounded-md bg-[#252525] border border-[#303030] text-[10px] font-mono text-neutral-300'
-                              >
-                                {t}
-                              </span>
-                            ))
-                          ) : (
-                            <span className='text-[10px] text-neutral-500 font-mono'>无特定依赖工具</span>
-                          )}
-                        </div>
-
-                        {/* 权限范围与可执行脚本 */}
-                        {(skill.allowedTools?.length > 0 || skill.scripts?.length > 0) && (
-                          <div className='flex items-center gap-1.5 flex-wrap'>
-                            {skill.allowedTools?.length > 0 && (
-                              <span
-                                className='px-2 py-0.5 rounded-md bg-blue-500/10 border border-blue-500/25 text-[10px] font-mono text-blue-400'
-                                title={`激活此技能时仅允许调用: ${skill.allowedTools.join(', ')}`}
-                              >
-                                允许工具 {skill.allowedTools.length}
-                              </span>
-                            )}
-                            {skill.scripts?.length > 0 && (
-                              <span
-                                className='px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/25 text-[10px] font-mono text-emerald-400'
-                                title={skill.scripts.map((s) => s.name).join(', ')}
-                              >
-                                可执行脚本 {skill.scripts.length}
-                              </span>
-                            )}
-                          </div>
-                        )}
-
-                        {/* 路径缩略 */}
-                        {skill.filePath && (
-                          <div className='text-[10px] font-mono text-neutral-500 truncate' title={skill.filePath}>
-                            {skill.filePath}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+        {activeTab === 'skills' && (
+          <SkillsTab
+            skills={skills}
+            workDir={activeSession?.workDir}
+            refreshMcpAndSkills={refreshMcpAndSkills}
+            onInspectSkill={setInspectingSkill}
+          />
         )}
 
-        {/* ═════════ 1.5 SUBAGENTS 视图 ═════════ */}
         {activeTab === 'subagents' && (
-          <div className='flex flex-col gap-4'>
-            <div className='p-3.5 rounded-2xl bg-[#181818] border border-[#282828] flex items-center justify-between gap-4'>
-              <div className='flex items-center gap-3 min-w-0'>
-                <div className='w-8 h-8 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 flex-shrink-0'>
-                  <Bot size={16} />
-                </div>
-                <div className='min-w-0'>
-                  <div className='text-xs font-semibold text-neutral-200'>
-                    支持「主 Agent 自主判断 + 零预设动态生成 + 多路并行 Fan-out」
-                  </div>
-                  <div className='text-[11px] text-neutral-500 truncate'>
-                    复杂检索或多模块任务时，主 Agent 会自动通过 dispatch_subagent 单路或多路并发委派；你也可在 ~/.omcx/agents/*.md 定义专属模板或在输入框用 @agent: 点名。
-                  </div>
-                </div>
-              </div>
-              <span className='text-[11px] text-neutral-500 flex-shrink-0'>
-                点击卡片查看系统提示词
-              </span>
-            </div>
-
-            <div className='grid grid-cols-1 md:grid-cols-2 gap-3.5'>
-              {subagents.map((ag) => (
-                <div
-                  key={ag.id}
-                  onClick={() => setInspectingSubagent(ag)}
-                  className='p-4 rounded-2xl bg-[#1c1c1c] border border-[#292929] hover:border-[#383838] hover:bg-[#202020] transition-all duration-150 cursor-pointer flex flex-col justify-between gap-3 group shadow-sm'
-                >
-                  <div className='flex flex-col gap-2'>
-                    <div className='flex items-center justify-between gap-2'>
-                      <div className='flex items-center gap-2 min-w-0'>
-                        <Bot size={15} className='text-sky-400 flex-shrink-0' />
-                        <span className='font-bold text-sm text-neutral-100 group-hover:text-sky-400 transition-colors truncate'>
-                          {ag.name}
-                        </span>
-                        <code className='text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#252525] text-sky-300 border border-[#333]'>
-                          @{ag.id}
-                        </code>
-                      </div>
-
-                      <div className='flex items-center gap-1.5 flex-shrink-0'>
-                        <span
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-mono border flex items-center gap-1 ${
-                            ag.readOnly
-                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
-                              : 'bg-amber-500/10 text-amber-300 border-amber-500/25'
-                          }`}
-                        >
-                          <Shield size={10} />
-                          <span>{ag.readOnly ? '只读安全' : '完整读写'}</span>
-                        </span>
-                        <span className='px-2 py-0.5 rounded-full text-[10px] font-mono uppercase bg-[#262626] text-neutral-400 border border-[#333]'>
-                          {ag.scope || 'builtin'}
-                        </span>
-                      </div>
-                    </div>
-
-                    <p className='text-xs text-neutral-400 line-clamp-2 leading-relaxed'>
-                      {ag.description}
-                    </p>
-                  </div>
-
-                  <div className='space-y-2 pt-2 border-t border-[#262626]'>
-                    <div className='flex items-center justify-between text-[10.5px] font-mono text-neutral-500'>
-                      <span>模型策略: {ag.modelTier === 'lite' ? 'Lite (高速轻量优先)' : 'Inherit (继承主模型)'}</span>
-                      <span>最大轮次: {ag.maxRounds || 10} 轮</span>
-                    </div>
-                    <div className='flex items-center gap-1.5 flex-wrap'>
-                      {(ag.tools || []).map((t) => (
-                        <span
-                          key={t}
-                          className='px-2 py-0.5 rounded-md bg-[#252525] border border-[#303030] text-[10px] font-mono text-neutral-300'
-                        >
-                          {t}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+          <SubagentsTab
+            subagents={subagents}
+            onInspectSubagent={setInspectingSubagent}
+          />
         )}
 
-        {/* ═════════ 2. MCP CONNECTORS 视图 ═════════ */}
         {activeTab === 'mcp' && (
-          <div className='flex flex-col gap-4 max-w-5xl mx-auto'>
-            <div className='flex items-center justify-between border-b border-[#242424] pb-3'>
-              <div>
-                <h2 className='text-xs font-bold uppercase tracking-wider text-neutral-300'>
-                  模型上下文协议服务节点 (Model Context Protocol Servers)
-                </h2>
-                <p className='text-[11px] text-neutral-500 mt-0.5'>
-                  标准协议驱动，完全兼容 Claude Desktop / Cursor 配置文件 (~/.omcx/mcp.json)
-                </p>
-              </div>
-            </div>
-
-            {mcpServers.length === 0 ? (
-              <div className='py-16 text-center text-xs text-neutral-500'>
-                暂无配置的 MCP 服务器
-              </div>
-            ) : (
-              <div className='grid grid-cols-1 md:grid-cols-2 gap-3.5'>
-                {mcpServers.map((server) => (
-                  <div
-                    key={server.id}
-                    className='p-4 rounded-2xl bg-[#1c1c1c] border border-[#292929] flex flex-col justify-between gap-3 shadow-sm'
-                  >
-                    <div className='flex flex-col gap-2'>
-                      <div className='flex items-center justify-between'>
-                        <div className='flex items-center gap-2.5'>
-                          <div className='w-8 h-8 rounded-lg bg-[#272727] border border-[#383838] flex items-center justify-center font-bold text-xs text-neutral-200'>
-                            {server.name.charAt(0).toUpperCase()}
-                          </div>
-                          <div>
-                            <div className='flex items-center gap-1.5'>
-                              <span className='font-bold text-sm text-neutral-100'>
-                                {server.name}
-                              </span>
-                              {server.source === 'project' && (
-                                <span className='text-[9px] px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25 font-medium'>
-                                  项目配置
-                                </span>
-                              )}
-                            </div>
-                            <div className='flex items-center gap-1.5 mt-0.5'>
-                              <span
-                                className={`w-1.5 h-1.5 rounded-full ${
-                                  server.requiresTrust
-                                    ? 'bg-amber-500'
-                                    : server.enabled
-                                    ? 'bg-emerald-500'
-                                    : 'bg-neutral-600'
-                                }`}
-                              />
-                              <span className='text-[10px] font-mono text-neutral-400'>
-                                {server.requiresTrust
-                                  ? '待授权'
-                                  : server.enabled
-                                  ? '在线 (Ready)'
-                                  : '已停用'}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* 启用/停用切换按钮（项目级配置由项目文件托管，不在此处改写） */}
-                        {server.source === 'project' ? (
-                          <span
-                            className='p-1.5 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                            title='项目级 MCP 配置请在项目 .omcx/mcp.json 中启停'
-                          >
-                            <Shield size={13} />
-                          </span>
-                        ) : (
-                          <div className='flex items-center gap-1'>
-                            <button
-                              onClick={() => handleToggleMcpServer(server.id, server.enabled)}
-                              className={`p-1.5 rounded-lg border transition-colors ${
-                                server.enabled
-                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
-                                  : 'bg-[#252525] text-neutral-500 border-[#333] hover:text-neutral-300'
-                              }`}
-                              title={server.enabled ? '点击停用' : '点击启用'}
-                            >
-                              <Power size={13} />
-                            </button>
-                            <button
-                              onClick={() => handleDeleteMcpServer(server)}
-                              className='p-1.5 rounded-lg bg-[#252525] text-neutral-500 border border-[#333] hover:text-rose-400 hover:border-rose-500/30 transition-colors'
-                              title='删除该 MCP 服务器配置'
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      <p className='text-xs text-neutral-400 leading-relaxed'>
-                        {server.description || '标准 MCP 服务节点'}
-                      </p>
-
-                      {/* OAuth 2.1 授权（仅启用 oauth 的远程 HTTP 服务） */}
-                      {server.url &&
-                        (server.oauth || server.auth?.type === 'oauth') && (
-                        <div className='flex flex-wrap items-center gap-2 rounded-xl bg-[#161616] border border-[#262626] px-2.5 py-1.5'>
-                          <span className='flex items-center gap-1.5 text-[10px] font-mono text-neutral-400'>
-                            <KeyRound size={11} className={oauthState[server.id]?.authorized ? 'text-emerald-400' : 'text-neutral-500'} />
-                            {oauthState[server.id]?.authorized ? (
-                              <span className='text-emerald-400'>
-                                OAuth 已授权
-                                {oauthState[server.id]?.expired ? '（已过期）' : ''}
-                              </span>
-                            ) : (
-                              <span>OAuth 未授权</span>
-                            )}
-                          </span>
-                          {oauthState[server.id]?.scope && (
-                            <span className='text-[9.5px] font-mono text-neutral-600 truncate max-w-[160px]' title={oauthState[server.id].scope}>
-                              {oauthState[server.id].scope}
-                            </span>
-                          )}
-                          <div className='ml-auto flex items-center gap-1.5'>
-                            <button
-                              onClick={() => handleAuthorizeOAuth(server.id)}
-                              disabled={Boolean(oauthBusy)}
-                              className='px-2 py-0.5 rounded-md bg-blue-500/10 border border-blue-500/25 text-[10px] text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 flex items-center gap-1'
-                              title='打开系统浏览器完成 OAuth 授权（授权码 + PKCE）'
-                            >
-                              {oauthBusy === server.id ? (
-                                <Loader2 size={10} className='animate-spin' />
-                              ) : null}
-                              {oauthState[server.id]?.authorized ? '重新授权' : 'OAuth 登录'}
-                            </button>
-                            {oauthState[server.id]?.authorized && (
-                              <button
-                                onClick={() => handleLogoutOAuth(server.id)}
-                                disabled={Boolean(oauthBusy)}
-                                className='px-2 py-0.5 rounded-md bg-[#252525] border border-[#333] text-[10px] text-neutral-400 hover:text-rose-300 disabled:opacity-50'
-                              >
-                                退出
-                              </button>
-                            )}
-                          </div>
-                          {oauthNotices[server.id] && (
-                            <div className='w-full text-[9.5px] text-neutral-400 break-words'>
-                              {oauthNotices[server.id]}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* 工具级权限：展开后按工具独立启停 */}
-                      <button
-                        onClick={() => handleExpandMcp(server.id)}
-                        className='self-start flex items-center gap-1 text-[10.5px] text-neutral-400 hover:text-blue-300 transition-colors'
-                        title='查看并单独启停该 MCP 服务器暴露的工具'
-                      >
-                        {expandedMcpServer === server.id ? (
-                          <ChevronDown size={11} />
-                        ) : (
-                          <ChevronRight size={11} />
-                        )}
-                        <span>工具权限</span>
-                      </button>
-
-                      {expandedMcpServer === server.id && (
-                        <div className='rounded-xl bg-[#161616] border border-[#262626] p-2 flex flex-col gap-1.5'>
-                          {mcpToolState[server.id]?.loading ? (
-                            <div className='flex items-center gap-1.5 text-[10.5px] text-neutral-500 py-1'>
-                              <Loader2 size={11} className='animate-spin' />
-                              正在读取工具清单…
-                            </div>
-                          ) : mcpToolState[server.id]?.error ? (
-                            <div className='text-[10.5px] text-rose-400 py-1 select-text'>
-                              {mcpToolState[server.id].error}
-                            </div>
-                          ) : (mcpToolState[server.id]?.tools || []).length === 0 ? (
-                            <div className='text-[10.5px] text-neutral-500 py-1'>
-                              暂无可用工具（服务器可能尚未启动）
-                            </div>
-                          ) : (
-                            <>
-                              <div className='flex items-center justify-between text-[10px] text-neutral-500'>
-                                <span>已启用 {mcpToolState[server.id].tools.filter((t: any) => t.enabled).length} / {mcpToolState[server.id].tools.length}</span>
-                                <button
-                                  onClick={() => loadMcpTools(server.id)}
-                                  className='text-blue-400 hover:text-blue-300'
-                                >
-                                  刷新
-                                </button>
-                              </div>
-                              <div className='max-h-[190px] overflow-y-auto custom-scrollbar flex flex-col gap-1 pr-1'>
-                                {mcpToolState[server.id].tools.map((tool: any) => (
-                                  <label
-                                    key={tool.name}
-                                    className={`flex items-start gap-2 rounded-lg px-2 py-1.5 cursor-pointer ${
-                                      server.source === 'project'
-                                        ? 'opacity-70 cursor-not-allowed'
-                                        : 'hover:bg-[#202020]'
-                                    }`}
-                                    title={tool.description || tool.name}
-                                  >
-                                    <input
-                                      type='checkbox'
-                                      checked={!!tool.enabled}
-                                      disabled={server.source === 'project'}
-                                      onChange={(e) =>
-                                        handleToggleMcpTool(server.id, tool.name, e.target.checked)
-                                      }
-                                      className='mt-0.5 accent-blue-600'
-                                    />
-                                    <span className='min-w-0'>
-                                      <span className='block text-[11px] font-mono text-neutral-200 truncate'>
-                                        {tool.name}
-                                      </span>
-                                      {tool.description && (
-                                        <span className='block text-[10px] text-neutral-500 truncate'>
-                                          {tool.description}
-                                        </span>
-                                      )}
-                                    </span>
-                                  </label>
-                                ))}
-                              </div>
-                              {server.source === 'project' && (
-                                <div className='text-[9.5px] text-amber-400/80'>
-                                  项目级工具权限请在项目 .omcx/mcp.json 中配置
-                                </div>
-                              )}
-                            </>
-                          )}
-                        </div>
-                      )}
-
-                      {/* 提示词 (MCP prompts)：发现并复制服务器提供的可复用提示模板 */}
-                      <button
-                        onClick={() => handleExpandPrompts(server.id)}
-                        className='self-start flex items-center gap-1 text-[10.5px] text-neutral-400 hover:text-emerald-300 transition-colors'
-                        title='查看并复制该 MCP 服务器暴露的提示词模板 (prompts/list + prompts/get)'
-                      >
-                        {expandedPromptServer === server.id ? (
-                          <ChevronDown size={11} />
-                        ) : (
-                          <ChevronRight size={11} />
-                        )}
-                        <MessageSquareText size={11} />
-                        <span>提示词</span>
-                      </button>
-
-                      {expandedPromptServer === server.id && (
-                        <div className='rounded-xl bg-[#161616] border border-[#262626] p-2 flex flex-col gap-1.5'>
-                          {mcpPromptState[server.id]?.loading ? (
-                            <div className='flex items-center gap-1.5 text-[10.5px] text-neutral-500 py-1'>
-                              <Loader2 size={11} className='animate-spin' />
-                              正在读取提示词…
-                            </div>
-                          ) : mcpPromptState[server.id]?.error ? (
-                            <div className='text-[10.5px] text-rose-400 py-1 select-text'>
-                              {mcpPromptState[server.id].error}
-                            </div>
-                          ) : (mcpPromptState[server.id]?.prompts || []).length === 0 ? (
-                            <div className='text-[10.5px] text-neutral-500 py-1'>
-                              该服务器未提供提示词模板
-                            </div>
-                          ) : (
-                            <>
-                              <div className='flex items-center justify-between text-[10px] text-neutral-500'>
-                                <span>共 {mcpPromptState[server.id].prompts.length} 个提示词</span>
-                                <button
-                                  onClick={() => loadMcpPrompts(server.id)}
-                                  className='text-emerald-400 hover:text-emerald-300'
-                                >
-                                  刷新
-                                </button>
-                              </div>
-                              <div className='max-h-[190px] overflow-y-auto custom-scrollbar flex flex-col gap-1 pr-1'>
-                                {mcpPromptState[server.id].prompts.map((prompt: any) => (
-                                  <button
-                                    key={prompt.name}
-                                    onClick={() => handleCopyMcpPrompt(server.id, prompt)}
-                                    className='text-left rounded-lg px-2 py-1.5 hover:bg-[#202020] transition-colors'
-                                    title={prompt.description || `复制提示词 ${prompt.name}`}
-                                  >
-                                    <span className='flex items-center gap-1.5'>
-                                      <span className='text-[11px] font-mono text-neutral-200 truncate'>
-                                        {prompt.name}
-                                      </span>
-                                      {Array.isArray(prompt.arguments) && prompt.arguments.length > 0 && (
-                                        <span className='text-[9px] px-1 rounded bg-[#2a2a2a] text-neutral-400'>
-                                          {prompt.arguments.length} 参数
-                                        </span>
-                                      )}
-                                      <Copy size={10} className='ml-auto text-neutral-600 flex-shrink-0' />
-                                    </span>
-                                    {prompt.description && (
-                                      <span className='block text-[10px] text-neutral-500 truncate'>
-                                        {prompt.description}
-                                      </span>
-                                    )}
-                                  </button>
-                                ))}
-                              </div>
-                            </>
-                          )}
-                          {promptNotice && (
-                            <div className='text-[9.5px] text-emerald-400/90 break-words'>
-                              {promptNotice}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {server.requiresTrust && (
-                        <div className='flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2'>
-                          <Shield size={13} className='text-amber-400 mt-0.5 flex-shrink-0' />
-                          <div className='flex-1 min-w-0'>
-                            <p className='text-[11px] text-amber-200 leading-relaxed'>
-                              该项目自带 MCP 服务器配置，启用后会以当前用户权限执行其中的命令。请确认项目来源可信后再授权；配置文件变更后需要重新授权。
-                            </p>
-                            <button
-                              onClick={() => handleTrustProjectMcp(true)}
-                              className='mt-1.5 text-[11px] font-semibold text-amber-300 hover:text-amber-200'
-                            >
-                              信任此项目并启用
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {server.source === 'project' && server.trusted && (
-                        <button
-                          onClick={() => handleTrustProjectMcp(false)}
-                          className='self-start text-[10px] text-neutral-500 hover:text-amber-400'
-                        >
-                          撤销项目 MCP 信任
-                        </button>
-                      )}
-                    </div>
-
-                    {/* 执行配置 */}
-                    <div className='bg-[#161616] border border-[#262626] rounded-xl p-2.5 flex items-center justify-between text-xs font-mono text-neutral-400 overflow-hidden'>
-                      <div className='truncate pr-2'>
-                        {server.url ? (
-                          <>
-                            <span className='text-emerald-400 font-semibold'>
-                              {server.transport === 'sse' ? 'SSE' : 'HTTP'}
-                            </span>{' '}
-                            <span>{server.url}</span>
-                          </>
-                        ) : (
-                          <>
-                            <span className='text-blue-400 font-semibold'>{server.command}</span>{' '}
-                            <span>{(server.args || []).join(' ')}</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <McpServersTab
+            mcpServers={mcpServers}
+            workDir={activeSession?.workDir}
+            refreshMcpAndSkills={refreshMcpAndSkills}
+          />
         )}
         </div>
       </div>
 
-      {/* ═════════ 技能市场弹层 ═════════ */}
-      <SkillMarketModal
-        open={marketOpen}
-        onClose={() => setMarketOpen(false)}
-        onInstalled={() => refreshMcpAndSkills(activeSession?.workDir)}
+      <ToolDetailModals
+        inspectingSkill={inspectingSkill}
+        inspectingSubagent={inspectingSubagent}
+        onCloseSkill={() => setInspectingSkill(null)}
+        onCloseSubagent={() => setInspectingSubagent(null)}
       />
-
-      {/* ═════════ 3. SKILL 详情弹窗 (createPortal 挂载至 body 顶层，z-[99999] 防遮挡) ═════════ */}
-      {inspectingSkill && typeof document !== 'undefined' && createPortal(
-        <div
-          className='fixed inset-0 z-[99999] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6 select-none animate-in fade-in duration-150'
-          onClick={() => setInspectingSkill(null)}
-        >
-          <div
-            className='w-full max-w-2xl bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh] text-[var(--ui-text-primary)]'
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* 弹窗头部 */}
-            <div className='px-5 py-3.5 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between flex-shrink-0'>
-              <div className='flex items-center gap-2 min-w-0'>
-                <Sparkles size={16} className='text-yellow-400 flex-shrink-0' />
-                <h3 className='font-bold text-sm text-[var(--ui-text-primary)] truncate'>
-                  {inspectingSkill.name}
-                </h3>
-                <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
-                    inspectingSkill.scope === 'project'
-                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
-                      : 'bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border-[color:var(--ui-border-hairline)]'
-                  }`}
-                >
-                  {inspectingSkill.scope === 'project' ? 'Project' : 'Global'}
-                </span>
-                {inspectingSkill.version && (
-                  <span className='px-1.5 py-0.2 rounded text-[10px] font-mono bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border border-[color:var(--ui-border-hairline)]'>
-                    v{inspectingSkill.version}
-                  </span>
-                )}
-              </div>
-
-              <div className='flex items-center gap-1.5 flex-shrink-0'>
-                <button
-                  onClick={() => handleCopyPrompt(inspectingSkill.prompt)}
-                  className='px-2.5 py-1 rounded-lg bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] text-xs flex items-center gap-1 transition-colors'
-                  title='复制 Prompt'
-                >
-                  {copied ? <Check size={12} className='text-emerald-400' /> : <Copy size={12} />}
-                  <span>{copied ? '已复制' : '复制'}</span>
-                </button>
-                <button
-                  onClick={() => setInspectingSkill(null)}
-                  className='p-1 rounded-lg text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)] transition-colors'
-                  title='关闭'
-                >
-                  <X size={15} />
-                </button>
-              </div>
-            </div>
-
-            {/* 弹窗信息栏 */}
-            <div className='px-5 py-3 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-inner-bg)] flex flex-col gap-2 flex-shrink-0 text-xs'>
-              {inspectingSkill.description && (
-                <p className='text-[var(--ui-text-secondary)] leading-relaxed'>{inspectingSkill.description}</p>
-              )}
-              {inspectingSkill.filePath && (
-                <div className='flex items-center gap-1.5 text-[11px] text-[var(--ui-text-muted)] font-mono truncate'>
-                  <FileCode size={12} className='flex-shrink-0 text-[var(--ui-text-muted)]' />
-                  <span className='truncate'>{inspectingSkill.filePath}</span>
-                </div>
-              )}
-              {inspectingSkill.tools && inspectingSkill.tools.length > 0 && (
-                <div className='flex items-center gap-1.5 flex-wrap pt-1'>
-                  <span className='text-[10px] text-[var(--ui-text-faint)]'>依赖工具:</span>
-                  {inspectingSkill.tools.map((t, idx) => (
-                    <span
-                      key={idx}
-                      className='px-2 py-0.5 rounded-md bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[10px] font-mono text-[var(--ui-text-secondary)]'
-                    >
-                      {t}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Prompt 正文 */}
-            <div className='flex-1 overflow-y-auto p-5 custom-scrollbar bg-[var(--ui-app-bg)]'>
-              <pre className='text-xs font-mono text-[var(--ui-text-primary)] whitespace-pre-wrap leading-relaxed select-text'>
-                {inspectingSkill.prompt || '该技能未包含额外的提示词正文'}
-              </pre>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {/* ═════════ 4. SUBAGENT 详情弹窗 (createPortal 挂载至 body 顶层) ═════════ */}
-      {inspectingSubagent && typeof document !== 'undefined' && createPortal(
-        <div
-          className='fixed inset-0 z-[99999] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6 select-none animate-in fade-in duration-150'
-          onClick={() => setInspectingSubagent(null)}
-        >
-          <div
-            className='w-full max-w-2xl bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh] text-[var(--ui-text-primary)]'
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className='px-5 py-3.5 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between flex-shrink-0'>
-              <div className='flex items-center gap-2 min-w-0'>
-                <Bot size={16} className='text-sky-400 flex-shrink-0' />
-                <h3 className='font-bold text-sm text-[var(--ui-text-primary)] truncate'>
-                  {inspectingSubagent.name}
-                </h3>
-                <code className='px-2 py-0.5 rounded text-[10px] font-mono bg-[var(--ui-chip-bg)] text-sky-400 border border-[color:var(--ui-border-hairline)]'>
-                  @agent:{inspectingSubagent.id}
-                </code>
-                <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
-                    inspectingSubagent.readOnly
-                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
-                      : 'bg-amber-500/10 text-amber-300 border-amber-500/25'
-                  }`}
-                >
-                  {inspectingSubagent.readOnly ? '只读安全' : '完整读写'}
-                </span>
-              </div>
-
-              <div className='flex items-center gap-1.5 flex-shrink-0'>
-                <button
-                  onClick={() => handleCopyPrompt(inspectingSubagent.systemPrompt || '')}
-                  className='px-2.5 py-1 rounded-lg bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] text-xs flex items-center gap-1 transition-colors'
-                  title='复制系统提示词'
-                >
-                  {copied ? <Check size={12} className='text-emerald-400' /> : <Copy size={12} />}
-                  <span>{copied ? '已复制' : '复制'}</span>
-                </button>
-                <button
-                  onClick={() => setInspectingSubagent(null)}
-                  className='p-1 rounded-lg text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)] transition-colors'
-                  title='关闭'
-                >
-                  <X size={15} />
-                </button>
-              </div>
-            </div>
-
-            <div className='px-5 py-3 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-inner-bg)] flex flex-col gap-2 flex-shrink-0 text-xs'>
-              <p className='text-[var(--ui-text-secondary)] leading-relaxed'>{inspectingSubagent.description}</p>
-              <div className='flex items-center gap-1.5 flex-wrap pt-1'>
-                <span className='text-[10px] text-[var(--ui-text-faint)]'>授权工具白名单:</span>
-                {(inspectingSubagent.tools || []).map((t) => (
-                  <span
-                    key={t}
-                    className='px-2 py-0.5 rounded-md bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] text-[10px] font-mono text-[var(--ui-text-secondary)]'
-                  >
-                    {t}
-                  </span>
-                ))}
-              </div>
-            </div>
-
-            <div className='flex-1 overflow-y-auto p-5 custom-scrollbar bg-[var(--ui-app-bg)]'>
-              <pre className='text-xs font-mono text-[var(--ui-text-primary)] whitespace-pre-wrap leading-relaxed select-text'>
-                {inspectingSubagent.systemPrompt || '无独立系统提示词'}
-              </pre>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
     </div>
   );
 };

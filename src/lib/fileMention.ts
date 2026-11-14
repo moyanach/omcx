@@ -11,6 +11,7 @@ export interface UnifiedMentionItem {
   title: string;
   subtitle?: string;
   insertText: string;
+  filePath?: string;
   isDir?: boolean;
   scope?: "project" | "global" | "builtin";
   tools?: string[];
@@ -263,13 +264,18 @@ export function filterUnifiedMentions(
   if (!isSkillPrefix && !isMcpPrefix && !isAgentPrefix) {
     const matchedFiles = filterMentions(files, q, 10);
     matchedFiles.forEach((file) => {
+      const cleanPath = file.path.replace(/\/+$/, "");
+      const baseName = cleanPath.split("/").filter(Boolean).pop() || cleanPath;
+      const fullTargetPath = file.isDir ? `${cleanPath}/` : cleanPath;
+      const shortToken = file.isDir ? `${baseName}/` : `${baseName} `;
       scoredFiles.push({
         item: {
           id: `file:${file.path}`,
           category: "file",
-          title: file.path.split("/").filter(Boolean).pop() || file.path,
-          subtitle: file.path.split("/").slice(0, -1).join("/"),
-          insertText: `@${file.path}${file.isDir ? "/" : " "}`,
+          title: baseName,
+          subtitle: cleanPath.split("/").slice(0, -1).join("/"),
+          insertText: `@${shortToken}`,
+          filePath: fullTargetPath,
           isDir: file.isDir,
         },
         score: 1,
@@ -389,4 +395,211 @@ export function getCaretCoordinates(
   document.body.removeChild(mirror);
 
   return { top, left };
+}
+
+const MENTION_TOKEN_PATTERN = /(^|[\s(（[【"'`\u4e00-\u9fa5])@([^\s@`"'<>|]+)/g;
+const MENTION_TRAILING_PUNCTUATION = /[.,;:!?)\]}>，。；：！？、】》」』…]+$/;
+
+export type MentionTextSegment =
+  | { type: 'text'; value: string }
+  | { type: 'mention'; raw: string; token: string };
+
+/**
+ * 将文本切分为普通文本与 `@token` 引用片段，保持字符索引严格无损。
+ */
+export function tokenizeTextWithMentions(text: string): MentionTextSegment[] {
+  if (!text) return [];
+  const segments: MentionTextSegment[] = [];
+  const pattern = new RegExp(MENTION_TOKEN_PATTERN.source, 'g');
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    const prefix = match[1] || '';
+    const rawToken = match[2] || '';
+    const punctMatch = rawToken.match(MENTION_TRAILING_PUNCTUATION);
+    const punct = punctMatch ? punctMatch[0] : '';
+    const cleanToken = punct ? rawToken.slice(0, -punct.length) : rawToken;
+    const tokenStart = match.index + prefix.length;
+
+    if (!cleanToken) continue;
+
+    if (tokenStart > cursor) {
+      segments.push({ type: 'text', value: text.slice(cursor, tokenStart) });
+    }
+
+    const mentionRaw = `@${cleanToken}`;
+    segments.push({ type: 'mention', raw: mentionRaw, token: cleanToken });
+    cursor = tokenStart + mentionRaw.length;
+  }
+
+  if (cursor < text.length) {
+    segments.push({ type: 'text', value: text.slice(cursor) });
+  }
+
+  return segments;
+}
+
+/**
+ * 为文件/目录生成简短的展示 Token（默认仅文件名；若同一输入中存在同名冲突则附带最少父目录前缀消歧）。
+ */
+export function getShortFileMentionToken(
+  fullPath: string,
+  isDir: boolean,
+  existingMap: Record<string, string> = {},
+): string {
+  const normalized = fullPath.replace(/\/+$/, '').replace(/^\.\//, '');
+  const fullWithSlash = isDir ? `${normalized}/` : normalized;
+  const parts = normalized.split('/').filter(Boolean);
+
+  for (let depth = 1; depth <= parts.length; depth += 1) {
+    const candidate = parts.slice(-depth).join('/');
+    const key = isDir ? `${candidate}/` : candidate;
+    const existing = existingMap[key];
+    if (!existing || existing === fullWithSlash) {
+      return key;
+    }
+  }
+
+  return fullWithSlash;
+}
+
+function isSpecialMentionPrefix(token: string): boolean {
+  return (
+    token.startsWith('skill:') ||
+    token.startsWith('mcp:') ||
+    token.startsWith('agent:')
+  );
+}
+
+/**
+ * 识别文本中的 `@token` 是否指向有效的文件或目录（返回展示用文件名 basename 与完整路径）。
+ */
+export function findMatchedFileMention(
+  token: string,
+  mentionMap: Record<string, string> = {},
+  workspaceFiles?: FileIndexEntry[],
+): { displayName: string; fullPath: string; isDir: boolean } | null {
+  const clean = token.replace(MENTION_TRAILING_PUNCTUATION, '');
+  if (!clean || isSpecialMentionPrefix(clean) || clean === '.' || clean === '..') {
+    return null;
+  }
+
+  const mapped = mentionMap[clean] || (!clean.endsWith('/') ? mentionMap[`${clean}/`] : undefined);
+  if (mapped) {
+    const isDir = mapped.endsWith('/');
+    const stripped = mapped.replace(/\/+$/, '');
+    const displayName = stripped.split('/').filter(Boolean).pop() || clean;
+    return {
+      displayName: isDir ? `${displayName}/` : displayName,
+      fullPath: mapped,
+      isDir,
+    };
+  }
+
+  if (workspaceFiles && workspaceFiles.length > 0) {
+    const normClean = clean.replace(/\/+$/, '').replace(/^\.\//, '');
+    if (!normClean) return null;
+
+    const exact = workspaceFiles.find((entry) => entry.path.replace(/\/+$/, '') === normClean);
+    const suffixMatches = exact
+      ? [exact]
+      : workspaceFiles.filter((entry) => {
+          const p = entry.path.replace(/\/+$/, '');
+          return p === normClean || p.endsWith(`/${normClean}`);
+        });
+
+    if (suffixMatches.length > 0) {
+      const matched = suffixMatches[0];
+      const isDir = Boolean(matched.isDir || clean.endsWith('/'));
+      const stripped = matched.path.replace(/\/+$/, '');
+      const fullPath = isDir ? `${stripped}/` : stripped;
+      const displayName = stripped.split('/').filter(Boolean).pop() || clean;
+      return {
+        displayName: isDir ? `${displayName}/` : displayName,
+        fullPath,
+        isDir,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 发送前将输入框中的短文件 Token（如 `@MessageInput.tsx`）无损还原为完整工作区相对路径。
+ */
+export function resolveFileMentionsInText(
+  text: string,
+  mentionMap: Record<string, string> = {},
+  workspaceFiles?: FileIndexEntry[],
+): string {
+  if (!text || !text.includes('@')) return text;
+
+  return text.replace(MENTION_TOKEN_PATTERN, (full, prefix: string, rawToken: string) => {
+    const punctMatch = rawToken.match(MENTION_TRAILING_PUNCTUATION);
+    const punct = punctMatch ? punctMatch[0] : '';
+    const clean = punct ? rawToken.slice(0, -punct.length) : rawToken;
+
+    if (!clean || isSpecialMentionPrefix(clean)) return full;
+
+    const mapped = mentionMap[clean] || (!clean.endsWith('/') ? mentionMap[`${clean}/`] : undefined);
+    if (mapped) {
+      return `${prefix}@${mapped}${punct}`;
+    }
+
+    if (workspaceFiles && workspaceFiles.length > 0) {
+      const normClean = clean.replace(/\/+$/, '').replace(/^\.\//, '');
+      const exact = workspaceFiles.find((entry) => entry.path.replace(/\/+$/, '') === normClean);
+      if (exact) {
+        const target = exact.isDir ? `${exact.path.replace(/\/+$/, '')}/` : exact.path;
+        return `${prefix}@${target}${punct}`;
+      }
+      const suffix = workspaceFiles.find((entry) =>
+        entry.path.replace(/\/+$/, '').endsWith(`/${normClean}`)
+      );
+      if (suffix) {
+        const target = suffix.isDir ? `${suffix.path.replace(/\/+$/, '')}/` : suffix.path;
+        return `${prefix}@${target}${punct}`;
+      }
+    }
+
+    return full;
+  });
+}
+
+/**
+ * 将完整路径文本（如从文件树插入的 `@src/pages/ChatView.tsx`）紧凑化为短文件名 Token 并写入映射表。
+ */
+export function compactFileMentionsInText(
+  text: string,
+  workspaceFiles?: FileIndexEntry[],
+  existingMap: Record<string, string> = {},
+): { text: string; mentionMap: Record<string, string> } {
+  if (!text || !text.includes('@')) {
+    return { text, mentionMap: { ...existingMap } };
+  }
+
+  const nextMap: Record<string, string> = { ...existingMap };
+  const compacted = text.replace(MENTION_TOKEN_PATTERN, (full, prefix: string, rawToken: string) => {
+    const punctMatch = rawToken.match(MENTION_TRAILING_PUNCTUATION);
+    const punct = punctMatch ? punctMatch[0] : '';
+    const clean = punct ? rawToken.slice(0, -punct.length) : rawToken;
+
+    if (!clean || isSpecialMentionPrefix(clean) || !clean.includes('/')) {
+      return full;
+    }
+
+    const isDir = clean.endsWith('/');
+    const normClean = clean.replace(/\/+$/, '').replace(/^\.\//, '');
+    const matched = workspaceFiles?.find((entry) => entry.path.replace(/\/+$/, '') === normClean);
+    const actualIsDir = matched ? Boolean(matched.isDir) : isDir;
+    const fullTarget = actualIsDir ? `${normClean}/` : normClean;
+    const shortToken = getShortFileMentionToken(normClean, actualIsDir, nextMap);
+    nextMap[shortToken] = fullTarget;
+
+    return `${prefix}@${shortToken}${punct}`;
+  });
+
+  return { text: compacted, mentionMap: nextMap };
 }

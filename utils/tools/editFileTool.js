@@ -10,7 +10,7 @@
 
 const fs = require("fs");
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 const { checkSafePath } = require("./fileTools");
 const { fileLockService } = require("../../services/fileLockService");
 

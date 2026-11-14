@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import {
   FolderGit2,
   Plus,
@@ -8,10 +9,10 @@ import {
   Archive,
   ArchiveRestore,
   Trash2,
-  FolderOpen,
-  Check,
 } from 'lucide-react';
 import { useChatStore, Session } from '@/stores/chatStore';
+import { useDeleteSessionWithWorktree } from './DeleteSessionModal';
+import { useNewSessionModal } from './NewSessionModal';
 
 export interface WorkspaceGroup {
   path: string;
@@ -24,12 +25,19 @@ export const WorkspaceSessionsPanel: React.FC = () => {
     sessions,
     activeSessionId,
     setActiveSession,
-    addSession,
     saveWorkspace,
-    setSessionWorkDir,
     archiveSession,
-    deleteSession,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      setActiveSession: s.setActiveSession,
+      saveWorkspace: s.saveWorkspace,
+      archiveSession: s.archiveSession,
+    }))
+  );
+  const { requestDeleteSession, deleteSessionModal } = useDeleteSessionWithWorktree();
+  const { requestNewSession, newSessionModal } = useNewSessionModal();
 
   const [expandedPaths, setExpandedPaths] = useState<Record<string, boolean>>({});
 
@@ -80,7 +88,7 @@ export const WorkspaceSessionsPanel: React.FC = () => {
           name: folderName,
           folders: [{ path: dir, name: folderName, isPrimary: true }],
         });
-        await addSession({ workspaceId: wsId, workDir: dir });
+        requestNewSession({ workspaceId: wsId, workDir: dir });
       }
     }
   };
@@ -190,7 +198,7 @@ export const WorkspaceSessionsPanel: React.FC = () => {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                deleteSession(session.id);
+                                requestDeleteSession(session);
                               }}
                               className='p-1 rounded text-neutral-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors'
                               title='删除会话'
@@ -208,6 +216,8 @@ export const WorkspaceSessionsPanel: React.FC = () => {
           );
         })}
       </div>
+      {deleteSessionModal}
+      {newSessionModal}
     </div>
   );
 };

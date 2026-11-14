@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   ChevronDown,
   ChevronRight,
@@ -20,7 +21,15 @@ export const OutputsCard: React.FC = () => {
     setAutoOpenHtmlOutputs,
     openUrlInWorkbench,
     openFileInWorkbench,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      outputs: s.outputs,
+      autoOpenHtmlOutputs: s.autoOpenHtmlOutputs,
+      setAutoOpenHtmlOutputs: s.setAutoOpenHtmlOutputs,
+      openUrlInWorkbench: s.openUrlInWorkbench,
+      openFileInWorkbench: s.openFileInWorkbench,
+    }))
+  );
 
   const renderIcon = (name: string, type: string) => {
     const lower = name.toLowerCase();

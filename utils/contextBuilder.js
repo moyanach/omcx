@@ -4,6 +4,7 @@ const path = require("path");
 const { execFileSync, execFile } = require("child_process");
 const { discoverSubagents } = require("../services/subagentService");
 const { getPermissionModePolicy } = require("../services/sandboxPolicyService");
+const { isUnderWorktreesRoot } = require("../services/gitWorktreeService");
 
 const RULES_BUDGET = 8000;
 const SKILLS_BUDGET = 20000;
@@ -433,6 +434,17 @@ function buildRepoWikiSection(repoWiki, repoWikiPath = "") {
     .join("\n");
 }
 
+function buildWorktreeSection(workDir) {
+  if (!isUnderWorktreesRoot(workDir)) return "";
+  return [
+    "【隔离工作树环境约束 (Isolated Worktree Mode)】",
+    "当前会话运行在独立的 Git Worktree 隔离目录中。为了避免多会话磁盘占用膨胀，系统未自动复制或安装项目的本地运行依赖环境。",
+    "- **禁止重型依赖安装**: 除非用户明确要求，不要在当前目录执行完整依赖安装或生成重型构建产物。",
+    "- **仅做基础语法验证**: 完成代码改动后，请根据当前项目的编程语言与已有环境自行判断，优先执行轻量级的基础语法/静态校验，不要假设完整运行时环境已就绪。",
+    "- **明确告知验证边界**: 在最终回复中必须明确说明：当前处于未复制依赖环境的隔离 Worktree，仅完成了基础语法校验；如需完整运行与功能验证，请先将代码合并到目标分支后在主工作区测试。",
+  ].join("\n");
+}
+
 function buildSystemContext({
   workDir = null,
   matchedWorkspace = null,
@@ -474,6 +486,7 @@ function buildSystemContext({
     push("subagents", buildSubagentSection(workDir));
   }
   push("workspace", buildWorkspaceSection(matchedWorkspace, workDir));
+  push("worktree", buildWorktreeSection(workDir));
   push("environment", buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode }));
   push("git", buildGitSection(gitInfo));
 

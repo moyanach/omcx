@@ -166,13 +166,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getSubagents: (workDir) => ipcRenderer.invoke("get-subagents", workDir),
   getMemories: (workDir) => ipcRenderer.invoke("get-memories", workDir),
   getSessionOutputs: (sessionId) => ipcRenderer.invoke("get-session-outputs", sessionId),
-  getSessionCheckpoints: (sessionId) => ipcRenderer.invoke("get-session-checkpoints", sessionId),
-  getSessionCheckpoint: (sessionId, checkpointId) =>
-    ipcRenderer.invoke("get-session-checkpoint", { sessionId, checkpointId }),
-  restoreCheckpoint: (sessionId, checkpointId) =>
-    ipcRenderer.invoke("restore-checkpoint", { sessionId, checkpointId }),
-  deleteCheckpoint: (sessionId, checkpointId) =>
-    ipcRenderer.invoke("delete-checkpoint", { sessionId, checkpointId }),
   getRepoIndexStats: (workDir, refresh = false) =>
     ipcRenderer.invoke("get-repo-index-stats", { workDir, refresh }),
   getRepoMap: (workDir, maxChars = 6000, refresh = false) =>
@@ -183,9 +176,30 @@ contextBridge.exposeInMainWorld("electronAPI", {
   generateRepoWiki: (workDir, model) => ipcRenderer.invoke("generate-repo-wiki", { workDir, model }),
   getContextMetrics: (params) => ipcRenderer.invoke("get-context-metrics", params),
   getWorkspaceGitStatus: (workDir) => ipcRenderer.invoke("get-workspace-git-status", workDir),
+  getWorkspaceGitGraph: (workDir, limit = 150, scope = "all") =>
+    ipcRenderer.invoke("get-workspace-git-graph", { workDir, limit, scope }),
+  getWorkspaceGitCommitDetail: (workDir, hash) =>
+    ipcRenderer.invoke("get-workspace-git-commit-detail", { workDir, hash }),
   getWorkspaceBranches: (workDir) => ipcRenderer.invoke("workspace-get-branches", workDir),
   checkoutWorkspaceBranch: (workDir, branchName, createNew = false) =>
     ipcRenderer.invoke("workspace-checkout-branch", { workDir, branchName, createNew }),
+  deleteWorkspaceBranch: (workDir, branchName, options = {}) =>
+    ipcRenderer.invoke("workspace-delete-branch", { workDir, branchName, ...options }),
+  getWorkingTreeChanges: (workDir) =>
+    ipcRenderer.invoke("git-working-tree-changes", { workDir }),
+  commitStagedGitChanges: (workDir, message) =>
+    ipcRenderer.invoke("git-commit-staged", { workDir, message }),
+  gitFetch: (workDir) => ipcRenderer.invoke("git-fetch", { workDir }),
+  gitPull: (workDir) => ipcRenderer.invoke("git-pull", { workDir }),
+  gitPush: (workDir) => ipcRenderer.invoke("git-push", { workDir }),
+  gitMergeBranch: (workDir, sourceBranch) =>
+    ipcRenderer.invoke("git-merge-branch", { workDir, sourceBranch }),
+  gitStashAction: (workDir, action) =>
+    ipcRenderer.invoke("git-stash-action", { workDir, action }),
+  gitCherryPick: (workDir, hash) =>
+    ipcRenderer.invoke("git-cherry-pick", { workDir, hash }),
+  gitCreateBranchAt: (workDir, branchName, startPoint) =>
+    ipcRenderer.invoke("git-create-branch-at", { workDir, branchName, startPoint }),
   getWorkspaceFileDiff: (workDir, filePath) =>
     ipcRenderer.invoke("workspace-git-diff", { workDir, filePath }),
   commitWorkspaceChanges: (workDir, message) =>
@@ -212,7 +226,18 @@ contextBridge.exposeInMainWorld("electronAPI", {
   stageAllGitChanges: (workDir) => ipcRenderer.invoke("git-stage-all", { workDir }),
   createGitPullRequest: (params) => ipcRenderer.invoke("git-create-pr", params),
   listGitWorktrees: (workDir) => ipcRenderer.invoke("git-worktree-list", { workDir }),
+  listGitBranches: (workDir) => ipcRenderer.invoke("git-worktree-branches", { workDir }),
+  inspectManagedWorktree: (targetPath, sessionId = "") =>
+    ipcRenderer.invoke("git-worktree-inspect", { targetPath, sessionId }),
+  inspectGitDirectories: (folders) =>
+    ipcRenderer.invoke("git-worktree-inspect-dirs", { folders }),
   createGitWorktree: (params) => ipcRenderer.invoke("git-worktree-create", params),
+  createMultiGitWorktrees: (params) => ipcRenderer.invoke("git-worktree-create-multi", params),
+  saveSessionWorktreeGroup: (sessionId, entries) =>
+    ipcRenderer.invoke("git-worktree-save-group", { sessionId, entries }),
+  removeSessionWorktreeGroup: (sessionId) =>
+    ipcRenderer.invoke("git-worktree-remove-group", { sessionId }),
+  mergeGitWorktree: (params) => ipcRenderer.invoke("git-worktree-merge", params),
   removeGitWorktree: (workDir, targetPath, force = false) =>
     ipcRenderer.invoke("git-worktree-remove", { workDir, targetPath, force }),
 
@@ -224,9 +249,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   updateSpecStatus: (workDir, id, status) =>
     ipcRenderer.invoke("spec-update-status", { workDir, id, status }),
   deleteSpec: (workDir, id) => ipcRenderer.invoke("spec-delete", { workDir, id }),
-  getProjectTasks: (workDir) => ipcRenderer.invoke("get-project-tasks", { workDir }),
-  runProjectTask: (workDir, taskId, timeoutMs) =>
-    ipcRenderer.invoke("run-project-task", { workDir, taskId, timeoutMs }),
   getProjectHooks: (workDir) => ipcRenderer.invoke("get-project-hooks", { workDir }),
   createHooksTemplate: () => ipcRenderer.invoke("create-hooks-template"),
   setProjectHooksTrust: (workDir, trusted) =>
@@ -235,19 +257,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("fork-session", { sessionId, upToMessageId }),
   exportSession: (sessionId) => ipcRenderer.invoke("export-session", { sessionId }),
 
-  // ─── P2: 运行观测 / 评测 / 浏览器自动化 ───────────────
-  telemetryGetStats: (params = {}) => ipcRenderer.invoke("telemetry-get-stats", params),
-  telemetryListRuns: (params = {}) => ipcRenderer.invoke("telemetry-list-runs", params),
-  telemetryGetRun: (id) => ipcRenderer.invoke("telemetry-get-run", { id }),
-  telemetryClear: () => ipcRenderer.invoke("telemetry-clear"),
-  listEvals: () => ipcRenderer.invoke("evals-list"),
-  runEval: (evalId, model, maxRounds) =>
-    ipcRenderer.invoke("eval-run", { evalId, model, maxRounds }),
-  runAllEvals: (model, ids, maxRounds) =>
-    ipcRenderer.invoke("eval-run-all", { model, ids, maxRounds }),
+  // ─── P2: 浏览器自动化 ───────────────────────────────────
   browserAutoOpen: (url, workDir) => ipcRenderer.invoke("browser-auto-open", { url, workDir }),
+  browserAutoInspect: (payload = {}) => ipcRenderer.invoke("browser-auto-inspect", payload),
   browserAutoInteract: (payload) => ipcRenderer.invoke("browser-auto-interact", payload),
   browserAutoSnapshot: (payload = {}) => ipcRenderer.invoke("browser-auto-snapshot", payload),
+  browserAutoLogs: (payload = {}) => ipcRenderer.invoke("browser-auto-logs", payload),
+  browserAutoStop: () => ipcRenderer.invoke("browser-auto-stop"),
   browserAutoSaveBaseline: (payload = {}) =>
     ipcRenderer.invoke("browser-auto-save-baseline", payload),
   browserAutoState: () => ipcRenderer.invoke("browser-auto-state"),
@@ -454,5 +470,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (event, data) => callback(data);
     ipcRenderer.on("update-error", handler);
     return () => ipcRenderer.removeListener("update-error", handler);
+  },
+  onMainProcessError: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on("main-process-error", handler);
+    return () => ipcRenderer.removeListener("main-process-error", handler);
   },
 });

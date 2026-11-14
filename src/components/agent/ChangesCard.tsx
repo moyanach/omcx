@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useShallow } from 'zustand/react/shallow';
 import {
   ChevronDown,
   ChevronRight,
@@ -27,7 +29,15 @@ export const ChangesCard: React.FC = () => {
   const [message, setMessage] = useState('');
 
   const { gitStatus, sessions, activeSessionId, openDiffInWorkbench, refreshGitStatus } =
-    useChatStore();
+    useChatStore(
+      useShallow((s) => ({
+        gitStatus: s.gitStatus,
+        sessions: s.sessions,
+        activeSessionId: s.activeSessionId,
+        openDiffInWorkbench: s.openDiffInWorkbench,
+        refreshGitStatus: s.refreshGitStatus,
+      }))
+    );
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const workDir = activeSession?.workDir || '';
   const hasWorkDir = !!workDir;
@@ -190,6 +200,13 @@ export const ChangesCard: React.FC = () => {
                   />
                   <div className='flex items-center gap-1.5 justify-end'>
                     <button
+                      onClick={() => setCommitOpen(false)}
+                      disabled={committing}
+                      className='px-2.5 py-1 rounded-lg bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] disabled:opacity-50'
+                    >
+                      取消
+                    </button>
+                    <button
                       onClick={() => handleCommit(false)}
                       disabled={committing}
                       className='px-2.5 py-1 rounded-lg bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] border border-[color:var(--ui-border-hairline)] text-[11px] text-[var(--ui-text-secondary)] disabled:opacity-50 flex items-center gap-1'
@@ -200,7 +217,7 @@ export const ChangesCard: React.FC = () => {
                     <button
                       onClick={() => handleCommit(true)}
                       disabled={committing}
-                      className='px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold disabled:opacity-50 flex items-center gap-1'
+                      className='px-2.5 py-1 rounded-lg ui-btn-primary text-[11px] font-semibold disabled:opacity-50 flex items-center gap-1 transition-colors'
                     >
                       {committing && <Loader2 size={11} className='animate-spin' />}
                       全部暂存并提交
@@ -276,13 +293,13 @@ export const ChangesCard: React.FC = () => {
         />
       )}
 
-      {prOpen && (
+      {prOpen && typeof document !== 'undefined' && createPortal(
         <div
-          className='fixed inset-0 z-[300] bg-black/55 backdrop-blur-[2px] flex items-center justify-center p-6'
+          className='fixed inset-0 z-[99999] bg-[var(--ui-modal-overlay)] backdrop-blur-sm flex items-center justify-center p-6 select-none animate-in fade-in duration-150'
           onClick={() => setPrOpen(false)}
         >
           <div
-            className='w-[620px] max-w-full bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl overflow-hidden'
+            className='w-[620px] max-w-full bg-[var(--ui-modal-bg)] backdrop-blur-2xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl overflow-hidden text-[var(--ui-text-primary)]'
             onClick={(e) => e.stopPropagation()}
           >
             <div className='px-4 py-3 border-b border-[color:var(--ui-divider-hairline)] flex items-center justify-between'>
@@ -346,7 +363,7 @@ export const ChangesCard: React.FC = () => {
                 <button
                   onClick={handleCreatePr}
                   disabled={prBusy}
-                  className='px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold disabled:opacity-50 flex items-center gap-1.5'
+                  className='px-3 py-1.5 rounded-lg ui-btn-emerald text-[11px] font-semibold disabled:opacity-50 flex items-center gap-1.5 transition-colors'
                 >
                   {prBusy && <Loader2 size={12} className='animate-spin' />}
                   创建 PR
@@ -354,7 +371,8 @@ export const ChangesCard: React.FC = () => {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

@@ -5,11 +5,107 @@
  * 搜索函数从 main.js 迁出以支持 LangChain Agent 复用。
  */
 
-const https = require("https");
-const http = require("http");
+const dns = require("dns");
+const net = require("net");
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 const cheerio = require("cheerio");
+
+const MAX_SCRAPE_BYTES = 2 * 1024 * 1024;
+
+function isPrivateOrRestrictedIp(ip) {
+  if (!ip) return true;
+  const clean = ip.replace(/^::ffff:/i, "");
+  if (net.isIPv4(clean)) {
+    const parts = clean.split(".").map((n) => parseInt(n, 10));
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true; // 链路本地 & 云元数据 169.254.169.254
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    if (a >= 224) return true; // 组播/保留
+    return false;
+  }
+  if (net.isIPv6(clean)) {
+    const lower = clean.toLowerCase();
+    if (lower === "::" || lower === "::1") return true;
+    if (lower.startsWith("fc") || lower.startsWith("fd") || lower.startsWith("fe80")) return true;
+    if (lower.startsWith("ff")) return true;
+    return false;
+  }
+  return true;
+}
+
+async function validatePublicFetchUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || "").trim());
+  } catch {
+    throw new Error("URL 格式无效");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`不支持的抓取协议: ${parsed.protocol}`);
+  }
+  const host = (parsed.hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
+    throw new Error(`出于安全策略，禁止抓取本机或内网域名: ${host}`);
+  }
+  if (net.isIP(host)) {
+    if (isPrivateOrRestrictedIp(host)) {
+      throw new Error(`出于安全策略，禁止抓取内网/回环/元数据 IP: ${host}`);
+    }
+    return parsed.toString();
+  }
+  try {
+    const addrs = await dns.promises.lookup(host, { all: true, verbatim: true });
+    if (Array.isArray(addrs) && addrs.some((entry) => isPrivateOrRestrictedIp(entry.address))) {
+      throw new Error(`目标域名解析到内网或保留 IP，已拦截抓取: ${host}`);
+    }
+  } catch (err) {
+    if (err?.message?.includes("已拦截")) throw err;
+  }
+  return parsed.toString();
+}
+
+async function readResponseTextBounded(response, maxBytes = MAX_SCRAPE_BYTES) {
+  const ctype = (response.headers.get("content-type") || "").toLowerCase();
+  if (ctype && !/(text\/|html|xml|json|xhtml|javascript)/i.test(ctype)) {
+    throw new Error(`不支持的响应内容类型: ${ctype.split(";")[0]}`);
+  }
+  const contentLen = Number(response.headers.get("content-length") || 0);
+  if (contentLen > maxBytes) {
+    throw new Error(`网页体积过大 (${Math.round(contentLen / 1024)} KB)，已超过 ${Math.round(maxBytes / 1024)} KB 安全上限`);
+  }
+  if (!response.body || typeof response.body.getReader !== "function") {
+    const text = await response.text();
+    return text.length > maxBytes ? text.slice(0, maxBytes) : text;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        const remaining = maxBytes - total;
+        if (remaining <= 0) break;
+        if (value.byteLength > remaining) {
+          chunks.push(Buffer.from(value.buffer, value.byteOffset, remaining));
+          total += remaining;
+          await reader.cancel().catch(() => {});
+          break;
+        }
+        chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+        total += value.byteLength;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total).toString("utf-8");
+}
 
 // ─── 通用 fetch 封装（带超时、abort 控制） ───────────────────
 
@@ -142,7 +238,8 @@ async function scrapePageContent(url) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 6000);
   try {
-    const response = await fetch(url, {
+    const safeUrl = await validatePublicFetchUrl(url);
+    const response = await fetch(safeUrl, {
       signal: controller.signal,
       headers: {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -151,7 +248,10 @@ async function scrapePageContent(url) {
       },
     });
     if (!response.ok) throw new Error(`HTTP 错误 ${response.status}`);
-    const html = await response.text();
+    if (response.url && response.url !== safeUrl) {
+      await validatePublicFetchUrl(response.url);
+    }
+    const html = await readResponseTextBounded(response, MAX_SCRAPE_BYTES);
     const $ = cheerio.load(html);
     $("script, style, nav, footer, header, iframe, noscript, svg, form, aside, link").remove();
     const title = $("title").text().trim() || "";

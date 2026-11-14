@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   Terminal as TerminalIcon,
   RotateCcw,
@@ -8,9 +9,11 @@ import {
   ChevronRight,
   Circle,
   ClipboardList,
+  Info,
 } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { ImageAddon } from "@xterm/addon-image";
 import "@xterm/xterm/css/xterm.css";
 import { useChatStore } from "@/stores/chatStore";
 import {
@@ -18,6 +21,11 @@ import {
   getFontSettings,
   subscribeFontSettings,
 } from "@/lib/fontSettings";
+import {
+  TerminalQueryResponder,
+  measureCellSize,
+  measureScreenSize,
+} from "@/lib/terminalQueryResponder";
 
 interface AgentCommandEntry {
   id: string;
@@ -60,7 +68,14 @@ function stripAnsi(str: string): string {
 }
 
 export const IntegratedTerminalView: React.FC = () => {
-  const { sessions, activeSessionId, workspaces, toolCallsBySession } = useChatStore();
+  const { sessions, activeSessionId, workspaces, toolCallsBySession } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      workspaces: s.workspaces,
+      toolCallsBySession: s.toolCallsBySession,
+    }))
+  );
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const workDir = activeSession?.workDir || "";
 
@@ -69,12 +84,16 @@ export const IntegratedTerminalView: React.FC = () => {
   const [status, setStatus] = useState<"connecting" | "ready" | "exited" | "error">("connecting");
   const [statusText, setStatusText] = useState("正在启动交互式终端…");
   const [restartKey, setRestartKey] = useState(0);
+  const [sessionInfo, setSessionInfo] = useState<any>(null);
+  const [runtimeStats, setRuntimeStats] = useState({ bytes: 0, firstByteMs: 0 });
+  const [copied, setCopied] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const ptyIdRef = useRef<string>("");
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const statsRef = useRef({ bytes: 0, firstByteMs: 0, startedAt: 0 });
 
   const workspaceRoots = useMemo(() => {
     if (!workDir) return [];
@@ -130,9 +149,68 @@ export const IntegratedTerminalView: React.FC = () => {
       });
   }, [activeSessionId, toolCallsBySession]);
 
+  // 诊断计数每秒刷新一次，避免逐字节触发 React 渲染
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const stats = statsRef.current;
+      setRuntimeStats({ bytes: stats.bytes, firstByteMs: stats.firstByteMs });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const buildDiagnosticText = () => {
+    const stats = statsRef.current;
+    const term = termRef.current;
+    return [
+      "OMCX 终端诊断",
+      `时间: ${new Date().toISOString()}`,
+      `会话: ${activeSessionId || "-"}`,
+      `terminalId: ${ptyIdRef.current || "-"}`,
+      `状态: ${status} / ${statusText}`,
+      `shell: ${sessionInfo?.shell || "-"}`,
+      `pid: ${sessionInfo?.pid ?? "-"}`,
+      `cwd: ${sessionInfo?.cwd || cwd || workDir || "-"}`,
+      `pty 尺寸: ${sessionInfo?.cols ?? "?"}x${sessionInfo?.rows ?? "?"}`,
+      `xterm 尺寸: ${term?.cols ?? "?"}x${term?.rows ?? "?"}`,
+      `PATH: ${sessionInfo?.pathHead || "-"}`,
+      `已接收字节: ${stats.bytes}`,
+      `首帧延迟: ${stats.firstByteMs ? `${stats.firstByteMs}ms` : "未收到数据"}`,
+      `运行环境: ${navigator.userAgent}`,
+    ].join("\n");
+  };
+
+  const copyDiagnostics = async () => {
+    const text = buildDiagnosticText();
+    // 同时打到 Renderer Log，剪贴板不可用时也能从日志里取到
+    console.log(`[OMCX Terminal Diagnostic]\n${text}`);
+    let ok = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    } catch {}
+    if (!ok) {
+      // app:// 协议下 navigator.clipboard 可能不可用，退回 execCommand
+      try {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        ok = document.execCommand("copy");
+        document.body.removeChild(area);
+      } catch {}
+    }
+    setCopied(ok);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   useEffect(() => {
     const api = window.electronAPI;
-    if (!api?.createTerminalSession || !containerRef.current) {
+    const container = containerRef.current;
+    if (!api?.createTerminalSession || !container) {
       setStatus("error");
       setStatusText("当前环境未暴露 PTY 终端接口");
       return;
@@ -151,16 +229,58 @@ export const IntegratedTerminalView: React.FC = () => {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.open(containerRef.current);
+
+    // 原生贴图：yazi / viu / imgcat 等通过 iTerm2 内联图片协议（OSC 1337）或 sixel
+    // 输出图片，xterm 本身不认任何图形协议，必须由 addon-image 直接绘制到画布。
+    // enableSizeReports 必须关闭：终端像素尺寸统一由 TerminalQueryResponder 应答，
+    // 否则同一查询会收到两份回复。
+    const imageAddon = new ImageAddon({ enableSizeReports: false });
+    term.loadAddon(imageAddon);
+
     termRef.current = term;
     fitRef.current = fit;
 
+    // TUI 能力探测应答：yazi / lazygit 等启动前会查询终端能力，
+    // 无人应答就会一直等到超时，表现为进入备用屏后长时间黑屏
+    const responder = new TerminalQueryResponder({
+      getCellSize: () => measureCellSize(term),
+      getScreenSize: () => measureScreenSize(term),
+    });
+
     let disposed = false;
-    let offData: (() => void) | null = null;
-    let offExit: (() => void) | null = null;
+    let opened = false;
+    let offData: (() => void) | null | undefined = null;
+    let offExit: (() => void) | null | undefined = null;
+    let inputDisposable: { dispose: () => void } | null = null;
+    let openFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
     const terminalId = `pty_${activeSessionId || "global"}_${Date.now()}`;
     ptyIdRef.current = terminalId;
+    statsRef.current = { bytes: 0, firstByteMs: 0, startedAt: Date.now() };
+    setSessionInfo(null);
+    setRuntimeStats({ bytes: 0, firstByteMs: 0 });
+    setStatus("connecting");
+    setStatusText("正在启动交互式终端…");
+
+    const refreshScreen = () => {
+      try {
+        term.refresh(0, Math.max(0, term.rows - 1));
+      } catch {}
+    };
+
+    const syncSize = () => {
+      // 隐藏态（display:none）下 fit 会算出 0 行列，必须跳过
+      if (container.offsetParent) {
+        try {
+          fit.fit();
+        } catch {}
+        try {
+          api.resizeTerminalSession?.(terminalId, term.cols, term.rows);
+        } catch {}
+      }
+      refreshScreen();
+    };
 
     const boot = async () => {
       try {
@@ -181,15 +301,22 @@ export const IntegratedTerminalView: React.FC = () => {
           term.writeln(`\x1b[31m[终端启动失败] ${result?.error || "未知错误"}\x1b[0m`);
           return;
         }
+        setSessionInfo(result);
         setStatus("ready");
         setStatusText(`${result.shell || "shell"} · PID ${result.pid || "-"}`);
         requestAnimationFrame(() => {
-          try {
-            fit.fit();
-            api.resizeTerminalSession?.(terminalId, term.cols, term.rows);
-          } catch {}
+          if (disposed) return;
+          syncSize();
         });
         term.focus();
+        // 兜底诊断：创建成功却一直没有输出，说明 PTY 或 shell 侧卡住了
+        watchdogTimer = setTimeout(() => {
+          if (disposed) return;
+          if (statsRef.current.bytes === 0) {
+            setStatus("error");
+            setStatusText("PTY 未返回数据（点右侧信息按钮复制诊断）");
+          }
+        }, 3000);
       } catch (err: any) {
         if (disposed) return;
         setStatus("error");
@@ -198,9 +325,42 @@ export const IntegratedTerminalView: React.FC = () => {
       }
     };
 
+    const doOpen = () => {
+      if (disposed || opened) return;
+      opened = true;
+      if (openFallbackTimer) {
+        clearTimeout(openFallbackTimer);
+        openFallbackTimer = null;
+      }
+      try {
+        term.open(container);
+      } catch (err: any) {
+        setStatus("error");
+        setStatusText(`终端初始化失败: ${err?.message || err}`);
+        return;
+      }
+      inputDisposable = term.onData((data) => {
+        api.writeTerminalSession?.(terminalId, data);
+      });
+      requestAnimationFrame(() => {
+        if (disposed) return;
+        syncSize();
+        boot();
+      });
+    };
+
     offData = api.onTerminalPtyData?.((payload: any) => {
       if (!payload || payload.terminalId !== terminalId) return;
-      term.write(payload.data || "");
+      const data = payload.data || "";
+      if (data) {
+        const stats = statsRef.current;
+        stats.bytes += data.length;
+        if (!stats.firstByteMs) stats.firstByteMs = Date.now() - stats.startedAt;
+      }
+      // feed 会剔除 xterm 6.0.0 处理 DECRQM 时会抛异常的序列，并生成终端能力应答
+      const { data: output, replies } = responder.feed(data);
+      if (output) term.write(output);
+      if (replies) api.writeTerminalSession?.(terminalId, replies);
     });
     offExit = api.onTerminalPtyExit?.((payload: any) => {
       if (!payload || payload.terminalId !== terminalId) return;
@@ -213,22 +373,15 @@ export const IntegratedTerminalView: React.FC = () => {
       );
     });
 
-    const inputDisposable = term.onData((data) => {
-      api.writeTerminalSession?.(terminalId, data);
-    });
-
     // 字体设置实时生效：重设字体后重新测量并同步 PTY 行列数
     const unsubscribeFonts = subscribeFontSettings((settings) => {
-      if (disposed) return;
+      if (disposed || !opened) return;
       try {
         term.options.fontFamily = buildTerminalFontFamily(settings.terminalFamily);
         term.options.fontSize = settings.terminalFontSize;
         requestAnimationFrame(() => {
           if (disposed) return;
-          try {
-            fit.fit();
-            api.resizeTerminalSession?.(terminalId, term.cols, term.rows);
-          } catch {}
+          syncSize();
         });
       } catch {}
     });
@@ -237,27 +390,40 @@ export const IntegratedTerminalView: React.FC = () => {
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const observer = new ResizeObserver(() => {
       if (disposed) return;
+      // 容器可能一开始没有尺寸（抽屉动画 / 隐藏 Tab）：先等尺寸再 open，
+      // 否则 xterm 会按 0 单元格测量，之后容易出现整块空白
+      if (!opened) {
+        const rect = container.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) doOpen();
+        return;
+      }
       // 切到 Agent 子视图时终端容器被隐藏（display:none），此时 fit 会算出 0 行列，必须跳过
-      if (!containerRef.current?.offsetParent) return;
+      if (!container.offsetParent) return;
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         resizeTimer = null;
         if (disposed) return;
-        try {
-          fit.fit();
-          api.resizeTerminalSession?.(terminalId, term.cols, term.rows);
-        } catch {}
+        syncSize();
       }, 120);
     });
-    observer.observe(containerRef.current);
+    observer.observe(container);
     resizeObserverRef.current = observer;
 
-    boot();
+    // 容器一开始就有尺寸时立即 open；否则等 ResizeObserver，最多等 1.2s 后按默认尺寸兜底
+    const initialRect = container.getBoundingClientRect();
+    if (initialRect.width > 0 && initialRect.height > 0) {
+      doOpen();
+    } else {
+      openFallbackTimer = setTimeout(() => doOpen(), 1200);
+    }
 
     return () => {
       disposed = true;
+      responder.reset();
+      if (openFallbackTimer) clearTimeout(openFallbackTimer);
+      if (watchdogTimer) clearTimeout(watchdogTimer);
       if (resizeTimer) clearTimeout(resizeTimer);
-      inputDisposable.dispose();
+      inputDisposable?.dispose();
       unsubscribeFonts();
       offData?.();
       offExit?.();
@@ -279,7 +445,8 @@ export const IntegratedTerminalView: React.FC = () => {
     const raf = requestAnimationFrame(() => {
       const term = termRef.current;
       const fit = fitRef.current;
-      if (!term || !fit || !containerRef.current?.offsetParent) return;
+      // 尚未 open（element 未挂载）或容器隐藏时不做测量
+      if (!term || !term.element || !fit || !containerRef.current?.offsetParent) return;
       try {
         fit.fit();
         window.electronAPI?.resizeTerminalSession?.(
@@ -287,6 +454,8 @@ export const IntegratedTerminalView: React.FC = () => {
           term.cols,
           term.rows
         );
+        // 隐藏期间（display:none）内容不会重绘，切回来要强制刷新一屏
+        term.refresh(0, Math.max(0, term.rows - 1));
         term.focus();
       } catch {}
     });
@@ -294,7 +463,7 @@ export const IntegratedTerminalView: React.FC = () => {
   }, [viewMode]);
 
   const sendQuickCommand = (command: string) => {
-    if (!ptyIdRef.current) return;
+    if (!ptyIdRef.current || !termRef.current?.element) return;
     window.electronAPI?.writeTerminalSession?.(ptyIdRef.current, `${command}\r`);
     termRef.current?.focus();
   };
@@ -334,13 +503,22 @@ export const IntegratedTerminalView: React.FC = () => {
             </span>
           )}
 
-          <span className={`flex items-center gap-1 text-[10px] font-sans ${
-            status === "ready"
-              ? "text-[var(--ui-accent-emerald)]"
-              : status === "error"
-              ? "text-[var(--ui-accent-rose)]"
-              : "text-[var(--ui-accent-amber)]"
-          }`}>
+          <span
+            className={`flex items-center gap-1 text-[10px] font-sans ${
+              status === "ready"
+                ? "text-[var(--ui-accent-emerald)]"
+                : status === "error"
+                ? "text-[var(--ui-accent-rose)]"
+                : "text-[var(--ui-accent-amber)]"
+            }`}
+            title={
+              sessionInfo
+                ? `${sessionInfo.shell || "shell"} · ${sessionInfo.cols}x${sessionInfo.rows} · 已接收 ${
+                    runtimeStats.bytes
+                  } 字节${runtimeStats.firstByteMs ? ` · 首帧 ${runtimeStats.firstByteMs}ms` : ""}`
+                : undefined
+            }
+          >
             <Circle size={7} className="fill-current" />
             {statusText}
           </span>
@@ -372,6 +550,17 @@ export const IntegratedTerminalView: React.FC = () => {
             </button>
           </div>
 
+          <button
+            onClick={copyDiagnostics}
+            className={`p-1.5 rounded-lg hover:bg-[var(--ui-block-hover-bg)] transition-colors ${
+              copied
+                ? "text-[var(--ui-accent-emerald)]"
+                : "text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)]"
+            }`}
+            title={copied ? "诊断信息已复制" : "复制终端诊断信息（shell / PATH / 尺寸 / 首帧延迟）"}
+          >
+            <Info size={12.5} />
+          </button>
           <button
             onClick={() => setRestartKey((value) => value + 1)}
             className="p-1.5 rounded-lg hover:bg-[var(--ui-block-hover-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] transition-colors"

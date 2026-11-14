@@ -80,13 +80,13 @@ const LIGHT_THEME_CSS = `
     border-color: var(--ui-border-hairline) !important;
   }
 
-  /* ─── 3. 大卡片、容器与卡片底色 ─── */
+  /* ─── 3. 大卡片、容器与卡片底色（轻透融合层，不在子卡重复叠加 backdrop-filter） ─── */
   html[data-theme="light"] .bg-\\[\\#1a1a1a\\],
   html[data-theme="light"] .bg-\\[\\#1c1c1c\\],
   html[data-theme="light"] .bg-\\[\\#1e1e1e\\] {
     background-color: var(--ui-card-bg) !important;
-    border-color: var(--ui-border-hairline) !important;
-    box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.03) !important;
+    border-color: var(--ui-border-subtle) !important;
+    box-shadow: 0 2px 10px -2px rgba(15, 23, 42, 0.05) !important;
   }
 
   /* ─── 4. 所有内嵌小块、列表项与条目底色 ─── */
@@ -150,7 +150,7 @@ const LIGHT_THEME_CSS = `
   }
   html[data-theme="light"] input::placeholder,
   html[data-theme="light"] textarea::placeholder {
-    color: #94a3b8 !important;
+    color: var(--ui-text-faint) !important;
   }
   /* 聚焦反馈统一交给容器的 .ui-focus-ring 柔光；
      绝不给原生控件再叠一层方形 box-shadow —— 内层 input 通常无圆角，
@@ -234,7 +234,7 @@ const LIGHT_THEME_CSS = `
   }
   html[data-theme="light"] .markdown-body p,
   html[data-theme="light"] .markdown-body li {
-    color: #334155 !important;
+    color: #0f172a !important;
   }
   html[data-theme="light"] .markdown-body :not(pre) > code {
     background-color: var(--md-code-bg) !important;
@@ -287,65 +287,89 @@ function buildAppearanceCss(cfg: AppearanceConfig): string {
   // 分层不透明度 + 内容可读性下限：外层框架/舞台包裹保持通透，承载文字与代码的内容面
   // （卡片/代码/输入框/终端）设最低不透明度，确保低通透度时前景依然清晰可读。
   // 开启「内容面通透」后放宽下限，让壁纸渐变透进内容块，并辅以毛玻璃保证文字清晰。
-  const wrapPct = Math.max(20, pct - 18);
-  const panelPct = Math.max(46, pct - 8);
-  // 模态浮层不随面板一起变透：遮罩后面是整页内容，太透会透出鬼影
-  const modalPct = Math.max(92, pct);
-  const stagePct = Math.max(58, pct);
+  const wrapPct = Math.max(20, pct - 14);
+  const darkPanelPct = Math.max(36, Math.min(92, pct));
+  const lightPanelPct = Math.max(58, Math.min(92, Math.round(48 + pct * 0.44)));
+  // 弹出层与模态浮层：保持高不透明度毛玻璃，避免底层聊天正文或壁纸透出干扰阅读
+  const popoverPct = Math.max(88, Math.min(96, pct));
+  const modalPct = Math.max(93, Math.min(97, pct));
+  const stagePct = Math.max(32, Math.min(92, pct + 2));
   const cardPct = cfg.contentTranslucent
-    ? Math.max(40, Math.min(96, pct + 4))
-    : Math.max(80, Math.min(96, pct + 4));
+    ? Math.max(34, Math.min(94, pct + 2))
+    : Math.max(76, Math.min(94, pct + 4));
   const inputPct = cfg.contentTranslucent
     ? Math.max(50, Math.min(98, pct + 8))
     : Math.max(86, Math.min(98, pct + 8));
+  const inputGlassPct = cfg.contentTranslucent
+    ? Math.max(12, Math.round(pct * 0.36))
+    : Math.max(20, Math.round(pct * 0.5));
+
+  const rawBlur = Math.max(0, Math.min(40, Number(cfg.bgBlur ?? 16)));
+  const panelBlurFilter =
+    rawBlur <= 0 ? "none" : `blur(${Math.max(2, Math.round(rawBlur * 0.75))}px) saturate(1.18)`;
+  const modalBlurFilter =
+    rawBlur <= 0 ? "none" : `blur(${Math.max(4, Math.round(rawBlur * 0.9))}px) saturate(1.35)`;
 
   return `
     html[data-theme="dark"], :root {
       --sidebar-bg: color-mix(in srgb, #111111 ${wrapPct}%, transparent) !important;
       --ui-app-bg: transparent !important;
-      --ui-panel-bg: color-mix(in srgb, #141414 ${panelPct}%, transparent) !important;
+      --ui-panel-bg: color-mix(in srgb, #141414 ${darkPanelPct}%, transparent) !important;
       --ui-modal-bg: color-mix(in srgb, #141414 ${modalPct}%, transparent) !important;
       --ui-stage-wrap-bg: color-mix(in srgb, #131313 ${wrapPct}%, transparent) !important;
       --ui-stage-bg: color-mix(in srgb, #171717 ${stagePct}%, transparent) !important;
-      --ui-card-bg: color-mix(in srgb, #1b1b1b ${cardPct}%, transparent) !important;
-      --ui-card-header-bg: color-mix(in srgb, #1e1e1e ${cardPct}%, transparent) !important;
-      --ui-card-inner-bg: color-mix(in srgb, #222222 ${cardPct}%, transparent) !important;
-      --ui-input-bg: color-mix(in srgb, #1d1d1d ${inputPct}%, transparent) !important;
-      --ui-input-hover-bg: color-mix(in srgb, #1f1f1f ${inputPct}%, transparent) !important;
-      --ui-popover-bg: color-mix(in srgb, #161616 ${panelPct}%, transparent) !important;
-      --ui-code-bg: color-mix(in srgb, #121212 ${cardPct}%, transparent) !important;
-      --ui-code-header-bg: color-mix(in srgb, #181818 ${cardPct}%, transparent) !important;
-      --ui-code-subheader-bg: color-mix(in srgb, #151515 ${cardPct}%, transparent) !important;
+      --ui-card-bg: rgba(255, 255, 255, 0.042) !important;
+      --ui-card-hover-bg: rgba(255, 255, 255, 0.07) !important;
+      --ui-card-header-bg: rgba(255, 255, 255, 0.035) !important;
+      --ui-card-inner-bg: rgba(0, 0, 0, 0.16) !important;
+      --ui-input-bg: rgba(255, 255, 255, 0.05) !important;
+      --ui-input-hover-bg: rgba(255, 255, 255, 0.075) !important;
+      --ui-composer-bg: rgba(255, 255, 255, 0.04) !important;
+      --ui-composer-hover-bg: rgba(255, 255, 255, 0.065) !important;
+      --ui-popover-bg: color-mix(in srgb, #18181b ${popoverPct}%, transparent) !important;
+      --ui-code-bg: rgba(0, 0, 0, 0.22) !important;
+      --ui-code-header-bg: rgba(255, 255, 255, 0.045) !important;
+      --ui-code-subheader-bg: rgba(255, 255, 255, 0.03) !important;
       --ui-terminal-bg: color-mix(in srgb, #0f0f10 ${cardPct}%, transparent) !important;
-      --ui-bubble-assistant-bg: color-mix(in srgb, #1b1b1b ${cardPct}%, transparent) !important;
-      --ui-bubble-user-bg: color-mix(in srgb, #2a2a2a ${inputPct}%, transparent) !important;
+      --ui-bubble-assistant-bg: rgba(255, 255, 255, 0.03) !important;
+      --ui-bubble-user-bg: rgba(255, 255, 255, 0.075) !important;
       --ui-livebar-bg: color-mix(in srgb, #161616 ${inputPct}%, transparent) !important;
-      --ui-block-bg: color-mix(in srgb, #1b1b1b ${cardPct}%, transparent) !important;
-      --ui-block-body-bg: color-mix(in srgb, #141414 ${cardPct}%, transparent) !important;
+      --ui-block-bg: rgba(255, 255, 255, 0.042) !important;
+      --ui-block-body-bg: rgba(0, 0, 0, 0.16) !important;
     }
 
     html[data-theme="light"] {
       --sidebar-bg: color-mix(in srgb, #f1f5f9 ${wrapPct}%, transparent) !important;
       --ui-app-bg: transparent !important;
-      --ui-panel-bg: color-mix(in srgb, #f8fafc ${panelPct}%, transparent) !important;
+      --ui-panel-bg: color-mix(in srgb, #f8fafc ${lightPanelPct}%, transparent) !important;
       --ui-modal-bg: color-mix(in srgb, #ffffff ${modalPct}%, transparent) !important;
       --ui-stage-wrap-bg: color-mix(in srgb, #f1f5f9 ${wrapPct}%, transparent) !important;
-      --ui-stage-bg: color-mix(in srgb, #ffffff ${stagePct}%, transparent) !important;
-      --ui-card-bg: color-mix(in srgb, #ffffff ${cardPct}%, transparent) !important;
-      --ui-card-header-bg: color-mix(in srgb, #fafbfd ${cardPct}%, transparent) !important;
-      --ui-card-inner-bg: color-mix(in srgb, #f8fafc ${cardPct}%, transparent) !important;
-      --ui-input-bg: color-mix(in srgb, #ffffff ${inputPct}%, transparent) !important;
-      --ui-input-hover-bg: color-mix(in srgb, #f8fafc ${inputPct}%, transparent) !important;
-      --ui-popover-bg: color-mix(in srgb, #ffffff ${panelPct}%, transparent) !important;
-      --ui-code-bg: color-mix(in srgb, #f8fafc ${cardPct}%, transparent) !important;
-      --ui-code-header-bg: color-mix(in srgb, #f1f5f9 ${cardPct}%, transparent) !important;
-      --ui-code-subheader-bg: color-mix(in srgb, #f8fafc ${cardPct}%, transparent) !important;
+      --ui-stage-bg: color-mix(in srgb, #ffffff ${lightPanelPct}%, transparent) !important;
+      --ui-card-bg: color-mix(in srgb, #ffffff ${inputGlassPct}%, rgba(15, 23, 42, 0.02)) !important;
+      --ui-card-hover-bg: color-mix(in srgb, #ffffff ${Math.min(68, inputGlassPct + 10)}%, rgba(15, 23, 42, 0.02)) !important;
+      --ui-card-header-bg: rgba(15, 23, 42, 0.028) !important;
+      --ui-card-inner-bg: rgba(15, 23, 42, 0.036) !important;
+      --ui-input-bg: color-mix(in srgb, #ffffff ${inputGlassPct}%, rgba(15, 23, 42, 0.024)) !important;
+      --ui-input-hover-bg: color-mix(in srgb, #ffffff ${Math.min(68, inputGlassPct + 8)}%, rgba(15, 23, 42, 0.02)) !important;
+      --ui-composer-bg: rgba(255, 255, 255, 0.06) !important;
+      --ui-composer-hover-bg: rgba(255, 255, 255, 0.12) !important;
+      --ui-popover-bg: color-mix(in srgb, #ffffff ${popoverPct}%, transparent) !important;
+      --ui-code-bg: rgba(15, 23, 42, 0.038) !important;
+      --ui-code-header-bg: rgba(15, 23, 42, 0.065) !important;
+      --ui-code-subheader-bg: rgba(15, 23, 42, 0.048) !important;
       --ui-terminal-bg: color-mix(in srgb, #f8fafc ${cardPct}%, transparent) !important;
-      --ui-bubble-assistant-bg: color-mix(in srgb, #ffffff ${cardPct}%, transparent) !important;
-      --ui-bubble-user-bg: color-mix(in srgb, #f1f5f9 ${inputPct}%, transparent) !important;
+      --ui-bubble-assistant-bg: color-mix(in srgb, #ffffff ${inputGlassPct}%, rgba(15, 23, 42, 0.02)) !important;
+      --ui-bubble-user-bg: rgba(15, 23, 42, 0.052) !important;
       --ui-livebar-bg: color-mix(in srgb, #ffffff ${inputPct}%, transparent) !important;
-      --ui-block-bg: color-mix(in srgb, #ffffff ${cardPct}%, transparent) !important;
-      --ui-block-body-bg: color-mix(in srgb, #f8fafc ${cardPct}%, transparent) !important;
+      --ui-block-bg: rgba(15, 23, 42, 0.035) !important;
+      --ui-block-body-bg: rgba(255, 255, 255, 0.2) !important;
+      --ui-text-primary: #020617 !important;
+      --ui-text-secondary: #1e293b !important;
+      --ui-text-muted: #334155 !important;
+      --ui-text-faint: #475569 !important;
+      --md-code-bg: rgba(15, 23, 42, 0.065) !important;
+      --md-code-border: rgba(15, 23, 42, 0.11) !important;
+      --md-code-text: #1e40af !important;
     }
 
     /* 同步覆盖设置页、工具页、工作空间页的硬编码深色容器，使其在暗色模式下同样具备通透感 */
@@ -393,26 +417,18 @@ function buildAppearanceCss(cfg: AppearanceConfig): string {
       background-color: var(--ui-card-inner-bg) !important;
     }
 
-    ${
-      cfg.contentTranslucent
-        ? `
-    /* 内容面通透：对承载文字/代码的内容块施加毛玻璃虚化，
-       让壁纸渐变透出的同时保证前景文字清晰可读 */
-    .bg-\\[var\\(--ui-card-bg\\)\\],
-    .bg-\\[var\\(--ui-card-inner-bg\\)\\],
-    .bg-\\[var\\(--ui-code-bg\\)\\],
-    .bg-\\[var\\(--ui-input-bg\\)\\],
-    .bg-\\[var\\(--ui-terminal-bg\\)\\],
-    .bg-\\[var\\(--ui-bubble-assistant-bg\\)\\],
-    .bg-\\[var\\(--ui-bubble-user-bg\\)\\],
-    .bg-\\[var\\(--ui-livebar-bg\\)\\],
-    .bg-\\[var\\(--ui-block-bg\\)\\],
-    .bg-\\[var\\(--ui-block-body-bg\\)\\] {
-      backdrop-filter: blur(12px) saturate(1.05);
-      -webkit-backdrop-filter: blur(12px) saturate(1.05);
+    /* 弹出层与模态浮层：模糊度跟随 bgBlur 联动，0px 时完全清晰不糊底 */
+    .bg-\\[var\\(--ui-popover-bg\\)\\],
+    .bg-\\[var\\(--ui-modal-bg\\)\\] {
+      backdrop-filter: ${modalBlurFilter} !important;
+      -webkit-backdrop-filter: ${modalBlurFilter} !important;
     }
-    `
-        : ""
+
+    /* 顶级面板：单层毛玻璃虚化跟随 bgBlur 联动（0px 时彻底无模糊，透出清晰原图） */
+    .bg-\\[var\\(--ui-panel-bg\\)\\],
+    .bg-\\[var\\(--ui-stage-bg\\)\\] {
+      backdrop-filter: ${panelBlurFilter} !important;
+      -webkit-backdrop-filter: ${panelBlurFilter} !important;
     }
   `;
 }

@@ -1,5 +1,5 @@
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 
 const TODO_STATUSES = ["pending", "in_progress", "completed"];
 const MAX_TODOS = 50;

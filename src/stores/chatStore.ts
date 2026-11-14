@@ -122,7 +122,7 @@ export interface SessionOutput {
 export interface WorkbenchTab {
   id: string;
   title: string;
-  type: "newtab" | "url" | "files" | "changes" | "terminal" | "automation" | "btw";
+  type: "newtab" | "url" | "files" | "changes" | "terminal" | "automation" | "btw" | "gitgraph";
   url?: string;
   filePath?: string;
   lineNumber?: number;
@@ -155,6 +155,8 @@ export interface McpServerItem {
   url?: string;
   transport?: 'stdio' | 'http' | 'sse';
   disabledTools?: string[];
+  oauth?: any;
+  auth?: { type?: string; [key: string]: any };
 }
 
 export interface SkillItem {
@@ -167,6 +169,7 @@ export interface SkillItem {
   scripts?: Array<{ name: string; path: string; ext?: string }>;
   filePath?: string;
   version?: string;
+  prompt?: string;
   /** 技能是否启用（停用后不进入 Agent 上下文） */
   enabled?: boolean;
 }

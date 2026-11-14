@@ -1,5 +1,5 @@
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 const specService = require("../../services/specService");
 
 /**

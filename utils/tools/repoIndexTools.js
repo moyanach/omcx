@@ -1,5 +1,5 @@
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 const { buildRepoMap, searchSymbols, getRepoStats, findReferences } = require("../../services/repoIndexService");
 
 class RepoMapTool extends StructuredTool {

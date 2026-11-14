@@ -2,7 +2,6 @@ import React, { useState, useEffect, useId, memo, useMemo } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import * as Diff from 'diff';
-import mermaid from 'mermaid';
 import {
   Copy,
   Check,
@@ -606,6 +605,8 @@ const MermaidBlock: React.FC<{ code: string }> = memo(({ code }) => {
 
     const timer = setTimeout(async () => {
       try {
+        const { default: mermaid } = await import('mermaid');
+        if (cancelled) return;
         mermaid.initialize({
           startOnLoad: false,
           theme: effectiveTheme === 'light' ? 'default' : 'dark',
@@ -873,7 +874,7 @@ export const CodeBlock: React.FC<CodeBlockProps> = memo(({ language = '', value,
             lineNumberStyle={{
               minWidth: '2.25em',
               paddingRight: '1em',
-              color: effectiveTheme === 'light' ? '#94a3b8' : '#525252',
+              color: 'var(--ui-text-faint)',
               userSelect: 'none',
             }}
           >

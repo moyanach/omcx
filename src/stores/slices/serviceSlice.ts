@@ -16,12 +16,14 @@ let mcpRefreshSeq = 0;
 export interface ServiceSlice {
   outputs: SessionOutput[];
   gitStatus: WorkspaceGitStatus | null;
+  gitRevision: number;
   mcpServers: McpServerItem[];
   skills: SkillItem[];
   subagents: SubagentItem[];
 
   refreshOutputs: (sessionId: string) => Promise<void>;
   refreshGitStatus: (workDir?: string | null) => Promise<void>;
+  notifyGitUpdated: () => void;
   refreshMcpAndSkills: (workDir?: string | null) => Promise<void>;
 }
 
@@ -33,9 +35,12 @@ export const createServiceSlice: StateCreator<
 > = (set, get) => ({
   outputs: [],
   gitStatus: null,
+  gitRevision: 0,
   mcpServers: [],
   skills: [],
   subagents: [],
+
+  notifyGitUpdated: () => set((s) => ({ gitRevision: s.gitRevision + 1 })),
 
   refreshOutputs: async (sessionId) => {
     if (!window.electronAPI?.getSessionOutputs || !sessionId) return;

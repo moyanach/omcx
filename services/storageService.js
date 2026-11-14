@@ -12,11 +12,20 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const crypto = require("crypto");
-const { execFile } = require("child_process");
 const { Worker } = require("worker_threads");
-const Database = require("better-sqlite3");
+let Database = null;
+try {
+  if (process.env.OMCX_STORAGE_MEMORY_ONLY !== "1") {
+    Database = require("better-sqlite3");
+  }
+} catch {}
 const reasoningPolicy = require("./reasoningPolicy");
+const { createMcpStorage, writeFileAtomicSync } = require("./storage/mcpStorage");
+const { createSkillsMemoryStorage } = require("./storage/skillsMemoryStorage");
+
+function isMemoryOnlyMode() {
+  return process.env.OMCX_STORAGE_MEMORY_ONLY === "1" || !Database;
+}
 
 const USER_HOME = os.homedir();
 let OMCX_HOME = process.env.OMCX_HOME || path.join(USER_HOME, ".omcx");
@@ -154,6 +163,7 @@ const MAX_PENDING_WRITES = 200;
 const WORKER_REQUEST_TIMEOUT_MS = 8000;
 
 function sendToWorker(action, payload) {
+  if (isMemoryOnlyMode()) return;
   if (dbWorker) {
     const id = workerMsgId++;
     pendingWorkerWrites.set(id, { action, payload, at: Date.now() });
@@ -172,6 +182,13 @@ function sendToWorker(action, payload) {
 }
 
 function sendToWorkerWithPromise(action, payload) {
+  if (isMemoryOnlyMode()) {
+    try {
+      return Promise.resolve(executeMemoryReadAction(action, payload));
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
   if (dbWorker) {
     const id = workerMsgId++;
     return new Promise((resolve, reject) => {
@@ -229,9 +246,75 @@ function handleWorkerFailure(reason) {
   }
 }
 
+/**
+ * 退出前或崩溃兜底同步刷盘：停止异步 Worker 并顺序回放尚未 ACK 的写队列，
+ * 消除主线程同步落盘与 Worker 线程异步队列的双写竞争及 Cmd+Q 丢数据风险。
+ */
+function flushPendingWritesSync() {
+  if (isMemoryOnlyMode()) return;
+  if (dbWorker) {
+    const workerToStop = dbWorker;
+    dbWorker = null;
+    try {
+      workerToStop.terminate();
+    } catch {}
+    handleWorkerFailure("flush-before-quit");
+    return;
+  }
+  if (pendingWorkerWrites.size > 0) {
+    handleWorkerFailure("flush-pending-writes");
+  }
+}
+
+function checkpointWalSync() {
+  if (isMemoryOnlyMode()) return;
+  try {
+    const d = fallbackDb || getFallbackDb();
+    d?.pragma("wal_checkpoint(PASSIVE)");
+  } catch (err) {
+    console.warn("[storageService] WAL checkpoint 异常（已忽略）:", err?.message || err);
+  }
+}
+
+function executeMemoryReadAction(action, payload) {
+  switch (action) {
+    case "GET_MESSAGES": {
+      const sessionId =
+        typeof payload === "string" ? payload : payload?.sessionId || payload?.session_id;
+      return memoryMessagesBySession.get(sessionId) || [];
+    }
+    case "GET_MESSAGE_BY_ID": {
+      const messageId =
+        typeof payload === "string" ? payload : payload?.messageId || payload?.id;
+      for (const list of memoryMessagesBySession.values()) {
+        const found = list.find((m) => m && m.id === messageId);
+        if (found) return found;
+      }
+      return null;
+    }
+    case "GET_MESSAGE_REASONING": {
+      const messageId =
+        typeof payload === "string" ? payload : payload?.messageId || payload?.id;
+      const id = String(messageId || "").trim();
+      return id ? memoryReasoningsByMsgId.get(id) || null : null;
+    }
+    case "GET_OUTPUTS": {
+      const sessionId =
+        typeof payload === "string" ? payload : payload?.sessionId || payload?.session_id;
+      return memoryOutputsBySession.get(sessionId) || [];
+    }
+    default:
+      return null;
+  }
+}
+
 // 降级模式同线程备用执行引擎
 function executeFallbackAction(action, payload) {
+  if (isMemoryOnlyMode()) {
+    return executeMemoryReadAction(action, payload);
+  }
   const d = getFallbackDb();
+  if (!d) return executeMemoryReadAction(action, payload);
   switch (action) {
     case "SET_CONFIG": {
       const { key, value } = payload;
@@ -358,6 +441,7 @@ function executeFallbackAction(action, payload) {
 }
 
 function getFallbackDb() {
+  if (isMemoryOnlyMode()) return null;
   if (!fallbackDb) {
     ensureDir(OMCX_HOME);
     fallbackDb = new Database(DB_FILE);
@@ -489,6 +573,10 @@ let hasLoadedSnapshot = false;
 
 function loadInitialSnapshot() {
   if (hasLoadedSnapshot) return;
+  if (isMemoryOnlyMode()) {
+    hasLoadedSnapshot = true;
+    return;
+  }
   // 注意：成功后才置位。首次启动时 Worker 可能尚未建表，失败后必须允许后续重试，
   // 否则一次竞态失败会导致整个进程生命周期内会话列表为空。
   try {
@@ -523,6 +611,17 @@ function loadInitialSnapshot() {
 }
 
 function initStorage() {
+  if (isMemoryOnlyMode()) {
+    hasLoadedSnapshot = true;
+    if (!getConfig("default_model")) {
+      setConfig("default_model", "gpt-4o");
+      setConfig("base_url", "https://api.openai.com/v1");
+      setConfig("api_key", "");
+    }
+    console.log(`[storageService] 已启用纯内存存储模式 (无 SQLite 原生依赖)`);
+    return;
+  }
+
   ensureDir(OMCX_HOME);
   ensureDir(SKILLS_DIR);
   ensureDir(MEMORY_DIR);
@@ -564,8 +663,11 @@ function getConfig(key) {
     return memoryConfigs.get(key);
   }
   // 内存未命中兜底
+  if (isMemoryOnlyMode()) return null;
   try {
-    const row = getFallbackDb().prepare("SELECT value FROM configs WHERE key = ?").get(key);
+    const db = getFallbackDb();
+    if (!db) return null;
+    const row = db.prepare("SELECT value FROM configs WHERE key = ?").get(key);
     if (!row || row.value === null) return null;
     let parsed;
     try {
@@ -853,8 +955,11 @@ function getMessages(sessionId) {
   }
 
   // 内存未命中时，快速从 SQLite 读取并缓存进内存池
+  if (isMemoryOnlyMode()) return [];
   try {
-    const rows = getFallbackDb()
+    const db = getFallbackDb();
+    if (!db) return [];
+    const rows = db
       .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC")
       .all(sessionId);
     const list = rows.map(mapMessageRow);
@@ -941,8 +1046,11 @@ async function getMessageByIdAsync(messageId) {
     const row = await sendToWorkerWithPromise("GET_MESSAGE_BY_ID", { messageId: id });
     return row ? mapMessageRow(row) : null;
   } catch (err) {
+    if (isMemoryOnlyMode()) return null;
     try {
-      const row = getFallbackDb().prepare("SELECT * FROM messages WHERE id = ?").get(id);
+      const db = getFallbackDb();
+      if (!db) return null;
+      const row = db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
       return row ? mapMessageRow(row) : null;
     } catch {
       return null;
@@ -1288,8 +1396,11 @@ function getSessionOutputs(sessionId) {
     touchLruCache(memoryOutputsBySession, sessionId, cached, MAX_CACHED_OUTPUT_SESSIONS);
     return [...cached];
   }
+  if (isMemoryOnlyMode()) return [];
   try {
-    const rows = getFallbackDb()
+    const db = getFallbackDb();
+    if (!db) return [];
+    const rows = db
       .prepare("SELECT * FROM session_outputs WHERE session_id = ? ORDER BY created_at ASC")
       .all(sessionId);
     const list = rows.map(mapOutputRow);
@@ -1372,861 +1483,55 @@ function addRecentProject(proj) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// MCP / Skills / Memory 静态 Markdown 与配置文件扫描
+// MCP / Skills / Memory 静态 Markdown 与配置文件扫描（委托子模块）
 // ─────────────────────────────────────────────────────────────
 
-function getProjectMcpConfigPath(workDir) {
-  if (!workDir || typeof workDir !== "string" || !workDir.trim()) return null;
-  return path.join(path.resolve(workDir.trim()), ".omcx", "mcp.json");
-}
-
-function readProjectMcpConfig(workDir) {
-  const projectMcpFile = getProjectMcpConfigPath(workDir);
-  if (!projectMcpFile || !fs.existsSync(projectMcpFile)) {
-    return { servers: null, fingerprint: null, configPath: projectMcpFile };
-  }
-  try {
-    const raw = fs.readFileSync(projectMcpFile, "utf-8");
-    const parsed = JSON.parse(raw);
-    return {
-      servers: parsed?.mcpServers && typeof parsed.mcpServers === "object" ? parsed.mcpServers : {},
-      fingerprint: crypto.createHash("sha256").update(raw).digest("hex"),
-      configPath: projectMcpFile,
-    };
-  } catch {
-    return { servers: null, fingerprint: null, configPath: projectMcpFile };
-  }
-}
-
-function getProjectMcpTrustMap() {
-  const map = getConfig("mcp_project_trust");
-  return map && typeof map === "object" && !Array.isArray(map) ? map : {};
-}
-
-function isProjectMcpTrusted(workDir, fingerprint) {
-  if (!workDir || !fingerprint) return false;
-  const trustedFingerprint = getProjectMcpTrustMap()[path.resolve(workDir.trim())];
-  return Boolean(trustedFingerprint && trustedFingerprint === fingerprint);
-}
-
-/**
- * 信任 / 撤销信任项目级 MCP 配置。
- * 信任记录与配置文件内容指纹绑定，配置文件一旦被修改即自动失效，必须重新授权。
- */
-function setProjectMcpTrust(workDir, trusted) {
-  if (!workDir || typeof workDir !== "string" || !workDir.trim()) {
-    return { success: false, error: "缺少工作目录" };
-  }
-  const resolvedDir = path.resolve(workDir.trim());
-  const map = { ...getProjectMcpTrustMap() };
-
-  if (trusted) {
-    const { fingerprint, configPath, servers } = readProjectMcpConfig(resolvedDir);
-    if (!servers || !fingerprint) {
-      return { success: false, error: `未找到有效的项目级 MCP 配置: ${configPath || resolvedDir}` };
-    }
-    map[resolvedDir] = fingerprint;
-  } else {
-    delete map[resolvedDir];
-  }
-
-  setConfig("mcp_project_trust", map);
-  return { success: true, trusted: Boolean(trusted) };
-}
-
-// ─────────────────────────────────────────────────────────────
-// 项目级 Hooks 信任（与项目 MCP 一致：显式信任后方可执行项目 hooks）
-// ─────────────────────────────────────────────────────────────
-
-function isProjectHooksTrusted(workDir) {
-  if (!workDir || typeof workDir !== "string" || !workDir.trim()) return false;
-  const map = getConfig("hooks_project_trust");
-  return Boolean(map && map[path.resolve(workDir.trim())] === true);
-}
-
-function setProjectHooksTrust(workDir, trusted) {
-  if (!workDir || typeof workDir !== "string" || !workDir.trim()) {
-    return { success: false, error: "缺少工作目录" };
-  }
-  const map = { ...(getConfig("hooks_project_trust") || {}) };
-  const key = path.resolve(workDir.trim());
-  if (trusted) {
-    map[key] = true;
-  } else {
-    delete map[key];
-  }
-  setConfig("hooks_project_trust", map);
-  return { success: true, trusted: Boolean(trusted) };
-}
-
-function getMcpServers(workDir = null) {
-  let globalServers = {};
-  if (fs.existsSync(MCP_FILE)) {
-    try {
-      const globalMcp = JSON.parse(fs.readFileSync(MCP_FILE, "utf-8"));
-      globalServers = { ...(globalMcp.mcpServers || {}) };
-    } catch {}
-  }
-
-  const project = workDir ? readProjectMcpConfig(workDir) : { servers: null, fingerprint: null };
-  const projectServers = project.servers || {};
-  const projectTrusted = isProjectMcpTrusted(workDir, project.fingerprint);
-  const merged = { ...globalServers, ...projectServers };
-
-  return Object.entries(merged).map(([key, item]) => {
-    const isProject = Object.prototype.hasOwnProperty.call(projectServers, key);
-    return {
-      id: key,
-      name: key,
-      command: item.command,
-      args: item.args || [],
-      env: item.env || {},
-      url: item.url,
-      transport: item.transport || (item.url ? "http" : "stdio"),
-      headers: item.headers || {},
-      authToken: item.authToken || "",
-      oauth: item.oauth || null,
-      auth: item.auth && typeof item.auth === "object" ? item.auth : null,
-      disabledTools: Array.isArray(item.disabledTools) ? item.disabledTools : [],
-      description: item.description || "",
-      enabled: item.enabled !== false,
-      source: isProject ? "project" : "global",
-      trusted: isProject ? projectTrusted : true,
-      requiresTrust: isProject && !projectTrusted,
-      fingerprint: isProject ? project.fingerprint : null,
-    };
-  });
-}
-
-/**
- * 原子写文件：同目录临时文件 + fsync + rename，避免进程崩溃/断电留下半截 JSON。
- */
-function writeFileAtomicSync(targetPath, content) {
-  const dir = path.dirname(targetPath);
-  ensureDir(dir);
-  const tmpPath = path.join(
-    dir,
-    `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.tmp`
-  );
-  const fd = fs.openSync(tmpPath, "w");
-  try {
-    fs.writeFileSync(fd, content, "utf-8");
-    try {
-      fs.fsyncSync(fd);
-    } catch {}
-  } finally {
-    fs.closeSync(fd);
-  }
-  fs.renameSync(tmpPath, targetPath);
-}
-
-function saveGlobalMcpServers(serversMap) {
-  ensureDir(path.dirname(MCP_FILE));
-  // 读取现有配置，避免 UI 回传空 env 时抹掉用户原本配置的环境变量
-  let existingServers = {};
-  try {
-    if (fs.existsSync(MCP_FILE)) {
-      existingServers = JSON.parse(fs.readFileSync(MCP_FILE, "utf-8"))?.mcpServers || {};
-    }
-  } catch {}
-
-  // 仅持久化全局 MCP 配置，剥离 UI 回传的运行时来源与信任标记字段
-  const cleanServers = {};
-  for (const [id, item] of Object.entries(serversMap || {})) {
-    if (!item || typeof item !== "object") continue;
-    const clean = {};
-    if (typeof item.command === "string") clean.command = item.command;
-    if (Array.isArray(item.args)) clean.args = item.args;
-    if (typeof item.url === "string" && item.url.trim()) clean.url = item.url.trim();
-    if (typeof item.transport === "string") clean.transport = item.transport;
-    if (item.headers && typeof item.headers === "object") {
-      clean.headers = Object.fromEntries(
-        Object.entries(item.headers).filter(
-          ([key, value]) => key && (typeof value === "string" || typeof value === "number")
-        )
-      );
-    }
-    if (typeof item.authToken === "string" && item.authToken.trim()) {
-      clean.authToken = item.authToken.trim();
-    }
-    // OAuth 配置（布尔开关或包含 endpoints / clientId / scopes 的对象）
-    if (typeof item.oauth === "boolean") {
-      clean.oauth = item.oauth;
-    } else if (item.oauth && typeof item.oauth === "object" && !Array.isArray(item.oauth)) {
-      const oauthKeys = [
-        "scopes",
-        "clientId",
-        "clientSecret",
-        "clientAuthMethod",
-        "authorizationEndpoint",
-        "tokenEndpoint",
-        "registrationEndpoint",
-        "issuer",
-        "redirectPort",
-      ];
-      clean.oauth = Object.fromEntries(
-        Object.entries(item.oauth).filter(([key, value]) => {
-          if (!oauthKeys.includes(key)) return false;
-          return (
-            typeof value === "string" ||
-            typeof value === "number" ||
-            typeof value === "boolean" ||
-            Array.isArray(value)
-          );
-        })
-      );
-    }
-    if (item.auth && typeof item.auth === "object" && !Array.isArray(item.auth)) {
-      if (typeof item.auth.type === "string") {
-        clean.auth = { type: item.auth.type };
-      }
-    }
-    if (Array.isArray(item.disabledTools)) {
-      clean.disabledTools = item.disabledTools
-        .map((name) => String(name || "").trim())
-        .filter(Boolean);
-    }
-    const incomingEnv = item.env && typeof item.env === "object" ? item.env : null;
-    if (incomingEnv && Object.keys(incomingEnv).length > 0) {
-      clean.env = incomingEnv;
-    } else if (existingServers[id]?.env && typeof existingServers[id].env === "object") {
-      clean.env = existingServers[id].env;
-    } else if (incomingEnv) {
-      clean.env = incomingEnv;
-    }
-    if (typeof item.description === "string") clean.description = item.description;
-    if (typeof item.enabled === "boolean") clean.enabled = item.enabled;
-    cleanServers[id] = clean;
-  }
-  writeFileAtomicSync(MCP_FILE, JSON.stringify({ mcpServers: cleanServers }, null, 2));
-  return true;
-}
-
-function parseSkillMarkdown(filePath, scope = "global", defaultName = null) {
-  try {
-    const realStat = fs.statSync(filePath);
-    if (!realStat.isFile()) return null;
-
-    const content = fs.readFileSync(filePath, "utf-8");
-    const filename = path.basename(filePath);
-    const parentDirName = path.basename(path.dirname(filePath));
-    const isSkillIndex = /^skill\.md$/i.test(filename);
-    let name = defaultName || (isSkillIndex ? parentDirName : filename.replace(/\.md$/i, ""));
-    let description = "";
-    let tools = [];
-    let allowedTools = [];
-    let declaredScripts = [];
-    let version = "";
-    let promptBody = content;
-
-    const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
-    if (frontmatterMatch) {
-      const yaml = frontmatterMatch[1];
-      promptBody = frontmatterMatch[2].trim();
-
-      const nameMatch = yaml.match(/^name:\s*(.+)$/m);
-      if (nameMatch) name = nameMatch[1].trim().replace(/^['"]|['"]$/g, "");
-
-      const descMatch = yaml.match(/^description:\s*(.+)$/m);
-      if (descMatch) description = descMatch[1].trim().replace(/^['"]|['"]$/g, "");
-
-      const versionMatch = yaml.match(/^version:\s*(.+)$/m);
-      if (versionMatch) version = versionMatch[1].trim().replace(/^['"]|['"]$/g, "");
-
-      const toolsMatch = yaml.match(/^tools:\s*(?:\[(.*?)\]|(.+))$/m);
-      if (toolsMatch) {
-        const rawTools = toolsMatch[1] !== undefined ? toolsMatch[1] : toolsMatch[2];
-        tools = (rawTools || "")
-          .split(",")
-          .map((t) => t.trim().replace(/^['"]|['"]$/g, ""))
-          .filter(Boolean);
-      }
-
-      const allowedToolsMatch = yaml.match(/^allowed-tools:\s*(?:\[(.*?)\]|(.+))$/m);
-      if (allowedToolsMatch) {
-        const rawAllowed =
-          allowedToolsMatch[1] !== undefined ? allowedToolsMatch[1] : allowedToolsMatch[2];
-        allowedTools = (rawAllowed || "")
-          .split(",")
-          .map((t) => t.trim().replace(/^['"]|['"]$/g, ""))
-          .filter(Boolean);
-      }
-
-      const scriptsMatch = yaml.match(/^scripts:\s*(?:\[(.*?)\]|(.+))$/m);
-      if (scriptsMatch) {
-        const rawScripts = scriptsMatch[1] !== undefined ? scriptsMatch[1] : scriptsMatch[2];
-        declaredScripts = (rawScripts || "")
-          .split(",")
-          .map((t) => t.trim().replace(/^['"]|['"]$/g, ""))
-          .filter(Boolean);
-      }
-    }
-
-    // 扫描技能目录下的 scripts/ 脚本，供 run_skill_script 工具安全执行
-    const skillDir = path.dirname(filePath);
-    let scripts = [];
-    const scriptsDir = path.join(skillDir, "scripts");
-    if (fs.existsSync(scriptsDir)) {
-      try {
-        const entries = fs.readdirSync(scriptsDir, { withFileTypes: true });
-        for (const entry of entries.slice(0, 60)) {
-          if (!entry.isFile() || entry.name.startsWith(".")) continue;
-          const ext = path.extname(entry.name).toLowerCase();
-          if (![".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".rb"].includes(ext)) {
-            continue;
-          }
-          scripts.push({
-            name: entry.name,
-            path: path.join(scriptsDir, entry.name),
-            ext,
-          });
-        }
-      } catch {}
-    }
-    if (declaredScripts.length > 0) {
-      scripts = scripts.filter((s) =>
-        declaredScripts.some((declared) => declared === s.name || declared === path.basename(declared))
-      );
-      if (scripts.length === 0) {
-        for (const declared of declaredScripts) {
-          const candidate = path.resolve(skillDir, declared);
-          if (
-            candidate.startsWith(skillDir + path.sep) &&
-            fs.existsSync(candidate) &&
-            fs.statSync(candidate).isFile()
-          ) {
-            scripts.push({
-              name: path.basename(candidate),
-              path: candidate,
-              ext: path.extname(candidate).toLowerCase(),
-            });
-          }
-        }
-      }
-    }
-
-    return {
-      id: `${scope}:${name}`,
-      name,
-      description,
-      tools,
-      allowedTools,
-      scripts,
-      dir: skillDir,
-      prompt: promptBody,
-      scope,
-      filePath,
-      version: version || undefined,
-    };
-  } catch (err) {
-    console.error(`[storageService] 解析 Skill 失败 (${filePath}):`, err.message);
-    return null;
-  }
-}
-
-function scanSkillsDir(targetDir, scope = "global") {
-  const result = [];
-  if (!targetDir || !fs.existsSync(targetDir)) return result;
-
-  try {
-    const entries = fs.readdirSync(targetDir);
-    for (const entry of entries) {
-      if (entry.startsWith(".")) continue;
-      const fullPath = path.join(targetDir, entry);
-      let stat;
-      try {
-        stat = fs.statSync(fullPath);
-      } catch {
-        continue;
-      }
-
-      if (stat.isFile() && entry.endsWith(".md")) {
-        const item = parseSkillMarkdown(fullPath, scope);
-        if (item) result.push(item);
-      } else if (stat.isDirectory()) {
-        const candidates = ["SKILL.md", "skill.md", `${entry}.md`];
-        let found = false;
-        for (const candidate of candidates) {
-          const subPath = path.join(fullPath, candidate);
-          if (fs.existsSync(subPath)) {
-            const item = parseSkillMarkdown(subPath, scope, entry);
-            if (item) {
-              result.push(item);
-              found = true;
-              break;
-            }
-          }
-        }
-        if (!found) {
-          try {
-            const subEntries = fs.readdirSync(fullPath);
-            const mdFile = subEntries.find((f) => f.endsWith(".md") && !f.startsWith("."));
-            if (mdFile) {
-              const item = parseSkillMarkdown(path.join(fullPath, mdFile), scope, entry);
-              if (item) result.push(item);
-            }
-          } catch {}
-        }
-      }
-    }
-  } catch (err) {
-    console.error(`[storageService] 扫描 Skills 目录失败 (${targetDir}):`, err.message);
-  }
-
-  return result;
-}
-
-// ─── 技能启用 / 停用（持久化到 configs.disabled_skills）──────────
-const DISABLED_SKILLS_KEY = "disabled_skills";
-
-function getDisabledSkillNames() {
-  const raw = getConfig(DISABLED_SKILLS_KEY);
-  if (Array.isArray(raw)) return raw.map((item) => String(item));
-  if (typeof raw === "string" && raw.trim()) {
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
-function setSkillEnabled(name, enabled) {
-  const key = String(name || "").trim();
-  if (!key) return { success: false, error: "缺少技能名称" };
-  const disabled = new Set(getDisabledSkillNames());
-  if (enabled) disabled.delete(key);
-  else disabled.add(key);
-  setConfig(DISABLED_SKILLS_KEY, Array.from(disabled));
-  return { success: true, name: key, enabled: Boolean(enabled) };
-}
-
-function getSkills(workDir = null, options = {}) {
-  const includeDisabled = Boolean(options && options.includeDisabled);
-  const skillsMap = new Map();
-
-  const globalDirs = [
-    path.join(USER_HOME, ".agents", "skills"),
-    path.join(USER_HOME, ".omcx", "skills"),
-  ];
-
-  for (const dir of globalDirs) {
-    const items = scanSkillsDir(dir, "global");
-    for (const item of items) {
-      if (!skillsMap.has(item.name)) {
-        skillsMap.set(item.name, item);
-      }
-    }
-  }
-
-  if (workDir) {
-    const projectDirs = [
-      path.join(workDir, ".agents", "skills"),
-      path.join(workDir, ".omcx", "skills"),
-    ];
-
-    for (const dir of projectDirs) {
-      const items = scanSkillsDir(dir, "project");
-      for (const item of items) {
-        skillsMap.set(item.name, item);
-      }
-    }
-  }
-
-  const disabled = new Set(getDisabledSkillNames());
-  const list = Array.from(skillsMap.values()).map((item) => ({
-    ...item,
-    enabled: !disabled.has(item.name),
-  }));
-  list.sort((a, b) => a.name.localeCompare(b.name));
-  return includeDisabled ? list : list.filter((item) => item.enabled);
-}
-
-// ─── 技能库维护：删除 / 导入 ─────────────────────────────────
-const IMPORT_SKIP_DIRS = new Set([
-  ".git",
-  ".hg",
-  ".svn",
-  "node_modules",
-  "__pycache__",
-  ".venv",
-  "venv",
-  "dist",
-  "build",
-  ".idea",
-  ".vscode",
-  "__MACOSX",
-]);
-const IMPORT_MAX_FILES = 300;
-const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
-
-function getSkillRoots(workDir = null) {
-  const roots = [
-    path.join(USER_HOME, ".agents", "skills"),
-    path.join(USER_HOME, ".omcx", "skills"),
-  ];
-  if (workDir) {
-    roots.push(path.join(workDir, ".agents", "skills"));
-    roots.push(path.join(workDir, ".omcx", "skills"));
-  }
-  return roots;
-}
-
-function isPathInside(parent, child) {
-  const rel = path.relative(path.resolve(parent), path.resolve(child));
-  return Boolean(rel) && !rel.startsWith("..") && !path.isAbsolute(rel);
-}
-
-function slugifySkillName(raw) {
-  const text = String(raw || "")
-    .trim()
-    .replace(/[\\/:*?"<>|]+/g, "-")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^[.-]+|[.-]+$/g, "")
-    .slice(0, 80);
-  return text || `skill-${Date.now()}`;
-}
-
-function findSkillDoc(dir) {
-  for (const candidate of ["SKILL.md", "skill.md", "README.md"]) {
-    const target = path.join(dir, candidate);
-    try {
-      if (fs.statSync(target).isFile()) return target;
-    } catch {}
-  }
-  try {
-    const match = fs
-      .readdirSync(dir)
-      .find((file) => file.toLowerCase().endsWith(".md") && !file.startsWith("."));
-    return match ? path.join(dir, match) : null;
-  } catch {
-    return null;
-  }
-}
-
-function pickExtractedRoot(dir) {
-  if (findSkillDoc(dir)) return dir;
-  let dirs = [];
-  try {
-    dirs = fs
-      .readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "__MACOSX")
-      .map((entry) => path.join(dir, entry.name));
-  } catch {
-    return dir;
-  }
-  for (const candidate of dirs) {
-    if (findSkillDoc(candidate)) return candidate;
-  }
-  return dirs.length === 1 ? dirs[0] : dir;
-}
-
-function copySkillTree(sourceDir, targetDir, budget, depth = 0) {
-  if (depth > 4) return;
-  const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (entry.name.startsWith(".") || IMPORT_SKIP_DIRS.has(entry.name)) continue;
-    if (budget.files >= IMPORT_MAX_FILES) return;
-    const source = path.join(sourceDir, entry.name);
-    const dest = path.join(targetDir, entry.name);
-    if (entry.isDirectory()) {
-      ensureDir(dest);
-      copySkillTree(source, dest, budget, depth + 1);
-    } else if (entry.isFile()) {
-      let size = 0;
-      try {
-        size = fs.statSync(source).size;
-      } catch {
-        continue;
-      }
-      if (budget.bytes + size > IMPORT_MAX_BYTES) continue;
-      fs.copyFileSync(source, dest);
-      budget.files += 1;
-      budget.bytes += size;
-    }
-  }
-}
-
-function extractZip(zipPath, targetDir) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      "/usr/bin/unzip",
-      ["-o", "-q", zipPath, "-d", targetDir],
-      { timeout: 30000, maxBuffer: 4 * 1024 * 1024 },
-      (err) => (err ? reject(new Error(`解压失败：${err.message}`)) : resolve())
-    );
-  });
-}
-
-/**
- * 导入本地技能：支持单个 .md、.zip 压缩包或技能文件夹。
- * 目标目录固定为全局 ~/.omcx/skills（或项目 .omcx/skills），不执行任何脚本内容。
- */
-async function importSkill(sourcePath, options = {}) {
-  const { overwrite = false, workDir = null, scope = "global" } = options;
-  if (!sourcePath) return { success: false, error: "缺少技能来源路径" };
-
-  let stat;
-  try {
-    stat = fs.statSync(sourcePath);
-  } catch {
-    return { success: false, error: "文件或目录不存在" };
-  }
-
-  const targetRoot =
-    scope === "project" && workDir
-      ? path.join(workDir, ".omcx", "skills")
-      : SKILLS_DIR;
-  ensureDir(targetRoot);
-
-  let tempDir = null;
-  try {
-    if (stat.isFile() && /\.zip$/i.test(sourcePath)) {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-skill-"));
-      await extractZip(sourcePath, tempDir);
-      return await importSkill(pickExtractedRoot(tempDir), options);
-    }
-
-    if (stat.isFile()) {
-      if (!/\.md$/i.test(sourcePath)) {
-        return { success: false, error: "仅支持 .md 技能文件或 .zip 技能包" };
-      }
-      const parsed = parseSkillMarkdown(sourcePath, scope);
-      if (!parsed) return { success: false, error: "无法解析该技能文件" };
-      const targetFile = path.join(targetRoot, `${slugifySkillName(parsed.name)}.md`);
-      if (fs.existsSync(targetFile) && !overwrite) {
-        return {
-          success: false,
-          code: "exists",
-          sourcePath,
-          name: parsed.name,
-          error: `技能「${parsed.name}」已存在`,
-        };
-      }
-      fs.copyFileSync(sourcePath, targetFile);
-      return { success: true, name: parsed.name, filePath: targetFile, scope };
-    }
-
-    if (stat.isDirectory()) {
-      const docPath = findSkillDoc(sourcePath);
-      if (!docPath) {
-        return { success: false, error: "该目录下未找到 SKILL.md 或任意 .md 技能说明" };
-      }
-      const parsed = parseSkillMarkdown(docPath, scope, path.basename(sourcePath));
-      const dirName = slugifySkillName(parsed?.name || path.basename(sourcePath));
-      const targetDir = path.join(targetRoot, dirName);
-      if (fs.existsSync(targetDir)) {
-        if (!overwrite) {
-          return {
-            success: false,
-            code: "exists",
-            sourcePath,
-            name: parsed?.name || dirName,
-            error: `技能「${parsed?.name || dirName}」已存在`,
-          };
-        }
-        fs.rmSync(targetDir, { recursive: true, force: true });
-      }
-      fs.mkdirSync(targetDir, { recursive: true });
-      copySkillTree(sourcePath, targetDir, { files: 0, bytes: 0 });
-      return {
-        success: true,
-        name: parsed?.name || dirName,
-        dir: targetDir,
-        filePath: path.join(targetDir, path.basename(docPath)),
-        scope,
-      };
-    }
-
-    return { success: false, error: "不支持的技能来源类型" };
-  } catch (err) {
-    return { success: false, error: err.message || "导入技能失败" };
-  } finally {
-    if (tempDir) {
-      try {
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      } catch {}
-    }
-  }
-}
-
-/**
- * 删除技能：仅允许删除技能根目录内的文件/目录，越界一律拒绝。
- */
-function deleteSkill({ filePath, workDir } = {}) {
-  if (!filePath) return { success: false, error: "缺少技能路径" };
-
-  let realPath;
-  try {
-    realPath = fs.realpathSync(filePath);
-  } catch {
-    return { success: false, error: "技能文件不存在" };
-  }
-
-  const roots = getSkillRoots(workDir).map((root) => {
-    try {
-      return fs.realpathSync(root);
-    } catch {
-      return path.resolve(root);
-    }
-  });
-  const root = roots.find((item) => isPathInside(item, realPath));
-  if (!root) {
-    return { success: false, error: "仅允许删除技能目录内的内容" };
-  }
-
-  const parsed = parseSkillMarkdown(realPath, "global");
-
-  let target = realPath;
-  let removeDir = false;
-  if (/^(skill|readme)\.md$/i.test(path.basename(realPath))) {
-    const parent = path.dirname(realPath);
-    if (isPathInside(root, parent)) {
-      target = parent;
-      removeDir = true;
-    }
-  }
-
-  try {
-    if (removeDir) {
-      fs.rmSync(target, { recursive: true, force: true });
-    } else {
-      fs.unlinkSync(target);
-      // 单文件技能删除后若无残留内容，顺手清理空目录
-      const parent = path.dirname(target);
-      try {
-        if (isPathInside(root, parent) && fs.readdirSync(parent).length === 0) {
-          fs.rmdirSync(parent);
-        }
-      } catch {}
-    }
-  } catch (err) {
-    return { success: false, error: err.message || "删除失败" };
-  }
-
-  if (parsed?.name) {
-    const disabled = new Set(getDisabledSkillNames());
-    if (disabled.delete(parsed.name)) {
-      setConfig(DISABLED_SKILLS_KEY, Array.from(disabled));
-    }
-  }
-
-  return { success: true, name: parsed?.name || path.basename(target) };
-}
-
-function deleteGlobalMcpServer(id) {
-  const serverId = String(id || "").trim();
-  if (!serverId) return { success: false, error: "缺少服务器 ID" };
-
-  let globalServers = {};
-  try {
-    if (fs.existsSync(MCP_FILE)) {
-      globalServers = JSON.parse(fs.readFileSync(MCP_FILE, "utf-8"))?.mcpServers || {};
-    }
-  } catch {
-    return { success: false, error: "读取全局 MCP 配置失败" };
-  }
-  if (!Object.prototype.hasOwnProperty.call(globalServers, serverId)) {
-    return { success: false, error: "未找到该全局 MCP 服务器" };
-  }
-  delete globalServers[serverId];
-  saveGlobalMcpServers(globalServers);
-  return { success: true };
-}
-
-function getMemories(workDir = null) {
-  const memories = [];
-
-  if (fs.existsSync(MEMORY_DIR)) {
-    const files = fs.readdirSync(MEMORY_DIR);
-    for (const file of files) {
-      if (file.endsWith(".md") && file !== "MEMORY.md") {
-        const fp = path.join(MEMORY_DIR, file);
-        const content = fs.readFileSync(fp, "utf-8");
-        memories.push({
-          id: `global:${file}`,
-          name: file.replace(/\.md$/, ""),
-          path: fp,
-          content,
-          scope: "global",
-        });
-      }
-    }
-  }
-
-  if (workDir) {
-    const projMemDir = path.join(workDir, ".omcx", "memory");
-    if (fs.existsSync(projMemDir)) {
-      const files = fs.readdirSync(projMemDir);
-      for (const file of files) {
-        if (file.endsWith(".md") && file !== "MEMORY.md") {
-          const fp = path.join(projMemDir, file);
-          const content = fs.readFileSync(fp, "utf-8");
-          memories.push({
-            id: `project:${file}`,
-            name: file.replace(/\.md$/, ""),
-            path: fp,
-            content,
-            scope: "project",
-          });
-        }
-      }
-    }
-  }
-
-  return memories;
-}
-
-const PROJECT_RULES_BUDGET = 8000;
-
-function getProjectInstructions(workDir) {
-  const instructions = [];
-  if (!workDir) return instructions;
-
-  for (const name of ["AGENTS.md", "CLAUDE.md"]) {
-    const filePath = path.join(workDir, name);
-    if (!fs.existsSync(filePath)) continue;
-    let content = fs.readFileSync(filePath, "utf-8");
-    if (content.length > PROJECT_RULES_BUDGET) {
-      content = `${content.slice(0, PROJECT_RULES_BUDGET)}\n…(已截断，原始长度 ${content.length} 字符)`;
-    }
-    instructions.push({ name, path: filePath, content });
-  }
-
-  return instructions;
-}
-
-function getMemoryIndex(workDir) {
-  const indexes = [];
-
-  const globalIndex = path.join(MEMORY_DIR, "MEMORY.md");
-  if (fs.existsSync(globalIndex)) {
-    indexes.push({
-      scope: "global",
-      path: globalIndex,
-      content: fs.readFileSync(globalIndex, "utf-8"),
-    });
-  }
-
-  if (workDir) {
-    const projectIndex = path.join(workDir, ".omcx", "memory", "MEMORY.md");
-    if (fs.existsSync(projectIndex)) {
-      indexes.push({
-        scope: "project",
-        path: projectIndex,
-        content: fs.readFileSync(projectIndex, "utf-8"),
-      });
-    }
-  }
-
-  return indexes;
-}
+const getStoragePaths = () => ({
+  OMCX_HOME,
+  DB_FILE,
+  MCP_FILE,
+  SKILLS_DIR,
+  MEMORY_DIR,
+  SESSIONS_DIR,
+});
+
+const {
+  getProjectMcpConfigPath,
+  readProjectMcpConfig,
+  isProjectMcpTrusted,
+  setProjectMcpTrust,
+  isProjectHooksTrusted,
+  setProjectHooksTrust,
+  getMcpServers,
+  saveGlobalMcpServers,
+  deleteGlobalMcpServer,
+} = createMcpStorage({
+  getConfig,
+  setConfig,
+  getPaths: getStoragePaths,
+  ensureDir,
+});
+
+const {
+  getDisabledSkillNames,
+  setSkillEnabled,
+  getSkills,
+  importSkill,
+  deleteSkill,
+  getMemories,
+  getProjectInstructions,
+  getMemoryIndex,
+} = createSkillsMemoryStorage({
+  USER_HOME,
+  getConfig,
+  setConfig,
+  getPaths: getStoragePaths,
+  ensureDir,
+});
 
 module.exports = {
   OMCX_HOME,
+  isMemoryOnlyMode,
   initStorage,
   getAllConfig,
   getConfig,
@@ -2254,6 +1559,8 @@ module.exports = {
   extractLegacyThinking,
   addMessage,
   persistMessageSync,
+  flushPendingWritesSync,
+  checkpointWalSync,
   deleteMessagesAfter,
   saveAttachmentBuffer,
   getSessionAttachmentsDir,

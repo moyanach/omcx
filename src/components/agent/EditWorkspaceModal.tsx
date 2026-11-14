@@ -108,11 +108,11 @@ export const EditWorkspaceModal: React.FC<EditWorkspaceModalProps> = ({
 
   // 通过 createPortal 挂载至 document.body 顶层，使用 z-[99999] 彻底杜绝任何头部与侧边栏穿透
   return createPortal(
-    <div className='fixed inset-0 z-[99999] bg-black/65 backdrop-blur-sm flex items-center justify-center p-4 select-none animate-in fade-in duration-150'>
+    <div className='fixed inset-0 z-[99999] bg-[var(--ui-modal-overlay)] backdrop-blur-sm flex items-center justify-center p-4 select-none animate-in fade-in duration-150'>
       {/* 弹窗主体卡片 (双主题原生适配) */}
-      <div className='w-full max-w-[520px] bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl flex flex-col overflow-hidden text-[var(--ui-text-primary)]'>
+      <div className='w-full max-w-[520px] bg-[var(--ui-modal-bg)] backdrop-blur-2xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl flex flex-col overflow-hidden text-[var(--ui-text-primary)]'>
         {/* 1. Header: 标题 + 关闭按钮 */}
-        <div className='px-6 pt-5 pb-3 flex items-center justify-between border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)]'>
+        <div className='px-6 pt-5 pb-3 flex items-center justify-between border-b border-[color:var(--ui-divider-hairline)]'>
           <h2 className='text-base font-bold text-[var(--ui-text-primary)] tracking-tight'>
             编辑项目
           </h2>
@@ -203,12 +203,12 @@ export const EditWorkspaceModal: React.FC<EditWorkspaceModalProps> = ({
         </div>
 
         {/* 3. Footer: 底部操作栏 (左侧危险移除，右侧取消与保存) */}
-        <div className='px-6 py-4 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between'>
+        <div className='px-6 py-4 border-t border-[color:var(--ui-divider-hairline)] flex items-center justify-between'>
           {/* 左侧：移除本地项目 */}
           {onDelete ? (
             <button
               onClick={handleDelete}
-              className='px-3.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 active:bg-rose-500/30 text-rose-400 border border-rose-500/30 text-xs font-semibold transition-colors'
+              className='px-3.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 active:bg-rose-500/30 text-rose-500 dark:text-rose-400 border border-rose-500/30 text-xs font-semibold transition-colors'
             >
               移除本地项目
             </button>
@@ -228,7 +228,7 @@ export const EditWorkspaceModal: React.FC<EditWorkspaceModalProps> = ({
             <button
               onClick={handleSave}
               disabled={isSaving}
-              className='px-5 py-1.5 rounded-xl bg-[var(--ui-text-primary)] text-[var(--ui-app-bg)] hover:opacity-90 active:scale-95 text-xs font-bold shadow-md transition-all'
+              className='px-5 py-1.5 rounded-xl ui-btn-primary active:scale-95 disabled:opacity-50 text-xs font-bold shadow-sm transition-all'
             >
               {isSaving ? '保存中...' : '保存'}
             </button>

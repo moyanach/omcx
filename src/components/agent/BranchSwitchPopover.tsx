@@ -6,6 +6,7 @@ import {
   Check,
   Plus,
   Loader2,
+  Trash2,
   X,
   AlertCircle,
 } from 'lucide-react';
@@ -45,6 +46,13 @@ export const BranchSwitchPopover: React.FC<Props> = ({
   const [newBranchName, setNewBranchName] = useState('');
   const [creatingLoading, setCreatingLoading] = useState(false);
 
+  // 删除分支确认模式
+  const [deletingTarget, setDeletingTarget] = useState<string | null>(null);
+  const [deleteRemote, setDeleteRemote] = useState(false);
+  const [forceDelete, setForceDelete] = useState(false);
+  const [deletingLoading, setDeletingLoading] = useState(false);
+  const [infoMsg, setInfoMsg] = useState('');
+
   const popoverRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
@@ -55,9 +63,13 @@ export const BranchSwitchPopover: React.FC<Props> = ({
     if (isOpen && workDir && window.electronAPI?.getWorkspaceBranches) {
       setLoading(true);
       setErrorMsg('');
+      setInfoMsg('');
       setSearchQuery('');
       setIsCreating(false);
       setNewBranchName('');
+      setDeletingTarget(null);
+      setDeleteRemote(false);
+      setForceDelete(false);
 
       window.electronAPI
         .getWorkspaceBranches(workDir)
@@ -204,6 +216,54 @@ export const BranchSwitchPopover: React.FC<Props> = ({
 
   if (!isOpen || !coords || typeof document === 'undefined') return null;
 
+  const handleRequestDelete = (e: React.MouseEvent, branchName: string) => {
+    e.stopPropagation();
+    setErrorMsg('');
+    setInfoMsg('');
+    setIsCreating(false);
+    setDeletingTarget(branchName);
+    setDeleteRemote(false);
+    setForceDelete(false);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deletingTarget || deletingLoading || !window.electronAPI?.deleteWorkspaceBranch) return;
+    setDeletingLoading(true);
+    setErrorMsg('');
+    setInfoMsg('');
+    try {
+      const res = await window.electronAPI.deleteWorkspaceBranch(workDir, deletingTarget, {
+        deleteRemote,
+        force: forceDelete,
+      });
+      if (!res?.success) {
+        if (res?.notMerged) {
+          setForceDelete(true);
+          setErrorMsg(res.error || '该分支尚未合并，已自动勾选强制删除，请再次确认');
+        } else {
+          setErrorMsg(res?.error || '删除分支失败');
+        }
+        return;
+      }
+      const deletedName = deletingTarget;
+      setBranches((prev) => prev.filter((b) => b.name !== deletedName));
+      setDeletingTarget(null);
+      setDeleteRemote(false);
+      setForceDelete(false);
+      if (res.remoteWarning) {
+        setInfoMsg(res.remoteWarning);
+      } else if (res.remoteDeleted) {
+        setInfoMsg(`已删除本地及远程分支 ${deletedName}`);
+      } else {
+        setInfoMsg(`已删除本地分支 ${deletedName}`);
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || '删除分支失败');
+    } finally {
+      setDeletingLoading(false);
+    }
+  };
+
   return createPortal(
     <div
       ref={popoverRef}
@@ -245,11 +305,17 @@ export const BranchSwitchPopover: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* 错误提示小横条 */}
+      {/* 错误 / 结果提示小横条 */}
       {errorMsg && (
         <div className='px-3 py-1.5 bg-rose-500/10 border-b border-rose-500/20 text-[11px] text-rose-400 flex items-start gap-1.5 leading-snug'>
           <AlertCircle size={12} className='flex-shrink-0 mt-0.5' />
           <span className='break-all'>{errorMsg}</span>
+        </div>
+      )}
+      {!errorMsg && infoMsg && (
+        <div className='px-3 py-1.5 bg-[var(--ui-accent-emerald-soft)] border-b border-[color:var(--ui-border-hairline)] text-[11px] text-[var(--ui-accent-emerald)] flex items-start gap-1.5 leading-snug'>
+          <Check size={12} className='flex-shrink-0 mt-0.5' />
+          <span className='break-all'>{infoMsg}</span>
         </div>
       )}
 
@@ -271,16 +337,34 @@ export const BranchSwitchPopover: React.FC<Props> = ({
           </div>
         ) : (
           filteredBranches.map((item) => {
-            const isCur = item.isCurrent || item.name === currentBranch;
+            const hasRealCurrent = branches.some((b) => b.isCurrent);
+            const isCur = hasRealCurrent ? item.isCurrent : item.name === currentBranch;
+            const isDetachedEntry = /^\(HEAD detached/i.test(item.name);
             const isSwitching = switchingBranch === item.name;
 
             return (
-              <button
+              <div
                 key={item.name}
-                type='button'
-                onClick={() => handleCheckout(item.name)}
-                disabled={Boolean(switchingBranch || creatingLoading)}
-                className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer group ${
+                onClick={() =>
+                  !isDetachedEntry &&
+                  !switchingBranch &&
+                  !creatingLoading &&
+                  !deletingLoading &&
+                  handleCheckout(item.name)
+                }
+                role='button'
+                tabIndex={isDetachedEntry ? -1 : 0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    if (!isDetachedEntry && !switchingBranch && !creatingLoading && !deletingLoading) {
+                      handleCheckout(item.name);
+                    }
+                  }
+                }}
+                className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors group ${
+                  isDetachedEntry ? 'cursor-default' : 'cursor-pointer'
+                } ${
                   isCur
                     ? 'bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] font-medium'
                     : 'text-[var(--ui-text-secondary)] hover:bg-[var(--ui-block-hover-bg)] hover:text-[var(--ui-text-primary)]'
@@ -297,18 +381,79 @@ export const BranchSwitchPopover: React.FC<Props> = ({
                   <span className='truncate font-mono text-xs'>{item.name}</span>
                 </div>
 
-                <div className='flex items-center flex-shrink-0'>
+                <div className='flex items-center gap-1 flex-shrink-0'>
                   {isSwitching ? (
                     <Loader2 size={13} className='animate-spin text-[var(--ui-accent-blue)]' />
                   ) : isCur ? (
                     <Check size={14} className='text-[var(--ui-accent-blue)]' />
-                  ) : null}
+                  ) : (
+                    <button
+                      type='button'
+                      onClick={(e) => handleRequestDelete(e, item.name)}
+                      disabled={Boolean(switchingBranch || creatingLoading || deletingLoading)}
+                      className='p-1 rounded opacity-0 group-hover:opacity-100 focus:opacity-100 text-[var(--ui-text-faint)] hover:text-rose-400 hover:bg-rose-500/10 transition-all'
+                      title={`删除分支 ${item.name}`}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
                 </div>
-              </button>
+              </div>
             );
           })
         )}
       </div>
+
+      {/* 内联删除分支确认面板 */}
+      {deletingTarget && (
+        <div className='px-3 py-2.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-block-bg)] space-y-2'>
+          <div className='text-[11px] text-[var(--ui-text-primary)] leading-snug break-all'>
+            确认删除分支 <span className='font-mono font-semibold text-rose-400'>{deletingTarget}</span> ？
+          </div>
+          <label className='flex items-center gap-1.5 text-[11px] text-[var(--ui-text-secondary)] cursor-pointer select-none'>
+            <input
+              type='checkbox'
+              checked={deleteRemote}
+              onChange={(e) => setDeleteRemote(e.target.checked)}
+              disabled={deletingLoading}
+              className='rounded border-[color:var(--ui-border-hairline)]'
+            />
+            同时删除远程分支
+          </label>
+          <label className='flex items-center gap-1.5 text-[11px] text-[var(--ui-text-muted)] cursor-pointer select-none'>
+            <input
+              type='checkbox'
+              checked={forceDelete}
+              onChange={(e) => setForceDelete(e.target.checked)}
+              disabled={deletingLoading}
+              className='rounded border-[color:var(--ui-border-hairline)]'
+            />
+            强制删除（即使尚未合并）
+          </label>
+          <div className='flex items-center justify-end gap-1.5 pt-0.5'>
+            <button
+              type='button'
+              onClick={() => {
+                setDeletingTarget(null);
+                setErrorMsg('');
+              }}
+              disabled={deletingLoading}
+              className='px-2.5 py-1 rounded-md text-[11px] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)] transition-colors'
+            >
+              取消
+            </button>
+            <button
+              type='button'
+              onClick={handleConfirmDelete}
+              disabled={deletingLoading}
+              className='px-2.5 py-1 rounded-md text-[11px] font-medium bg-rose-500/20 border border-rose-500/40 text-rose-300 hover:bg-rose-500/30 disabled:opacity-50 flex items-center gap-1'
+            >
+              {deletingLoading && <Loader2 size={11} className='animate-spin' />}
+              确认删除
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 3. 底部操作区：创建并检出新分支 (完全对齐截图) */}
       <div className='p-2 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)]'>

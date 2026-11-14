@@ -1,4 +1,5 @@
 import { useCallback, useEffect } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useChatStore, type ChatAttachment, type QueuedPrompt } from "../stores/chatStore";
 
 interface StreamCallbacks {
@@ -167,7 +168,28 @@ export function useStreamChat() {
     refreshOutputs,
     setSessionStartTime,
     setSessionWaiting,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      activeSessionId: s.activeSessionId,
+      messages: s.messages,
+      generatingBySession: s.generatingBySession,
+      setSessionGenerating: s.setSessionGenerating,
+      upsertSessionToolCall: s.upsertSessionToolCall,
+      clearSessionToolCalls: s.clearSessionToolCalls,
+      setSessionTodos: s.setSessionTodos,
+      setSessionPermission: s.setSessionPermission,
+      addMessage: s.addMessage,
+      appendMessageDelta: s.appendMessageDelta,
+      appendMessageReasoning: s.appendMessageReasoning,
+      saveMessageToDb: s.saveMessageToDb,
+      updateMessageMetadata: s.updateMessageMetadata,
+      truncateMessages: s.truncateMessages,
+      setContextMetrics: s.setContextMetrics,
+      refreshOutputs: s.refreshOutputs,
+      setSessionStartTime: s.setSessionStartTime,
+      setSessionWaiting: s.setSessionWaiting,
+    }))
+  );
 
   const isGenerating = Boolean(activeSessionId && generatingBySession[activeSessionId]);
 
@@ -181,7 +203,7 @@ export function useStreamChat() {
       targetSessionIdOverride?: string,
     ) => {
       const targetSessionId = targetSessionIdOverride || activeSessionId;
-      if (!targetSessionId || !text.trim()) return;
+      if (!targetSessionId || (!text.trim() && (!attachments || attachments.length === 0))) return;
 
       // 用户手动发起新请求时取消尚未触发的队列接力，防止同一会话并发启动两次 chat-request
       cancelPendingAutoRelay(targetSessionId);

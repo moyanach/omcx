@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { X, Loader2, RefreshCw, Trash2 } from "lucide-react";
 
 interface Hunk {
@@ -203,13 +204,15 @@ const HunkStagingModal: React.FC<Props> = ({ workDir, filePath, onClose, onChang
     else setSelected(new Set(hunks.map((h) => h.id)));
   };
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
-      className="fixed inset-0 z-[300] bg-black/55 backdrop-blur-[2px] flex items-center justify-center p-6"
+      className="fixed inset-0 z-[99999] bg-[var(--ui-modal-overlay)] backdrop-blur-sm flex items-center justify-center p-6 select-none animate-in fade-in duration-150"
       onClick={onClose}
     >
       <div
-        className="w-[860px] max-w-full max-h-[82vh] bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        className="w-[860px] max-w-full max-h-[82vh] bg-[var(--ui-modal-bg)] backdrop-blur-2xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] rounded-2xl shadow-2xl flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-4 py-3 border-b border-[color:var(--ui-divider-hairline)] flex items-center justify-between gap-3">
@@ -285,7 +288,7 @@ const HunkStagingModal: React.FC<Props> = ({ workDir, filePath, onClose, onChang
             <button
               onClick={applySelected}
               disabled={applying || selected.size === 0}
-              className="px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold disabled:opacity-50 flex items-center gap-1.5"
+              className="px-3 py-1 rounded-lg ui-btn-primary text-[11px] font-semibold disabled:opacity-50 flex items-center gap-1.5 transition-colors"
             >
               {applying ? <Loader2 size={12} className="animate-spin" /> : null}
               {tab === "staged" ? "取消暂存选中 Hunk" : "暂存选中 Hunk"}
@@ -294,7 +297,7 @@ const HunkStagingModal: React.FC<Props> = ({ workDir, filePath, onClose, onChang
               <button
                 onClick={discardSelected}
                 disabled={applying || selected.size === 0}
-                className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                className="px-3 py-1 rounded-lg bg-[var(--ui-accent-rose-soft)] hover:bg-rose-500/20 border border-[color:var(--ui-accent-rose-border)] text-[var(--ui-accent-rose)] text-[11px] font-semibold disabled:opacity-50 flex items-center gap-1.5 transition-colors"
                 title="丢弃选中的未暂存 Hunk（直接还原工作区）"
               >
                 {applying ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={11} />}
@@ -371,7 +374,8 @@ const HunkStagingModal: React.FC<Props> = ({ workDir, filePath, onClose, onChang
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };
 

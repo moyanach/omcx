@@ -1,24 +1,29 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '@/stores/chatStore';
 
 export const ContextCard: React.FC = () => {
   const [isOpen, setIsOpen] = useState(true);
-  const { contextMetrics, messages, activeSessionId, lastCompaction } = useChatStore();
-
-  const activeMsgs = activeSessionId ? messages[activeSessionId] || [] : [];
+  const { contextMetrics, activeMsgsCount, lastCompaction } = useChatStore(
+    useShallow((s) => ({
+      contextMetrics: s.contextMetrics,
+      activeMsgsCount: s.activeSessionId ? s.messages[s.activeSessionId]?.length || 0 : 0,
+      lastCompaction: s.lastCompaction,
+    }))
+  );
 
   // 如果主进程尚未推送指标，提供基于当前消息数量的初始默认估算
   const metrics = contextMetrics || {
     totalLimit: 1000000,
     totalLimitFormatted: '1M',
-    usedTokens: Math.max(120, activeMsgs.length * 80),
-    usedTokensFormatted: activeMsgs.length > 0 ? `${(activeMsgs.length * 0.1).toFixed(1)}k` : '0.1k',
-    usedPercent: activeMsgs.length > 0 ? Math.min(100, parseFloat(((activeMsgs.length * 80 / 1000000) * 100).toFixed(1))) : 0.1,
+    usedTokens: Math.max(120, activeMsgsCount * 80),
+    usedTokensFormatted: activeMsgsCount > 0 ? `${(activeMsgsCount * 0.1).toFixed(1)}k` : '0.1k',
+    usedPercent: activeMsgsCount > 0 ? Math.min(100, parseFloat(((activeMsgsCount * 80 / 1000000) * 100).toFixed(1))) : 0.1,
     breakdown: {
       messages: {
-        tokens: activeMsgs.length * 60,
-        formatted: `${(activeMsgs.length * 0.06).toFixed(1)}k`,
+        tokens: activeMsgsCount * 60,
+        formatted: `${(activeMsgsCount * 0.06).toFixed(1)}k`,
         percent: 0.1,
         color: '#3b82f6',
         label: 'Messages',

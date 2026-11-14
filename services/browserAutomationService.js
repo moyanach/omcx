@@ -18,7 +18,15 @@
 
 const fs = require("fs");
 const path = require("path");
-const { BrowserWindow, nativeImage } = require("electron");
+let electronMod = null;
+try {
+  const loaded = require("electron");
+  if (loaded && typeof loaded === "object") {
+    electronMod = loaded;
+  }
+} catch {}
+const BrowserWindow = electronMod?.BrowserWindow || null;
+const nativeImage = electronMod?.nativeImage || null;
 const projectArtifactService = require("./projectArtifactService");
 
 const KIND = projectArtifactService.KIND.BROWSER_SHOTS;
@@ -58,6 +66,30 @@ let lastError = "";
 let lastActionAt = 0;
 // 导航进行中标记：供前端在页面尚未完成加载时显示进度，而不是误判为“未启动”
 let navigating = false;
+let runningAction = "";
+let abortEpoch = 0;
+
+const MAX_LOGS = 100;
+const consoleLogs = [];
+const networkErrors = [];
+const operationLogs = [];
+
+function pushBounded(list, item, max = MAX_LOGS) {
+  list.push(item);
+  if (list.length > max) list.splice(0, list.length - max);
+}
+
+function pushOperationLog({ action, target = "", status = "ok", detail = "", durationMs = 0 }) {
+  pushBounded(operationLogs, {
+    id: `op_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    time: Date.now(),
+    action: String(action || ""),
+    target: String(target || "").slice(0, 160),
+    status,
+    detail: String(detail || "").slice(0, 260),
+    durationMs: Math.max(0, Math.round(durationMs || 0)),
+  });
+}
 
 function normalizeUrl(input) {
   let raw = String(input || "").trim();
@@ -76,6 +108,9 @@ function normalizeUrl(input) {
 }
 
 function ensureWindow() {
+  if (!BrowserWindow) {
+    throw new Error("当前为 Headless CLI 模式，不支持内置 Electron 浏览器自动化工具");
+  }
   if (win && !win.isDestroyed()) return win;
   win = new BrowserWindow({
     show: false,
@@ -93,6 +128,49 @@ function ensureWindow() {
   try {
     win.webContents.session.setPermissionRequestHandler((_wc, _permission, cb) => cb(false));
   } catch {}
+
+  // 捕获页面 Console 警告与报错
+  win.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    // Electron level: 0=verbose, 1=info, 2=warning, 3=error
+    if (level >= 2) {
+      pushBounded(consoleLogs, {
+        time: Date.now(),
+        level: level >= 3 ? "error" : "warn",
+        message: String(message || "").slice(0, 500),
+        source: sourceId ? `${sourceId}:${line || 0}` : "",
+      });
+    }
+  });
+
+  // 捕获异常 HTTP 状态与网络错误（同一 session 防重挂接）
+  const ses = win.webContents.session;
+  if (ses && !ses.__omcxNetworkHooked) {
+    ses.__omcxNetworkHooked = true;
+    try {
+      ses.webRequest.onCompleted((details) => {
+        if (details && details.statusCode >= 400) {
+          pushBounded(networkErrors, {
+            time: Date.now(),
+            method: details.method || "GET",
+            url: String(details.url || "").slice(0, 240),
+            statusCode: details.statusCode,
+            resourceType: details.resourceType || "",
+          });
+        }
+      });
+      ses.webRequest.onErrorOccurred((details) => {
+        if (!details || details.error === "net::ERR_ABORTED") return;
+        pushBounded(networkErrors, {
+          time: Date.now(),
+          method: details.method || "GET",
+          url: String(details.url || "").slice(0, 240),
+          error: details.error || "network_error",
+          resourceType: details.resourceType || "",
+        });
+      });
+    } catch {}
+  }
+
   win.on("closed", () => {
     win = null;
   });
@@ -115,7 +193,9 @@ async function waitForLoad(wc, timeoutMs = NAV_TIMEOUT_MS) {
       cleanup();
       resolve({ timedOut: false });
     };
-    const onFail = (_e, code, desc) => {
+    const onFail = (_e, code, desc, _validatedURL, isMainFrame) => {
+      // 忽略子框架加载取消或重定向引起的 ERR_ABORTED (-3)，避免误判主页面失败
+      if (isMainFrame === false || code === -3) return;
       if (settled) return;
       settled = true;
       cleanup();
@@ -189,6 +269,8 @@ async function readPageInfo(wc) {
 }
 
 async function open({ url, workDir, settleMs = 600 } = {}) {
+  const startedAt = Date.now();
+  const myEpoch = abortEpoch;
   const target = normalizeUrl(url);
   if (workDir) setWorkDir(workDir);
   const browser = ensureWindow();
@@ -197,6 +279,7 @@ async function open({ url, workDir, settleMs = 600 } = {}) {
   let timedOut = false;
   let navTimer = null;
   navigating = true;
+  runningAction = `打开 ${target}`;
   try {
     const loaded = waitForLoad(wc);
     // loadURL 本身可能因页面请求挂起而永不返回，必须叠加硬超时并主动 stop 兜底
@@ -211,6 +294,9 @@ async function open({ url, workDir, settleMs = 600 } = {}) {
     } finally {
       if (navTimer) clearTimeout(navTimer);
     }
+    if (abortEpoch !== myEpoch) {
+      return { ok: false, aborted: true, error: "已手动停止自动化操作", url: target };
+    }
     const loadState = await loaded;
     await waitForReady(wc, settleMs);
     lastActionAt = Date.now();
@@ -220,13 +306,36 @@ async function open({ url, workDir, settleMs = 600 } = {}) {
     } else if (loadState?.timedOut) {
       lastError = `页面加载超过 ${Math.round(NAV_TIMEOUT_MS / 1000)}s，已返回当前可交互内容`;
     }
-    return { ok: true, ...info, warning: lastError || undefined };
+    pushOperationLog({
+      action: "open",
+      target: info.url || target,
+      status: lastError ? "warn" : "ok",
+      detail: lastError || info.title || "页面加载完成",
+      durationMs: Date.now() - startedAt,
+    });
+    return {
+      ok: true,
+      ...info,
+      consoleErrorCount: consoleLogs.length,
+      networkErrorCount: networkErrors.length,
+      warning: lastError || undefined,
+    };
   } catch (err) {
     // 中断仍在进行的导航，避免后台继续占用加载队列
     try {
       wc.stop();
     } catch {}
+    if (abortEpoch !== myEpoch) {
+      return { ok: false, aborted: true, error: "已手动停止自动化操作", url: target };
+    }
     lastError = err?.message || String(err);
+    pushOperationLog({
+      action: "open",
+      target,
+      status: timedOut ? "warn" : "error",
+      detail: lastError,
+      durationMs: Date.now() - startedAt,
+    });
     if (timedOut) {
       // 超时不等于完全失败：尽量返回当前已经渲染出的内容，供用户继续操作/截图
       const info = await readPageInfo(wc).catch(() => ({ url: target, title: "", text: "" }));
@@ -235,12 +344,23 @@ async function open({ url, workDir, settleMs = 600 } = {}) {
     return { ok: false, error: lastError, url: target };
   } finally {
     navigating = false;
+    runningAction = "";
   }
+}
+
+function resolveSelector(selector, ref) {
+  const rawRef = String(ref || "").trim();
+  if (rawRef) {
+    const safeRef = rawRef.replace(/[^a-zA-Z0-9_-]/g, "");
+    if (safeRef) return `[data-omcx-ref="${safeRef}"]`;
+  }
+  return String(selector || "").trim();
 }
 
 function buildInteractScript(action, selector, payload) {
   const sel = JSON.stringify(selector || "");
   const text = JSON.stringify(payload?.text ?? "");
+  const value = JSON.stringify(payload?.value ?? payload?.text ?? "");
   const key = JSON.stringify(payload?.key ?? "Enter");
   const amount = Number(payload?.amount) || 600;
   switch (action) {
@@ -249,6 +369,7 @@ function buildInteractScript(action, selector, payload) {
         const el = document.querySelector(${sel});
         if (!el) return { ok: false, error: "未找到元素: " + ${sel} };
         el.scrollIntoView({ block: "center", inline: "center" });
+        el.focus?.();
         el.click();
         return { ok: true, tag: el.tagName };
       })()`;
@@ -256,6 +377,14 @@ function buildInteractScript(action, selector, payload) {
       return `(() => {
         const el = document.querySelector(${sel});
         if (!el) return { ok: false, error: "未找到元素: " + ${sel} };
+        el.scrollIntoView({ block: "center", inline: "center" });
+        el.focus?.();
+        if (el.isContentEditable) {
+          el.textContent = ${text};
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          return { ok: true, tag: el.tagName, value: el.textContent };
+        }
         const proto = el instanceof HTMLTextAreaElement
           ? HTMLTextAreaElement.prototype
           : HTMLInputElement.prototype;
@@ -264,7 +393,25 @@ function buildInteractScript(action, selector, payload) {
         else el.value = ${text};
         el.dispatchEvent(new Event("input", { bubbles: true }));
         el.dispatchEvent(new Event("change", { bubbles: true }));
+        el.dispatchEvent(new Event("blur", { bubbles: true }));
         return { ok: true, tag: el.tagName, value: el.value };
+      })()`;
+    case "select_option":
+      return `(() => {
+        const el = document.querySelector(${sel});
+        if (!el) return { ok: false, error: "未找到元素: " + ${sel} };
+        if (!(el instanceof HTMLSelectElement)) {
+          return { ok: false, error: "select_option 仅支持 <select> 元素，当前为 " + el.tagName };
+        }
+        const targetVal = ${value};
+        const opt = Array.from(el.options).find(
+          (o) => o.value === targetVal || (o.textContent || "").trim() === targetVal
+        );
+        if (!opt) return { ok: false, error: "未找到匹配选项: " + targetVal };
+        el.value = opt.value;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return { ok: true, tag: el.tagName, value: el.value, label: (opt.textContent || "").trim() };
       })()`;
     case "press":
       return `(() => {
@@ -302,44 +449,243 @@ function buildInteractScript(action, selector, payload) {
   }
 }
 
-async function interact({ action, selector = "", text = "", key = "Enter", amount = 600, timeout_ms = 8000 } = {}) {
+async function interact({ action, selector = "", ref = "", text = "", value = "", key = "Enter", amount = 600, timeout_ms = 8000, script: evalCode = "" } = {}) {
+  const startedAt = Date.now();
+  const myEpoch = abortEpoch;
   const browser = ensureWindow();
   const wc = browser.webContents;
   const act = String(action || "").toLowerCase();
+  const targetSelector = resolveSelector(selector, ref);
+  const targetLabel = ref ? `@${ref}` : targetSelector || act;
   lastError = "";
+  runningAction = `${act} ${targetLabel}`;
 
   try {
+    if (act === "eval") {
+      if (!evalCode) return { ok: false, error: "eval 需要提供 script 代码" };
+      const evalResult = await wc.executeJavaScript(`(() => { ${evalCode} })()`, true);
+      lastActionAt = Date.now();
+      pushOperationLog({
+        action: "eval",
+        target: evalCode.slice(0, 80),
+        status: "ok",
+        detail: "脚本执行完成",
+        durationMs: Date.now() - startedAt,
+      });
+      return { ok: true, action: "eval", result: evalResult, ...(await readPageInfo(wc)) };
+    }
+
     if (act === "wait_for") {
-      if (!selector) return { ok: false, error: "wait_for 需要 selector" };
+      if (!targetSelector) return { ok: false, error: "wait_for 需要 selector 或 ref" };
       const deadline = Date.now() + Math.min(60000, Math.max(500, Number(timeout_ms) || 8000));
-      const selLiteral = JSON.stringify(selector);
+      const selLiteral = JSON.stringify(targetSelector);
       while (Date.now() < deadline) {
+        if (abortEpoch !== myEpoch) {
+          return { ok: false, aborted: true, error: "已手动停止自动化操作" };
+        }
         const found = await wc.executeJavaScript(
           `!!document.querySelector(${selLiteral})`,
           true
         );
         if (found) {
           lastActionAt = Date.now();
-          return { ok: true, ...(await readPageInfo(wc)) };
+          const info = await readPageInfo(wc);
+          pushOperationLog({
+            action: "wait_for",
+            target: targetLabel,
+            status: "ok",
+            detail: "目标元素已出现",
+            durationMs: Date.now() - startedAt,
+          });
+          return { ok: true, ...info };
         }
-        await new Promise((r) => setTimeout(r, 150));
+        await sleep(150);
       }
-      return { ok: false, error: `等待元素超时: ${selector}` };
+      const errMsg = `等待元素超时: ${targetLabel}`;
+      pushOperationLog({
+        action: "wait_for",
+        target: targetLabel,
+        status: "error",
+        detail: errMsg,
+        durationMs: Date.now() - startedAt,
+      });
+      return { ok: false, error: errMsg };
     }
 
-    const script = buildInteractScript(act, selector, { text, key, amount });
+    const script = buildInteractScript(act, targetSelector, { text, value, key, amount });
     if (!script) {
       return { ok: false, error: `不支持的动作: ${action}` };
     }
     const result = await wc.executeJavaScript(script, true);
-    await new Promise((r) => setTimeout(r, 250));
+    if (abortEpoch !== myEpoch) {
+      return { ok: false, aborted: true, error: "已手动停止自动化操作" };
+    }
+    await sleep(250);
     lastActionAt = Date.now();
     const info = await readPageInfo(wc);
-    return { ok: Boolean(result?.ok), action: act, detail: result, ...info };
+    const ok = Boolean(result?.ok);
+    pushOperationLog({
+      action: act,
+      target: targetLabel,
+      status: ok ? "ok" : "error",
+      detail: ok ? (act === "fill" ? `已输入 (${String(text).length} 字符)` : info.title || "执行成功") : result?.error || "执行失败",
+      durationMs: Date.now() - startedAt,
+    });
+    return {
+      ok,
+      action: act,
+      detail: result,
+      consoleErrorCount: consoleLogs.length,
+      networkErrorCount: networkErrors.length,
+      ...info,
+    };
   } catch (err) {
     lastError = err.message || String(err);
+    pushOperationLog({
+      action: act,
+      target: targetLabel,
+      status: "error",
+      detail: lastError,
+      durationMs: Date.now() - startedAt,
+    });
     return { ok: false, error: lastError };
+  } finally {
+    runningAction = "";
   }
+}
+
+async function inspect({ maxElements = 80 } = {}) {
+  const startedAt = Date.now();
+  const browser = ensureWindow();
+  const wc = browser.webContents;
+  const limit = Math.max(10, Math.min(150, Number(maxElements) || 80));
+  runningAction = "inspect 页面元素";
+  try {
+    const data = await wc.executeJavaScript(
+      `(() => {
+        const selectorQuery = [
+          'input:not([type="hidden"])',
+          'textarea',
+          'select',
+          'button',
+          'a[href]',
+          '[role="button"]',
+          '[role="textbox"]',
+          '[role="combobox"]',
+          '[role="tab"]',
+          '[contenteditable="true"]'
+        ].join(',');
+        const nodes = Array.from(document.querySelectorAll(selectorQuery));
+        const items = [];
+        let idx = 1;
+        for (const el of nodes) {
+          if (items.length >= ${limit}) break;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          if (rect.width === 0 || rect.height === 0 || style.visibility === 'hidden' || style.display === 'none') {
+            continue;
+          }
+          const ref = 'e' + idx++;
+          el.setAttribute('data-omcx-ref', ref);
+          const tag = el.tagName.toLowerCase();
+          const type = el.getAttribute('type') || '';
+          const role = el.getAttribute('role') || '';
+          const ariaLabel = el.getAttribute('aria-label') || '';
+          const placeholder = el.getAttribute('placeholder') || '';
+          let label = ariaLabel || (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+          if (!label && el.id) {
+            const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+            if (lbl) label = (lbl.innerText || '').trim();
+          }
+          const isPwd = type.toLowerCase() === 'password';
+          const rawVal = 'value' in el ? String(el.value || '') : '';
+          items.push({
+            ref,
+            tag,
+            type: type || undefined,
+            role: role || undefined,
+            label: label.slice(0, 80) || undefined,
+            placeholder: placeholder.slice(0, 60) || undefined,
+            value: isPwd && rawVal ? '***' : rawVal.slice(0, 60) || undefined,
+            disabled: Boolean(el.disabled) || undefined,
+            selector: el.id ? '#' + CSS.escape(el.id) : '[data-omcx-ref="' + ref + '"]',
+          });
+        }
+        return { count: items.length, elements: items };
+      })()`,
+      true
+    );
+    const info = await readPageInfo(wc);
+    lastActionAt = Date.now();
+    pushOperationLog({
+      action: "inspect",
+      target: info.url || "",
+      status: "ok",
+      detail: `探测到 ${data?.count || 0} 个可交互元素`,
+      durationMs: Date.now() - startedAt,
+    });
+    return {
+      ok: true,
+      url: info.url,
+      title: info.title,
+      count: data?.count || 0,
+      elements: data?.elements || [],
+      consoleErrorCount: consoleLogs.length,
+      networkErrorCount: networkErrors.length,
+    };
+  } catch (err) {
+    const errMsg = err?.message || String(err);
+    pushOperationLog({
+      action: "inspect",
+      target: "",
+      status: "error",
+      detail: errMsg,
+      durationMs: Date.now() - startedAt,
+    });
+    return { ok: false, error: errMsg };
+  } finally {
+    runningAction = "";
+  }
+}
+
+function getLogs({ clear = false } = {}) {
+  const alive = Boolean(win && !win.isDestroyed());
+  const url = alive ? win.webContents.getURL() : "";
+  const result = {
+    ok: true,
+    url,
+    consoleErrors: consoleLogs.slice(-50),
+    networkErrors: networkErrors.slice(-50),
+  };
+  if (clear) {
+    consoleLogs.length = 0;
+    networkErrors.length = 0;
+  }
+  pushOperationLog({
+    action: "logs",
+    target: url || "browser",
+    status: "ok",
+    detail: `Console ${result.consoleErrors.length} 条, Network ${result.networkErrors.length} 条`,
+  });
+  return result;
+}
+
+function stopAutomation() {
+  abortEpoch += 1;
+  navigating = false;
+  runningAction = "";
+  try {
+    if (win && !win.isDestroyed()) {
+      win.webContents.stop();
+    }
+  } catch {}
+  pushOperationLog({
+    action: "stop",
+    target: "automation",
+    status: "warn",
+    detail: "用户手动停止自动化操作",
+  });
+  return { ok: true, stopped: true };
 }
 
 function safeBaselineName(name) {
@@ -546,6 +892,7 @@ function getState() {
   return {
     open,
     loading: navigating,
+    runningAction,
     url: open ? pageUrl : "",
     title: open ? win.webContents.getTitle() : "",
     lastShotPath,
@@ -554,6 +901,9 @@ function getState() {
     workDir: activeWorkDir,
     shotsDir: shotsDir(),
     baselines: listBaselines(),
+    operationLogs: operationLogs.slice(-50),
+    consoleErrorCount: consoleLogs.length,
+    networkErrorCount: networkErrors.length,
   };
 }
 
@@ -629,6 +979,7 @@ async function forward() {
 }
 
 function close() {
+  abortEpoch += 1;
   try {
     if (win && !win.isDestroyed()) {
       try {
@@ -639,13 +990,17 @@ function close() {
   } catch {}
   win = null;
   navigating = false;
+  runningAction = "";
   return { ok: true };
 }
 
 module.exports = {
   open,
+  inspect,
   interact,
   snapshot,
+  getLogs,
+  stopAutomation,
   saveBaseline,
   listBaselines,
   getState,

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import {
-  FolderGit2,
   Folder,
   Layers,
   ExternalLink,
@@ -23,9 +23,20 @@ export const WorkspacesView: React.FC = () => {
     fetchWorkspaces,
     saveWorkspace,
     deleteWorkspace,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      activeWorkspaceId: s.activeWorkspaceId,
+      setActiveWorkspace: s.setActiveWorkspace,
+      workspaces: s.workspaces,
+      fetchWorkspaces: s.fetchWorkspaces,
+      saveWorkspace: s.saveWorkspace,
+      deleteWorkspace: s.deleteWorkspace,
+    }))
+  );
 
-  const { setActiveNavTab } = useAppStore();
+  const setActiveNavTab = useAppStore((s) => s.setActiveNavTab);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingWorkspace, setEditingWorkspace] = useState<WorkspaceData | null>(null);
@@ -64,18 +75,18 @@ export const WorkspacesView: React.FC = () => {
 
   return (
     <>
-      <div className='flex-1 h-full flex flex-col bg-[#161616] overflow-hidden text-neutral-200 select-none'>
+      <div className='flex-1 h-full flex flex-col bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150 overflow-hidden text-[var(--ui-text-primary)] select-none'>
         {/* 顶部 Header */}
-        <div className='h-[56px] border-b border-[#242424] bg-[#141414] px-6 flex items-center justify-between flex-shrink-0'>
+        <div className='h-[56px] border-b border-[color:var(--ui-divider-hairline)] bg-transparent px-6 flex items-center justify-between flex-shrink-0 titlebar-drag'>
           <div className='flex items-center gap-3'>
             <div className='w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400'>
               <Layers size={16} />
             </div>
             <div>
-              <h1 className='text-sm font-semibold text-neutral-100'>
+              <h1 className='text-sm font-semibold text-[var(--ui-text-primary)]'>
                 多目录工作空间管理中心 (Multi-Folder Workspaces)
               </h1>
-              <p className='text-[11px] text-neutral-500'>
+              <p className='text-[11px] text-[var(--ui-text-muted)]'>
                 支持全栈前后端、微服务多源文件夹挂载与跨仓库协同
               </p>
             </div>
@@ -83,7 +94,7 @@ export const WorkspacesView: React.FC = () => {
 
           <button
             onClick={() => handleOpenEditModal()}
-            className='h-8 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm'
+            className='h-8 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer titlebar-no-drag'
           >
             <Plus size={14} />
             <span>新建多目录工作区</span>
@@ -106,58 +117,58 @@ export const WorkspacesView: React.FC = () => {
               return (
                 <div
                   key={ws.id}
-                  className={`p-4 rounded-2xl bg-[#1c1c1c] border transition-all duration-200 flex flex-col justify-between gap-3 group ${
+                  className={`p-4 rounded-2xl bg-[var(--ui-card-bg)] border transition-all duration-200 flex flex-col justify-between gap-3 group shadow-sm hover:bg-[var(--ui-card-hover-bg)] hover:shadow-md ${
                     isCurrent
-                      ? 'border-blue-500/60 shadow-lg shadow-blue-500/5 bg-[#1f1f1f]'
-                      : 'border-[#292929] hover:border-[#3a3a3a] hover:bg-[#1e1e1e]'
+                      ? 'border-blue-500/60 shadow-lg shadow-blue-500/5'
+                      : 'border-[color:var(--ui-border-subtle)] hover:border-[color:var(--ui-accent-blue-border)]'
                   }`}
                 >
                   {/* 头部信息与编辑按钮 */}
                   <div className='flex flex-col gap-2'>
                     <div className='flex items-center justify-between'>
                       <div className='flex items-center gap-2 min-w-0'>
-                        <span className='font-bold text-sm text-neutral-100 truncate'>
+                        <span className='font-bold text-sm text-[var(--ui-text-primary)] truncate'>
                           {ws.name}
                         </span>
                         {isCurrent && (
-                          <span className='px-2 py-0.5 rounded-full text-[10px] font-mono bg-blue-500/20 text-blue-400 border border-blue-500/30 flex-shrink-0'>
+                          <span className='px-2 py-0.5 rounded-full text-[10px] font-mono bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border border-[color:var(--ui-accent-blue-border)] flex-shrink-0'>
                             当前生效
                           </span>
                         )}
                       </div>
                       <button
                         onClick={() => handleOpenEditModal(ws)}
-                        className='p-1 rounded text-neutral-500 hover:text-white transition-colors'
-                        title='编辑此多目录项目 (图 8 弹窗)'
+                        className='p-1 rounded text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)] transition-colors cursor-pointer'
+                        title='编辑此多目录项目'
                       >
                         <Edit3 size={13} />
                       </button>
                     </div>
 
                     {/* 挂载的源文件夹列表 */}
-                    <div className='flex flex-col gap-1.5 bg-[#161616] border border-[#242424] rounded-xl p-2.5 max-h-[130px] overflow-y-auto custom-scrollbar'>
-                      <span className='text-[10px] font-semibold text-neutral-400 uppercase tracking-wider'>
+                    <div className='flex flex-col gap-1.5 bg-[var(--ui-card-inner-bg)] border border-[color:var(--ui-border-hairline)] rounded-xl p-2.5 max-h-[130px] overflow-y-auto custom-scrollbar'>
+                      <span className='text-[10px] font-semibold text-[var(--ui-text-muted)] uppercase tracking-wider'>
                         源文件夹 ({ws.folders.length}):
                       </span>
                       {ws.folders.map((f, idx) => (
                         <div
                           key={idx}
-                          className='flex items-center justify-between text-xs py-0.5 hover:text-white'
+                          className='flex items-center justify-between text-xs py-0.5 hover:text-[var(--ui-text-primary)]'
                         >
                           <div className='flex items-center gap-1.5 min-w-0 pr-1'>
-                            <Folder size={12} className='text-neutral-400 flex-shrink-0' />
-                            <span className='text-[11px] font-medium text-neutral-300 truncate'>
+                            <Folder size={12} className='text-[var(--ui-text-muted)] flex-shrink-0' />
+                            <span className='text-[11px] font-medium text-[var(--ui-text-secondary)] truncate'>
                               {f.name}
                             </span>
                             {f.isPrimary && (
-                              <span className='px-1.5 py-0.2 rounded text-[9px] bg-[#262626] text-neutral-400 border border-[#333] flex-shrink-0'>
+                              <span className='px-1.5 py-0.2 rounded text-[9px] bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border border-[color:var(--ui-border-hairline)] flex-shrink-0'>
                                 主要
                               </span>
                             )}
                           </div>
                           <button
                             onClick={(e) => handleReveal(f.path, e)}
-                            className='text-neutral-500 hover:text-neutral-300'
+                            className='text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] cursor-pointer'
                             title='打开'
                           >
                             <ExternalLink size={10} />
@@ -168,18 +179,18 @@ export const WorkspacesView: React.FC = () => {
                   </div>
 
                   {/* 统计与进入动作 */}
-                  <div className='flex items-center justify-between pt-1 border-t border-[#262626]'>
-                    <div className='flex items-center gap-1.5 text-xs text-neutral-400 font-mono'>
-                      <MessageSquare size={12} className='text-blue-400' />
+                  <div className='flex items-center justify-between pt-2 border-t border-[color:var(--ui-divider-hairline)]'>
+                    <div className='flex items-center gap-1.5 text-xs text-[var(--ui-text-muted)] font-mono'>
+                      <MessageSquare size={12} className='text-[var(--ui-accent-blue)]' />
                       <span>{projectSessions.length} 个会话</span>
                     </div>
 
                     <button
                       onClick={() => handleEnterWorkspace(ws)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
                         isCurrent
-                          ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 border border-blue-500/30'
-                          : 'bg-[#272727] hover:bg-[#323232] text-neutral-200 border border-[#383838]'
+                          ? 'bg-[var(--ui-btn-primary-bg)] text-[var(--ui-btn-primary-text)] hover:bg-[var(--ui-btn-primary-hover-bg)] border border-[color:var(--ui-btn-primary-border)]'
+                          : 'bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-hairline)]'
                       }`}
                     >
                       <span>{isCurrent ? '进入会话' : '切换至此'}</span>
