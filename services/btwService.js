@@ -11,6 +11,7 @@
  */
 
 const { isAnthropicProvider, streamAnthropicMessage } = require("./anthropicClient");
+const { attachModelErrorContext, createHttpModelError } = require("./modelErrorService");
 
 const MAX_TOOL_ROUNDS = 20;
 const MAX_TOOL_RESULT_CHARS = 16000;
@@ -117,17 +118,25 @@ async function streamOpenAiCompatible({
     return body;
   };
 
-  const request = async (includeMaxTokens) =>
-    fetch(`${base}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-      },
-      body: JSON.stringify(buildBody(includeMaxTokens)),
-      signal,
-    });
+  const endpointUrl = `${base}/chat/completions`;
+  const errCtx = { model, baseUrl: base, endpoint: endpointUrl };
+
+  const request = async (includeMaxTokens) => {
+    try {
+      return await fetch(endpointUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        },
+        body: JSON.stringify(buildBody(includeMaxTokens)),
+        signal,
+      });
+    } catch (fetchErr) {
+      throw attachModelErrorContext(fetchErr, errCtx);
+    }
+  };
 
   let response = await request(true);
   if (!response.ok && response.status === 400) {
@@ -139,14 +148,29 @@ async function streamOpenAiCompatible({
         // 已成功降级
       } else {
         const retryText = await response.text().catch(() => "");
-        throw new Error(`API 请求失败 (${response.status}): ${retryText.slice(0, 1200)}`);
+        throw createHttpModelError({
+          status: response.status,
+          statusText: response.statusText,
+          rawBody: retryText,
+          ...errCtx,
+        });
       }
     } else {
-      throw new Error(`API 请求失败 (${response.status}): ${errText.slice(0, 1200)}`);
+      throw createHttpModelError({
+        status: 400,
+        statusText: response.statusText,
+        rawBody: errText,
+        ...errCtx,
+      });
     }
   } else if (!response.ok) {
     const errText = await response.text().catch(() => "");
-    throw new Error(`API 请求失败 (${response.status}): ${errText.slice(0, 1200)}`);
+    throw createHttpModelError({
+      status: response.status,
+      statusText: response.statusText,
+      rawBody: errText,
+      ...errCtx,
+    });
   }
 
   if (!response.body) throw new Error("模型 API 未返回可读取的响应流");

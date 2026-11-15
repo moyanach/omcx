@@ -93,17 +93,79 @@ function recoverPendingSteers(
 }
 
 function parseErrorDetails(err: string) {
+  const rawErr = String(err || "").trim();
   let parsed: any = null;
   try {
-    parsed = JSON.parse(err);
+    parsed = JSON.parse(rawErr);
   } catch {
     parsed = null;
   }
 
+  if (parsed && parsed.type === "MODEL_REQUEST_ERROR") {
+    const summary = String(parsed.summary || "模型请求失败").trim();
+    const reason = String(parsed.reason || "").trim();
+    const model = String(parsed.model || "").trim();
+    const provider = String(parsed.provider || "").trim();
+    const endpoint = String(parsed.endpoint || "").trim();
+    const code = String(parsed.code || "").trim();
+    const toolRound =
+      typeof parsed.toolRound === "number" && Number.isFinite(parsed.toolRound)
+        ? parsed.toolRound
+        : null;
+    const suggestions: string[] = Array.isArray(parsed.suggestions)
+      ? parsed.suggestions.map((s: any) => String(s || "").trim()).filter(Boolean)
+      : [];
+    const rawDetails = String(parsed.rawDetails || "").trim();
+
+    const metaLines: string[] = [];
+    if (reason && reason !== summary) {
+      metaLines.push(`- **原因**：${reason}`);
+    }
+    if (model) {
+      metaLines.push(`- **模型**：\`${model}\`${provider ? ` (${provider})` : ""}`);
+    }
+    if (endpoint) {
+      metaLines.push(`- **接口**：\`${endpoint}\``);
+    }
+    if (code) {
+      metaLines.push(`- **错误码**：\`${code}\``);
+    }
+    if (toolRound !== null && toolRound > 0) {
+      metaLines.push(`- **阶段**：第 ${toolRound} 轮工具调用后`);
+    }
+
+    const sections: string[] = [];
+    if (metaLines.length > 0) {
+      sections.push(metaLines.join("\n"));
+    }
+    if (suggestions.length > 0) {
+      sections.push(`**排查建议**\n${suggestions.map((s) => `- ${s}`).join("\n")}`);
+    }
+    if (rawDetails) {
+      sections.push(
+        [
+          `<details>`,
+          `<summary>查看原始技术详情</summary>`,
+          "",
+          "```text",
+          rawDetails,
+          "```",
+          "",
+          "</details>",
+        ].join("\n")
+      );
+    }
+
+    return {
+      summary,
+      details: sections.join("\n\n"),
+    };
+  }
+
   if (!parsed || parsed.type !== "HTTP_ERROR") {
     return {
-      summary: err,
-      details: `\`\`\`text\n${err}\n\`\`\``,
+      summary: rawErr || "未知错误",
+      details: "",
     };
   }
 
@@ -122,7 +184,7 @@ function parseErrorDetails(err: string) {
   return {
     summary: statusText ? `HTTP 错误: ${status} ${statusText}` : `HTTP 错误: ${status}`,
     details: [
-      `<details open>`,
+      `<details>`,
       `<summary>查看错误详情</summary>`,
       "",
       `- 状态: ${status}`,
@@ -143,9 +205,12 @@ function parseErrorDetails(err: string) {
   };
 }
 
-function formatErrorContent(err: string) {
+export function formatErrorContent(err: string) {
   const { summary, details } = parseErrorDetails(err);
-  return `\n\n[生成失败: ${summary}]\n\n${details}`;
+  if (!details) {
+    return `\n\n**生成失败**：${summary}`;
+  }
+  return `\n\n**生成失败：${summary}**\n\n${details}`;
 }
 
 export function useStreamChat() {

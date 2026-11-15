@@ -15,6 +15,7 @@ const {
   getHookService,
   getSessionTransferService,
   getSandboxPolicyService,
+  getModelErrorService,
   activeStreamSessions,
 } = require("../shared");
 
@@ -116,20 +117,31 @@ function registerSessionIpc() {
         }
       }
 
+      const fetchUrl = isAnthropicEndpoint
+        ? /\/v1$/i.test(activeBaseUrl)
+          ? `${activeBaseUrl}/models`
+          : `${activeBaseUrl}/v1/models`
+        : `${activeBaseUrl}/models`;
+      const { createHttpModelError, formatModelErrorText, attachModelErrorContext } =
+        getModelErrorService();
+
       try {
-        const fetchUrl = isAnthropicEndpoint
-          ? /\/v1$/i.test(activeBaseUrl)
-            ? `${activeBaseUrl}/models`
-            : `${activeBaseUrl}/v1/models`
-          : `${activeBaseUrl}/models`;
         const response = await fetch(fetchUrl, {
           headers,
           signal: AbortSignal.timeout(10000),
         });
 
         if (!response.ok) {
-          const errText = await response.text();
-          throw new Error(`HTTP ${response.status}: ${errText.slice(0, 300)}`);
+          const errText = await response.text().catch(() => "");
+          throw createHttpModelError({
+            status: response.status,
+            statusText: response.statusText,
+            rawBody: errText,
+            provider: params.provider || "",
+            baseUrl: activeBaseUrl,
+            endpoint: fetchUrl,
+            prefix: "拉取远程模型失败",
+          });
         }
 
         const data = await response.json();
@@ -142,8 +154,18 @@ function registerSessionIpc() {
         }
         return [];
       } catch (err) {
-        console.error("[api-get-models] 拉取远程模型失败:", err.message);
-        throw new Error(err.message || "连接失败");
+        attachModelErrorContext(err, {
+          provider: params.provider || "",
+          baseUrl: activeBaseUrl,
+          endpoint: fetchUrl,
+        });
+        const readable = formatModelErrorText(err, {
+          provider: params.provider || "",
+          baseUrl: activeBaseUrl,
+          endpoint: fetchUrl,
+        });
+        console.error("[api-get-models] 拉取远程模型失败:", readable, err);
+        throw new Error(readable);
       }
     })
   );

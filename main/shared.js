@@ -62,6 +62,7 @@ const MODULES = {
   anthropicClient: "../services/anthropicClient",
   sandboxPolicyService: "../services/sandboxPolicyService",
   contextCompactor: "../services/contextCompactor",
+  modelErrorService: "../services/modelErrorService",
 };
 
 const getStorageService = () => lazyRequire(MODULES.storageService);
@@ -94,6 +95,7 @@ const getBrowserAutomationService = () => lazyRequire(MODULES.browserAutomationS
 const getAnthropicClient = () => lazyRequire(MODULES.anthropicClient);
 const getSandboxPolicyService = () => lazyRequire(MODULES.sandboxPolicyService);
 const getContextCompactor = () => lazyRequire(MODULES.contextCompactor);
+const getModelErrorService = () => lazyRequire(MODULES.modelErrorService);
 
 // ─── 运行时全局可变状态（统一收敛到 shared，避免模块循环依赖） ───
 const activeStreamSnapshotFlushers = new Map();
@@ -912,6 +914,7 @@ module.exports = {
   getAnthropicClient,
   getSandboxPolicyService,
   getContextCompactor,
+  getModelErrorService,
   activeStreamSnapshotFlushers,
   activeStreamSessions,
   pendingPermissions,

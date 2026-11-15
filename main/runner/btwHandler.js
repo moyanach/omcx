@@ -7,6 +7,7 @@ const {
   getBtwService,
   getMentionResolver,
   getSandboxPolicyService,
+  getModelErrorService,
 } = require("../shared");
 
 const BTW_READONLY_TOOL_NAMES = new Set([
@@ -200,9 +201,14 @@ function registerBtwHandlers(ipcMain) {
             content: "",
           });
         } else {
-          console.error("[btw] 请求失败:", err?.message || err);
+          const readable = getModelErrorService().formatModelErrorText(err, {
+            provider,
+            model: apiModelId,
+            baseUrl: modelBaseUrl,
+          });
+          console.error("[btw] 请求失败:", readable, err);
           sendBtwEvent(event.sender, envelope, "error", {
-            message: err?.message || String(err),
+            message: readable,
           });
         }
       } finally {

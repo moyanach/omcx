@@ -8,6 +8,8 @@
  * - 在 system / tools / 最后一条消息上打 prompt caching 断点。
  */
 
+const { attachModelErrorContext, createHttpModelError } = require("./modelErrorService");
+
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 8192;
 
@@ -315,21 +317,44 @@ async function streamAnthropicMessage({
     reasoningEffort,
   });
 
+  const endpointUrl = buildMessagesEndpoint(baseUrl);
+  const errCtx = {
+    provider: "anthropic",
+    model,
+    baseUrl,
+    endpoint: endpointUrl,
+  };
+
   // 连接阶段超时：上游只建立连接却不返回响应头时不能无限等待
   const connectController = new AbortController();
-  const connectTimer = setTimeout(() => connectController.abort(), 60 * 1000);
+  const connectTimeoutErr = new Error("连接 Anthropic 接口超时（60 秒未收到响应头）");
+  connectTimeoutErr.name = "ModelConnectTimeoutError";
+  connectTimeoutErr.code = "MODEL_CONNECT_TIMEOUT";
+  const connectTimer = setTimeout(() => connectController.abort(connectTimeoutErr), 60 * 1000);
   const combinedSignal =
     signal && typeof AbortSignal.any === "function"
       ? AbortSignal.any([signal, connectController.signal])
       : signal || connectController.signal;
+
+  const doAnthropicFetch = async (bodyObj) => {
+    try {
+      return await fetch(endpointUrl, {
+        method: "POST",
+        headers: anthropicHeaders(apiKey),
+        signal: combinedSignal,
+        body: JSON.stringify(bodyObj),
+      });
+    } catch (fetchErr) {
+      if (connectController.signal.aborted && !signal?.aborted) {
+        throw attachModelErrorContext(connectTimeoutErr, errCtx);
+      }
+      throw attachModelErrorContext(fetchErr, errCtx);
+    }
+  };
+
   let response;
   try {
-    response = await fetch(buildMessagesEndpoint(baseUrl), {
-      method: "POST",
-      headers: anthropicHeaders(apiKey),
-      signal: combinedSignal,
-      body: JSON.stringify(payload),
-    });
+    response = await doAnthropicFetch(payload);
   } finally {
     clearTimeout(connectTimer);
   }
@@ -354,20 +379,27 @@ async function streamAnthropicMessage({
       delete retryPayload.thinking;
       delete retryPayload.output_config;
       retryPayload.temperature = Number.isFinite(Number(temperature)) ? Number(temperature) : 0.2;
-      response = await fetch(buildMessagesEndpoint(baseUrl), {
-        method: "POST",
-        headers: anthropicHeaders(apiKey),
-        signal: combinedSignal,
-        body: JSON.stringify(retryPayload),
-      });
+      response = await doAnthropicFetch(retryPayload);
     } else {
-      throw new Error(`Anthropic API 请求失败 (400): ${errProbe.slice(0, 1200)}`);
+      throw createHttpModelError({
+        status: 400,
+        statusText: response.statusText,
+        rawBody: errProbe,
+        ...errCtx,
+        prefix: "Anthropic API 请求失败",
+      });
     }
   }
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
-    throw new Error(`Anthropic API 请求失败 (${response.status}): ${errText.slice(0, 1200)}`);
+    throw createHttpModelError({
+      status: response.status,
+      statusText: response.statusText,
+      rawBody: errText,
+      ...errCtx,
+      prefix: "Anthropic API 请求失败",
+    });
   }
   if (!response.body) {
     throw new Error("Anthropic API 未返回可读取的响应流");
@@ -606,18 +638,38 @@ async function completeAnthropicMessage({
   }
   if (Number.isFinite(Number(temperature))) payload.temperature = Number(temperature);
 
-  const response = await fetch(buildMessagesEndpoint(baseUrl), {
-    method: "POST",
-    headers: {
-      ...anthropicHeaders(apiKey),
-      Accept: "application/json",
-    },
-    signal,
-    body: JSON.stringify(payload),
-  });
+  const endpointUrl = buildMessagesEndpoint(baseUrl);
+  let response;
+  try {
+    response = await fetch(endpointUrl, {
+      method: "POST",
+      headers: {
+        ...anthropicHeaders(apiKey),
+        Accept: "application/json",
+      },
+      signal,
+      body: JSON.stringify(payload),
+    });
+  } catch (fetchErr) {
+    throw attachModelErrorContext(fetchErr, {
+      provider: "anthropic",
+      model,
+      baseUrl,
+      endpoint: endpointUrl,
+    });
+  }
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
-    throw new Error(`Anthropic API 请求失败 (${response.status}): ${errText.slice(0, 800)}`);
+    throw createHttpModelError({
+      status: response.status,
+      statusText: response.statusText,
+      rawBody: errText,
+      provider: "anthropic",
+      model,
+      baseUrl,
+      endpoint: endpointUrl,
+      prefix: "Anthropic API 请求失败",
+    });
   }
   const data = await response.json();
   const text = Array.isArray(data?.content)

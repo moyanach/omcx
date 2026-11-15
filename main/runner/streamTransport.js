@@ -2,23 +2,11 @@ const {
   normalizeUsage,
   buildReasoningPayload,
   getAnthropicClient,
+  getModelErrorService,
 } = require("../shared");
 
 function isTransientSocketError(err) {
-  if (!err) return false;
-  const msg = String(err.message || "").toLowerCase();
-  const causeCode = String(err.cause?.code || "").toUpperCase();
-  const causeMsg = String(err.cause?.message || "").toLowerCase();
-  return (
-    msg.includes("terminated") ||
-    msg.includes("fetch failed") ||
-    msg.includes("socket") ||
-    msg.includes("econnreset") ||
-    causeCode === "UND_ERR_SOCKET" ||
-    causeCode === "ECONNRESET" ||
-    causeCode === "EPIPE" ||
-    causeMsg.includes("other side closed")
-  );
+  return getModelErrorService().isRetriableModelError(err);
 }
 
 function hasValidToolCalls(list) {
@@ -64,6 +52,7 @@ function createStreamTransport({
   onProviderUsage,
 }) {
   const { isAnthropicProvider, streamAnthropicMessage } = getAnthropicClient();
+  const { attachModelErrorContext, createHttpModelError } = getModelErrorService();
   const streamIdleTimeoutMs = streamIdleTimeoutSec * 1000;
 
   async function doStreamRequestOnce(requestMessages, requestBody) {
@@ -93,6 +82,14 @@ function createStreamTransport({
       return anthropicResult;
     }
 
+    const endpointUrl = `${modelBaseUrl}/chat/completions`;
+    const errCtx = {
+      provider,
+      model: apiModelId,
+      baseUrl: modelBaseUrl,
+      endpoint: endpointUrl,
+    };
+
     const reasoningSpec = buildReasoningPayload(apiModelId, provider, sessionReasoningEffort);
     let requestBodyFinal = {
       model: apiModelId,
@@ -109,12 +106,17 @@ function createStreamTransport({
         : maxOutputTokens;
     }
 
-    let resp = await fetch(`${modelBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers,
-      signal: sessionAbort.abortController.signal,
-      body: JSON.stringify(requestBodyFinal),
-    });
+    let resp;
+    try {
+      resp = await fetch(endpointUrl, {
+        method: "POST",
+        headers,
+        signal: sessionAbort.abortController.signal,
+        body: JSON.stringify(requestBodyFinal),
+      });
+    } catch (fetchErr) {
+      throw attachModelErrorContext(fetchErr, errCtx);
+    }
 
     if (!resp.ok && resp.status === 400 && Object.keys(reasoningSpec.payload).length > 0) {
       try {
@@ -137,21 +139,31 @@ function createStreamTransport({
           delete requestBodyFinal.max_completion_tokens;
           requestBodyFinal.temperature = 0.2;
 
-          resp = await fetch(`${modelBaseUrl}/chat/completions`, {
-            method: "POST",
-            headers,
-            signal: sessionAbort.abortController.signal,
-            body: JSON.stringify(requestBodyFinal),
-          });
+          try {
+            resp = await fetch(endpointUrl, {
+              method: "POST",
+              headers,
+              signal: sessionAbort.abortController.signal,
+              body: JSON.stringify(requestBodyFinal),
+            });
+          } catch (retryFetchErr) {
+            throw attachModelErrorContext(retryFetchErr, errCtx);
+          }
         }
       } catch (fallbackErr) {
+        if (fallbackErr?.modelErrorContext) throw fallbackErr;
         console.warn("[chat-stream] 自动退避重试执行失败:", fallbackErr.message);
       }
     }
 
     if (!resp.ok) {
-      const errText = await resp.text();
-      throw new Error(`API 请求失败 (${resp.status}): ${errText}`);
+      const errText = await resp.text().catch(() => "");
+      throw createHttpModelError({
+        status: resp.status,
+        statusText: resp.statusText,
+        rawBody: errText,
+        ...errCtx,
+      });
     }
 
     const reader = resp.body.getReader();

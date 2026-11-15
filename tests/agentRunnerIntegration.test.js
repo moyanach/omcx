@@ -198,3 +198,70 @@ test("agentRunner 端到端 Mock SSE：无 [DONE] 异常断流自动触发模式
     fs.rmSync(workDir, { recursive: true, force: true });
   }
 });
+
+test("agentRunner 连接拒绝 (ECONNREFUSED) 不无效重试且输出结构化中文诊断", async () => {
+  storageService.initStorage();
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-runner-connrefused-"));
+  storageService.addModel({
+    id: "mock-local-down",
+    model_id: "local-proxy-model",
+    provider: "custom",
+    base_url: "http://127.0.0.1:3425/v1",
+    api_key: "sk-local",
+  });
+
+  const sessionId = `sess_connrefused_${Date.now()}`;
+  storageService.saveSession({
+    id: sessionId,
+    title: "测试连接拒绝",
+    model: "mock-local-down",
+    work_dir: workDir,
+  });
+
+  const originalFetch = global.fetch;
+  let fetchCount = 0;
+  global.fetch = async () => {
+    fetchCount += 1;
+    const inner = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:3425"), {
+      code: "ECONNREFUSED",
+      address: "127.0.0.1",
+      port: 3425,
+    });
+    throw new TypeError("fetch failed", { cause: inner });
+  };
+
+  const emittedErrors = [];
+  try {
+    const res = await runAgentTurn(
+      {
+        sessionId,
+        runId: "run_connrefused_1",
+        messages: [{ id: "u1", role: "user", content: "你好" }],
+        model: "mock-local-down",
+        enableTools: false,
+        workDir,
+      },
+      {
+        skipTitleSidecar: true,
+        onEvent: (type, data) => {
+          if (type === "error") emittedErrors.push(data);
+        },
+      }
+    );
+
+    assert.equal(fetchCount, 1, "ECONNREFUSED 确定性连接失败不应无效重试 3 次");
+    assert.equal(res.ok, false);
+    assert.match(String(res.error || ""), /127\.0\.0\.1:3425/);
+    assert.match(String(res.error || ""), /ECONNREFUSED/);
+
+    assert.equal(emittedErrors.length, 1);
+    const parsed = JSON.parse(emittedErrors[0]);
+    assert.equal(parsed.type, "MODEL_REQUEST_ERROR");
+    assert.equal(parsed.category, "connection_refused");
+    assert.equal(parsed.target, "127.0.0.1:3425");
+    assert.equal(parsed.endpoint, "http://127.0.0.1:3425/v1/chat/completions");
+  } finally {
+    global.fetch = originalFetch;
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+});

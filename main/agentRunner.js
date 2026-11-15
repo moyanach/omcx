@@ -37,6 +37,7 @@ const {
   getMentionResolver,
   getPathResolver,
   getSandboxPolicyService,
+  getModelErrorService,
 } = require("./shared");
 
 const { generateSessionTitleSidecar } = require("./runner/titleSidecar");
@@ -159,7 +160,20 @@ async function runAgentTurn(payload = {}, options = {}) {
   let endPayload = null;
   const replyStream = (type, data) => {
     if (type === "error") {
-      fatalError = typeof data === "string" ? data : data?.message || String(data);
+      if (typeof data === "string") {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed && parsed.type === "MODEL_REQUEST_ERROR" && parsed.summary) {
+            fatalError = parsed.summary;
+          } else {
+            fatalError = data;
+          }
+        } catch {
+          fatalError = data;
+        }
+      } else {
+        fatalError = data?.message || String(data);
+      }
     } else if (type === "end") {
       endPayload = data;
     }
@@ -968,7 +982,7 @@ async function runAgentTurn(payload = {}, options = {}) {
       }
     } catch {}
   } catch (err) {
-    if (err.name === "AbortError" || sessionAbort.cancelled) {
+    if ((err.name === "AbortError" && err.code !== "MODEL_CONNECT_TIMEOUT") || sessionAbort.cancelled) {
       console.log(`[chat-stream] session ${sessionId} cancelled by user`);
       try {
         replyStream("end", {
@@ -985,12 +999,26 @@ async function runAgentTurn(payload = {}, options = {}) {
         });
       } catch {}
     } else {
-      console.error(`[chat-stream error ${sessionId}]`, err);
+      const {
+        attachModelErrorContext,
+        serializeModelErrorPayload,
+        formatModelErrorText,
+      } = getModelErrorService();
+      const errCtx = {
+        provider,
+        model: apiModelId,
+        baseUrl: modelBaseUrl,
+        toolRound,
+      };
+      attachModelErrorContext(err, errCtx);
+      const serializedError = serializeModelErrorPayload(err, errCtx);
+      const readableError = formatModelErrorText(err, errCtx);
+      console.error(`[chat-stream error ${sessionId}]`, readableError, err);
       notifyDesktopIfBackground({
         title: "OMCX 任务执行中断",
-        body: err?.message || "请求发生异常",
+        body: readableError,
       });
-      replyStream("error", err.message);
+      replyStream("error", serializedError);
     }
   } finally {
     try {

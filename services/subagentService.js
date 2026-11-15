@@ -3,26 +3,19 @@ const path = require("path");
 const os = require("os");
 const { isAnthropicProvider, streamAnthropicMessage } = require("./anthropicClient");
 const reasoningPolicy = require("./reasoningPolicy");
+const {
+  isRetriableModelError,
+  attachModelErrorContext,
+  createHttpModelError,
+  formatModelErrorText,
+} = require("./modelErrorService");
 
 function isTransientSubagentError(err) {
   if (!err) return false;
   if (err.code === "SUBAGENT_IDLE_TIMEOUT" || err.name === "SubagentIdleTimeoutError") {
     return true;
   }
-  const msg = String(err.message || "").toLowerCase();
-  const causeCode = String(err.cause?.code || "").toUpperCase();
-  const causeMsg = String(err.cause?.message || "").toLowerCase();
-  return (
-    msg.includes("terminated") ||
-    msg.includes("fetch failed") ||
-    msg.includes("socket") ||
-    msg.includes("econnreset") ||
-    msg.includes("空闲超时") ||
-    causeCode === "UND_ERR_SOCKET" ||
-    causeCode === "ECONNRESET" ||
-    causeCode === "EPIPE" ||
-    causeMsg.includes("other side closed")
-  );
+  return isRetriableModelError(err);
 }
 
 function createLinkedAbortController(parentSignal, timeoutMs) {
@@ -753,6 +746,13 @@ async function runSubagentLoop({
         return body;
       };
 
+      const subErrCtx = {
+        provider: targetModel.provider || "",
+        model: targetModel.modelName,
+        baseUrl,
+        endpoint: chatUrl,
+      };
+
       const fetchWithTimeout = async (bodyObj) => {
         const linked = createLinkedAbortController(abortSig, idleTimeoutMs);
         try {
@@ -762,6 +762,8 @@ async function runSubagentLoop({
             body: JSON.stringify(bodyObj),
             signal: linked.signal,
           });
+        } catch (fetchErr) {
+          throw attachModelErrorContext(fetchErr, subErrCtx);
         } finally {
           linked.cleanup();
         }
@@ -774,13 +776,25 @@ async function runSubagentLoop({
         if (/max_tokens|max_completion_tokens|unsupported parameter/i.test(errProbe)) {
           response = await fetchWithTimeout(buildBody(false));
         } else {
-          throw new Error(`Subagent API 请求失败 (400): ${errProbe.slice(0, 200)}`);
+          throw createHttpModelError({
+            status: 400,
+            statusText: response.statusText,
+            rawBody: errProbe,
+            ...subErrCtx,
+            prefix: "Subagent API 请求失败",
+          });
         }
       }
 
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
-        throw new Error(`Subagent API 请求失败 (${response.status}): ${errText.slice(0, 200)}`);
+        throw createHttpModelError({
+          status: response.status,
+          statusText: response.statusText,
+          rawBody: errText,
+          ...subErrCtx,
+          prefix: "Subagent API 请求失败",
+        });
       }
 
       const parsed = await readSubagentOpenAIResponse(response, idleTimeoutMs, abortSig);
@@ -810,7 +824,19 @@ async function runSubagentLoop({
           !isTransientSubagentError(err) ||
           attempt === maxAttempts
         ) {
-          throw err;
+          if (abortSig?.aborted || parentToolContext?.sessionAbort?.cancelled) {
+            throw err;
+          }
+          const subErr = new Error(
+            formatModelErrorText(err, {
+              provider: targetModel.provider || "",
+              model: targetModel.modelName,
+              baseUrl,
+              endpoint: chatUrl,
+            })
+          );
+          subErr.cause = err;
+          throw subErr;
         }
         const delayMs = attempt * 400;
         console.warn(

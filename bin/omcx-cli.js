@@ -272,7 +272,18 @@ async function main() {
         } else if (type === "tool_status" && data?.tool) {
           process.stderr.write(`[tool:${data.status || "info"}] ${data.tool}\n`);
         } else if (type === "error" && data) {
-          process.stderr.write(`[error] ${typeof data === "string" ? data : JSON.stringify(data)}\n`);
+          let errText = typeof data === "string" ? data : JSON.stringify(data);
+          if (typeof data === "string") {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed?.type === "MODEL_REQUEST_ERROR" && parsed.summary) {
+                errText = parsed.reason && parsed.reason !== parsed.summary
+                  ? `${parsed.summary} (${parsed.reason})`
+                  : parsed.summary;
+              }
+            } catch {}
+          }
+          process.stderr.write(`[error] ${errText}\n`);
         }
       },
     }
