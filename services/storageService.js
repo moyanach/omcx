@@ -838,6 +838,39 @@ function deleteWorkspace(id) {
   return { success: true };
 }
 
+/**
+ * 按指定 ID 顺序重排工作空间并持久化；未包含在 orderedIds 中的项保持原相对顺序追加在末尾。
+ * @param {string[]} orderedIds
+ */
+function reorderWorkspaces(orderedIds) {
+  const list = getWorkspaces();
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0 || list.length <= 1) {
+    return { success: true, workspaces: list };
+  }
+
+  const byId = new Map(list.map((w) => [w.id, w]));
+  const seen = new Set();
+  const reordered = [];
+
+  for (const id of orderedIds) {
+    if (typeof id !== "string" || seen.has(id)) continue;
+    const item = byId.get(id);
+    if (item) {
+      reordered.push(item);
+      seen.add(id);
+    }
+  }
+
+  for (const item of list) {
+    if (!seen.has(item.id)) {
+      reordered.push(item);
+    }
+  }
+
+  setConfig("workspaces", reordered);
+  return { success: true, workspaces: reordered };
+}
+
 // ─────────────────────────────────────────────────────────────
 // 会话与消息管理 (Sessions & Messages) —— Write-Behind 架构
 // ─────────────────────────────────────────────────────────────
@@ -1544,6 +1577,7 @@ module.exports = {
   getWorkspaces,
   saveWorkspace,
   deleteWorkspace,
+  reorderWorkspaces,
   getSessions,
   getSession,
   saveSession,

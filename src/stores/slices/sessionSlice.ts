@@ -59,6 +59,7 @@ export interface SessionSlice {
   fetchWorkspaces: () => Promise<void>;
   saveWorkspace: (ws: WorkspaceItem) => Promise<void>;
   deleteWorkspace: (id: string) => Promise<void>;
+  reorderWorkspaces: (orderedIds: string[]) => Promise<void>;
   openWorkspaceModal: (ws?: WorkspaceItem | null) => void;
   closeWorkspaceModal: () => void;
   setActiveWorkspace: (workspaceId: string | null) => Promise<void>;
@@ -136,6 +137,42 @@ export const createSessionSlice: StateCreator<
         await get().fetchWorkspaces();
       } catch (err) {
         console.error("删除工作空间失败:", err);
+      }
+    }
+  },
+
+  reorderWorkspaces: async (orderedIds) => {
+    const current = get().workspaces;
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0 || current.length <= 1) {
+      return;
+    }
+
+    const byId = new Map(current.map((w) => [w.id, w]));
+    const seen = new Set<string>();
+    const reordered: WorkspaceItem[] = [];
+
+    for (const id of orderedIds) {
+      if (seen.has(id)) continue;
+      const item = byId.get(id);
+      if (item) {
+        reordered.push(item);
+        seen.add(id);
+      }
+    }
+    for (const item of current) {
+      if (!seen.has(item.id)) {
+        reordered.push(item);
+      }
+    }
+
+    set({ workspaces: reordered });
+
+    if (window.electronAPI?.reorderWorkspaces) {
+      try {
+        await window.electronAPI.reorderWorkspaces(orderedIds);
+      } catch (err) {
+        console.error("重排工作空间顺序失败:", err);
+        await get().fetchWorkspaces();
       }
     }
   },

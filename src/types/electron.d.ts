@@ -146,6 +146,7 @@ export interface ElectronAPI {
   getWorkspaces: () => Promise<any[]>;
   saveWorkspace: (ws: any) => Promise<any>;
   deleteWorkspace: (id: string) => Promise<any>;
+  reorderWorkspaces: (orderedIds: string[]) => Promise<any>;
 
   // ─── 工具调用 ──────────────────────────────────────
   getTools: () => Promise<any[]>;

@@ -317,6 +317,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getWorkspaces: () => ipcRenderer.invoke("get-workspaces"),
   saveWorkspace: (ws) => ipcRenderer.invoke("save-workspace", ws),
   deleteWorkspace: (id) => ipcRenderer.invoke("delete-workspace", id),
+  reorderWorkspaces: (orderedIds) => ipcRenderer.invoke("reorder-workspaces", orderedIds),
 
   // ─── 工具调用 ──────────────────────────────────────
   getTools: () => ipcRenderer.invoke("get-tools"),

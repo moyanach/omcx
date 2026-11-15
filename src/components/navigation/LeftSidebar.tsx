@@ -33,6 +33,7 @@ interface ProjectGroup {
 }
 
 const byUpdated = (a: Session, b: Session) => (b.updatedAt || 0) - (a.updatedAt || 0);
+const WORKSPACE_DRAG_MIME = "application/x-omcx-workspace-id";
 
 const LeftSidebar: React.FC = () => {
   const {
@@ -43,6 +44,7 @@ const LeftSidebar: React.FC = () => {
     workspaces,
     setActiveSession,
     updateSessionTitle,
+    reorderWorkspaces,
   } = useChatStore(
     useShallow((s) => ({
       sessions: s.sessions,
@@ -52,6 +54,7 @@ const LeftSidebar: React.FC = () => {
       workspaces: s.workspaces,
       setActiveSession: s.setActiveSession,
       updateSessionTitle: s.updateSessionTitle,
+      reorderWorkspaces: s.reorderWorkspaces,
     }))
   );
   const { requestDeleteSession, deleteSessionModal } = useDeleteSessionWithWorktree();
@@ -109,6 +112,11 @@ const LeftSidebar: React.FC = () => {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [username, setUsername] = useState("本地用户");
+  const [draggingWorkspaceId, setDraggingWorkspaceId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{
+    workspaceId: string;
+    position: "before" | "after";
+  } | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -214,6 +222,28 @@ const LeftSidebar: React.FC = () => {
       unassigned: unassignedSessions,
     };
   }, [workspaces, visibleSessions, normalizedQuery]);
+
+  const canReorderWorkspaces =
+    normalizedQuery === "" && editingSessionId === null && workspaceGroups.length > 1;
+
+  const resetWorkspaceDrag = () => {
+    setDraggingWorkspaceId(null);
+    setDropTarget(null);
+  };
+
+  const commitWorkspaceDrop = (
+    sourceId: string,
+    targetId: string,
+    position: "before" | "after"
+  ) => {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    const ids = workspaces.map((w) => w.id).filter((id) => id !== sourceId);
+    const targetIdx = ids.indexOf(targetId);
+    if (targetIdx === -1) return;
+    const insertIdx = position === "after" ? targetIdx + 1 : targetIdx;
+    ids.splice(insertIdx, 0, sourceId);
+    void reorderWorkspaces(ids);
+  };
 
   const toggleGroup = (key: string) => {
     setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -350,12 +380,79 @@ const LeftSidebar: React.FC = () => {
   const renderGroup = (group: ProjectGroup) => {
     const isExpanded = !collapsed[group.key];
     const isCurrentActive = Boolean(group.workspaceId && group.workspaceId === activeWorkspaceId);
+    const workspaceId = group.workspaceId;
+    const isDraggable = Boolean(workspaceId && canReorderWorkspaces);
+    const isDragging = Boolean(workspaceId && draggingWorkspaceId === workspaceId);
+    const isDropBefore = Boolean(
+      workspaceId && dropTarget?.workspaceId === workspaceId && dropTarget.position === "before"
+    );
+    const isDropAfter = Boolean(
+      workspaceId && dropTarget?.workspaceId === workspaceId && dropTarget.position === "after"
+    );
 
     return (
-      <div key={group.key} className="mb-0.5">
+      <div
+        key={group.key}
+        draggable={isDraggable}
+        onDragStart={(e) => {
+          if (!isDraggable || !workspaceId) return;
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData(WORKSPACE_DRAG_MIME, workspaceId);
+          e.dataTransfer.setData("text/plain", workspaceId);
+          setDraggingWorkspaceId(workspaceId);
+        }}
+        onDragOver={(e) => {
+          if (
+            !isDraggable ||
+            !workspaceId ||
+            !draggingWorkspaceId ||
+            draggingWorkspaceId === workspaceId ||
+            !e.dataTransfer.types.includes(WORKSPACE_DRAG_MIME)
+          ) {
+            return;
+          }
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          const rect = e.currentTarget.getBoundingClientRect();
+          const position: "before" | "after" =
+            e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+          setDropTarget((prev) =>
+            prev?.workspaceId === workspaceId && prev.position === position
+              ? prev
+              : { workspaceId, position }
+          );
+        }}
+        onDragLeave={(e) => {
+          if (
+            !workspaceId ||
+            e.currentTarget.contains(e.relatedTarget as Node | null)
+          ) {
+            return;
+          }
+          setDropTarget((prev) => (prev?.workspaceId === workspaceId ? null : prev));
+        }}
+        onDrop={(e) => {
+          if (!isDraggable || !workspaceId) return;
+          if (!e.dataTransfer.types.includes(WORKSPACE_DRAG_MIME)) return;
+          e.preventDefault();
+          const sourceId = e.dataTransfer.getData(WORKSPACE_DRAG_MIME) || draggingWorkspaceId || "";
+          const rect = e.currentTarget.getBoundingClientRect();
+          const position: "before" | "after" =
+            e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+          commitWorkspaceDrop(sourceId, workspaceId, position);
+          resetWorkspaceDrag();
+        }}
+        onDragEnd={resetWorkspaceDrag}
+        className={`relative mb-0.5 transition-opacity ${isDragging ? "opacity-45" : ""}`}
+      >
+        {isDropBefore && (
+          <div className="pointer-events-none absolute -top-0.5 left-2 right-2 h-0.5 rounded-full bg-blue-400 z-10" />
+        )}
         <div
           onClick={() => toggleGroup(group.key)}
-          className={`group/ws mx-1.5 flex items-center gap-1.5 pl-1.5 pr-1 py-1.5 rounded-lg cursor-pointer transition-colors ${
+          className={`group/ws mx-1.5 flex items-center gap-1.5 pl-1.5 pr-1 py-1.5 rounded-lg transition-colors ${
+            isDraggable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"
+          } ${
             isCurrentActive
               ? "text-[var(--ui-text-primary)] bg-[var(--ui-accent-blue-soft)]/40 font-medium"
               : "text-[var(--ui-text-secondary)] hover:bg-[var(--ui-chip-bg)]"
@@ -388,6 +485,9 @@ const LeftSidebar: React.FC = () => {
         {isExpanded && group.sessions.map(renderSession)}
         {isExpanded && group.sessions.length === 0 && (
           <div className="pl-9 pr-3 py-1 text-[10px] text-[var(--ui-text-faint)]">暂无会话</div>
+        )}
+        {isDropAfter && (
+          <div className="pointer-events-none absolute -bottom-0.5 left-2 right-2 h-0.5 rounded-full bg-blue-400 z-10" />
         )}
       </div>
     );

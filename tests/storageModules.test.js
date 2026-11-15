@@ -103,3 +103,43 @@ test("skillsMemoryStorage 扫描 Frontmatter 技能与启停/记忆读取", () =
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("storageService.reorderWorkspaces 按顺序重排并保留未列出工作空间", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-ws-reorder-"));
+  const prevHome = process.env.OMCX_HOME;
+  const prevMemOnly = process.env.OMCX_STORAGE_MEMORY_ONLY;
+  const storagePath = require.resolve("../services/storageService");
+  delete require.cache[storagePath];
+  process.env.OMCX_HOME = tmpDir;
+  process.env.OMCX_STORAGE_MEMORY_ONLY = "1";
+
+  try {
+    const storage = require("../services/storageService");
+    const defaultIds = storage.getWorkspaces().map((w) => w.id);
+    storage.saveWorkspace({ id: "ws-1", name: "Alpha", folders: [] });
+    storage.saveWorkspace({ id: "ws-2", name: "Beta", folders: [] });
+    storage.saveWorkspace({ id: "ws-3", name: "Gamma", folders: [] });
+
+    // 部分 ID + 重复 ID + 不存在 ID 应正常处理，且未列出的工作空间保持相对顺序追加在末尾
+    const res = storage.reorderWorkspaces(["ws-3", "ws-2", "ws-3", "missing-id"]);
+    assert.equal(res.success, true);
+    assert.deepEqual(
+      storage.getWorkspaces().map((w) => w.id),
+      ["ws-3", "ws-2", "ws-1", ...defaultIds]
+    );
+
+    // 完整重排
+    storage.reorderWorkspaces(["ws-1", "ws-3", "ws-2", ...defaultIds]);
+    assert.deepEqual(
+      storage.getWorkspaces().map((w) => w.id),
+      ["ws-1", "ws-3", "ws-2", ...defaultIds]
+    );
+  } finally {
+    delete require.cache[storagePath];
+    if (prevHome === undefined) delete process.env.OMCX_HOME;
+    else process.env.OMCX_HOME = prevHome;
+    if (prevMemOnly === undefined) delete process.env.OMCX_STORAGE_MEMORY_ONLY;
+    else process.env.OMCX_STORAGE_MEMORY_ONLY = prevMemOnly;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

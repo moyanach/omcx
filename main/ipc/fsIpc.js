@@ -45,6 +45,10 @@ function registerFsIpc() {
     "delete-workspace",
     safeHandler((event, id) => getStorageService().deleteWorkspace(id))
   );
+  ipcMain.handle(
+    "reorder-workspaces",
+    safeHandler((event, orderedIds) => getStorageService().reorderWorkspaces(orderedIds))
+  );
 
   ipcMain.handle(
     "dialog-select-work-directory",
