@@ -32,3 +32,5 @@ AGENTS.md
 .workbuddy/
 .omcx/
 .omcx_local/
+release.sh
+
