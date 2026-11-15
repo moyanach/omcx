@@ -427,6 +427,8 @@ function registerMcpSkillsIpc() {
           permissionMode: sessionPermissionMode,
           customSystemPrompt,
           gitInfo,
+          includeTodosInSystem: false,
+          includeGitInSystem: false,
         });
 
         const skillsTokens =

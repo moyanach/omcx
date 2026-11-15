@@ -444,16 +444,18 @@ export const MessageList: React.FC<Props> = ({
             </>
           );
         })()}
+      </div>
 
-        {/* 会话最下方：实时任务执行状态条 */}
-        {isGenerating && (
+      {/* 会话最下方固定区（置于滚动容器外，避免重复叠加 backdrop-filter 导致 Chromium 泛白及消息透字） */}
+      {isGenerating && (
+        <div className='pl-8 pr-7 pt-1 pb-1.5 flex-shrink-0'>
           <AgentLiveStatusBar
             activeToolCalls={activeToolCalls}
             activeTodos={activeTodos}
             hasStreamingText={hasStreamingText}
           />
-        )}
-      </div>
+        </div>
+      )}
 
       {/* 2.5 选中文本后的自定义右键菜单（旁路会话 / 复制） */}
       {selectionMenu && (
@@ -472,7 +474,7 @@ export const MessageList: React.FC<Props> = ({
         <button
           type='button'
           onClick={handleScrollToBottom}
-          className='absolute right-6 bottom-5 z-20 px-3 py-1.5 rounded-full bg-[var(--ui-card-bg)] hover:bg-[var(--ui-card-hover-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-subtle)] shadow-sm flex items-center gap-1.5 text-xs font-medium cursor-pointer transition-all active:scale-95 animate-in fade-in zoom-in-95 duration-150 select-none'
+          className={`absolute right-6 ${isGenerating ? 'bottom-14' : 'bottom-5'} z-20 px-3 py-1.5 rounded-full bg-[var(--ui-card-bg)] hover:bg-[var(--ui-card-hover-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-subtle)] shadow-sm flex items-center gap-1.5 text-xs font-medium cursor-pointer transition-all active:scale-95 animate-in fade-in zoom-in-95 duration-150 select-none`}
           title='回到底部'
         >
           <ArrowDown size={13} className='text-[var(--ui-accent-blue,#3b82f6)]' />

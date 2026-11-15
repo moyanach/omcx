@@ -61,6 +61,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
       name: cleanId,
       contextLimit: defaultCtx,
       supportsVision: inferVisionSupport(cleanId),
+      isLite: false,
       isManual: !fetchedRemoteModels.length,
     };
     setModelRows((prev) => [...prev, newRow]);
@@ -94,6 +95,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
         name: idVal,
         contextLimit: defaultCtx,
         supportsVision: inferVisionSupport(idVal),
+        isLite: false,
         isManual: false,
       });
     });
@@ -135,6 +137,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
         name: model.name || "",
         contextLimit: model.context_limit || model.contextLimit || 128000,
         supportsVision: !!model.supports_vision,
+        isLite: !!(model.is_lite ?? model.isLite),
         isManual: true,
         maxOutputTokens: model.max_output_tokens || 8192,
         inputPrice: model.input_price || 0,
@@ -264,6 +267,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
         apiKey: newModelApiKey.trim(),
         context_limit: row.contextLimit,
         supports_vision: row.supportsVision,
+        is_lite: row.isLite,
         max_output_tokens: row.maxOutputTokens || 8192,
         input_price: row.inputPrice || 0,
         output_price: row.outputPrice || 0,
@@ -293,6 +297,23 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
       await loadModels();
       await useChatStore.getState().fetchModels();
     }
+  };
+
+  // 列表内快捷切换 Lite 轻量模型标记
+  const handleToggleModelLite = async (model: any) => {
+    if (!window.electronAPI?.dbAddModel) return;
+    const nextLite = !(model.is_lite ?? model.isLite);
+    await window.electronAPI.dbAddModel({
+      ...model,
+      is_lite: nextLite,
+    });
+    showToast(
+      nextLite
+        ? `已将「${model.name || model.model_id}」设为轻量模型 (Lite)`
+        : `已取消「${model.name || model.model_id}」的轻量模型标记`
+    );
+    await loadModels();
+    await useChatStore.getState().fetchModels();
   };
 
   useEffect(() => {
@@ -555,8 +576,8 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
                               </div>
                             </div>
 
-                            {/* 第 2 行：6. 最大上下文大小 + 7. 视觉支持开关 */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                            {/* 第 2 行：6. 最大上下文大小 + 7. 视觉支持 + 8. 轻量模型 (Lite) */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
                               <div className="space-y-1">
                                 <label className="text-xs font-medium text-neutral-300">
                                   6. 最大上下文大小 (Context Limit)
@@ -592,13 +613,32 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
                                   </div>
                                 </label>
                               </div>
+
+                              <div className="flex items-end">
+                                <label className="w-full flex items-center gap-2.5 p-2 rounded-xl bg-[#141414] border border-[#2e2e2e] cursor-pointer select-none">
+                                  <input
+                                    type="checkbox"
+                                    checked={row.isLite}
+                                    onChange={(e) => updateRow(row.rowId, { isLite: e.target.checked })}
+                                    className="accent-sky-500 cursor-pointer"
+                                  />
+                                  <div className="flex flex-col">
+                                    <span className="text-xs font-medium text-neutral-200">
+                                      8. 设为轻量模型 (Lite)
+                                    </span>
+                                    <span className="text-[10px] text-neutral-500">
+                                      供 @explore 子代理与标题提炼优先选用
+                                    </span>
+                                  </div>
+                                </label>
+                              </div>
                             </div>
 
                             {/* 第 3 行：最大输出 Token 与成本计量 (原生 Anthropic 与成本看板使用) */}
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
                               <div className="space-y-1">
                                 <label className="text-xs font-medium text-neutral-300">
-                                  8. 单次最大输出 Tokens
+                                  9. 单次最大输出 Tokens
                                 </label>
                                 <input
                                   type="number"
@@ -615,7 +655,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
                               </div>
                               <div className="space-y-1">
                                 <label className="text-xs font-medium text-neutral-300">
-                                  9. 输入价格 ($/1M tokens)
+                                  10. 输入价格 ($/1M tokens)
                                 </label>
                                 <input
                                   type="number"
@@ -632,7 +672,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
                               </div>
                               <div className="space-y-1">
                                 <label className="text-xs font-medium text-neutral-300">
-                                  10. 输出价格 ($/1M tokens)
+                                  11. 输出价格 ($/1M tokens)
                                 </label>
                                 <input
                                   type="number"
@@ -726,6 +766,22 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
                                 视觉
                               </span>
                             )}
+                            <button
+                              type="button"
+                              onClick={() => handleToggleModelLite(m)}
+                              title={
+                                m.is_lite || m.isLite
+                                  ? "点击取消轻量模型 (Lite) 标记"
+                                  : "点击设为轻量模型 (Lite)，供 @explore 等子代理优先选用"
+                              }
+                              className={`px-1.5 py-0.2 rounded text-[10px] border font-mono transition-colors cursor-pointer ${
+                                m.is_lite || m.isLite
+                                  ? "bg-sky-500/15 text-sky-300 border-sky-500/35 hover:bg-sky-500/25"
+                                  : "bg-[#222222] text-neutral-500 border-[#333333] hover:text-neutral-300 hover:border-[#444444]"
+                              }`}
+                            >
+                              {m.is_lite || m.isLite ? "Lite ✓" : "设为 Lite"}
+                            </button>
                           </div>
                           <div className="flex items-center gap-3 text-[11px] font-mono text-neutral-500 truncate">
                             <span>ID: {m.model_id}</span>

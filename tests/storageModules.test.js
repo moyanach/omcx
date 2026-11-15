@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { createMcpStorage, writeFileAtomicSync } = require("../services/storage/mcpStorage");
 const { createSkillsMemoryStorage } = require("../services/storage/skillsMemoryStorage");
+const { createAttachmentStorage } = require("../services/storage/attachmentStorage");
 
 test("mcpStorage 原子写入、项目级 MCP 信任隔离与保存", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-mcp-test-"));
@@ -140,6 +141,39 @@ test("storageService.reorderWorkspaces 按顺序重排并保留未列出工作�
     else process.env.OMCX_HOME = prevHome;
     if (prevMemOnly === undefined) delete process.env.OMCX_STORAGE_MEMORY_ONLY;
     else process.env.OMCX_STORAGE_MEMORY_ONLY = prevMemOnly;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("attachmentStorage 路径穿越防御、附件写入与整会话清理", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-attach-test-"));
+  const sessionsDir = path.join(tmpDir, "sessions");
+  const storage = createAttachmentStorage({
+    getPaths: () => ({ SESSIONS_DIR: sessionsDir }),
+    ensureDir: (d) => fs.mkdirSync(d, { recursive: true }),
+  });
+
+  try {
+    assert.throws(() => storage.getSessionAttachmentsDir("../escape"), /非法会话 ID/);
+    assert.throws(() => storage.saveAttachmentBuffer("sess-1", "../bad", "png", Buffer.from("x")), /非法附件标识/);
+
+    const saved = storage.saveAttachmentBuffer("sess-1", "att_1", ".PNG!@#", Buffer.from("hello"));
+    assert.equal(saved.id, "att_1");
+    assert.equal(path.basename(saved.path), "att_1.PNG");
+    assert.equal(storage.isSessionAttachmentPath(saved.path), true);
+    assert.equal(storage.isSessionAttachmentPath(path.join(tmpDir, "other.png")), false);
+
+    const delBad = storage.deleteAttachmentFile(path.join(tmpDir, "other.png"));
+    assert.equal(delBad.success, false);
+
+    const delOk = storage.deleteAttachmentFile(saved.path);
+    assert.equal(delOk.success, true);
+    assert.equal(fs.existsSync(saved.path), false);
+
+    storage.saveAttachmentBuffer("sess-1", "att_2", "txt", Buffer.from("world"));
+    storage.deleteSessionAttachments("sess-1");
+    assert.equal(fs.existsSync(path.join(sessionsDir, "sess-1")), false);
+  } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

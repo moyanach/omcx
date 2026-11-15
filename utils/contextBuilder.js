@@ -445,6 +445,45 @@ function buildWorktreeSection(workDir) {
   ].join("\n");
 }
 
+function buildGitReminder(gitInfo) {
+  const section = buildGitSection(gitInfo);
+  if (!section) return "";
+  return `<system-reminder>\n${section}\n</system-reminder>`;
+}
+
+function buildTodoReminder(todos) {
+  const section = buildTodoSection(todos);
+  if (!section) return "";
+  return `<system-reminder>\n${section}\n</system-reminder>`;
+}
+
+function appendReminderToLastUserMessage(messages, reminderText) {
+  if (!Array.isArray(messages) || !reminderText || !String(reminderText).trim()) return false;
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx < 0) return false;
+  const target = messages[lastUserIdx];
+  const block = String(reminderText).trim();
+  if (Array.isArray(target.content)) {
+    messages[lastUserIdx] = {
+      ...target,
+      content: [...target.content, { type: "text", text: `\n\n${block}` }],
+    };
+  } else {
+    const base = typeof target.content === "string" ? target.content : String(target.content || "");
+    messages[lastUserIdx] = {
+      ...target,
+      content: base ? `${base}\n\n${block}` : block,
+    };
+  }
+  return true;
+}
+
 function buildSystemContext({
   workDir = null,
   matchedWorkspace = null,
@@ -462,6 +501,8 @@ function buildSystemContext({
   permissionMode = "auto-sandbox",
   customSystemPrompt = "",
   gitInfo: providedGitInfo = undefined,
+  includeTodosInSystem = false,
+  includeGitInSystem = false,
 } = {}) {
   const gitInfo = providedGitInfo !== undefined ? providedGitInfo : getGitSnapshot(workDir);
   const sections = [];
@@ -480,7 +521,9 @@ function buildSystemContext({
   push("repo_wiki", buildRepoWikiSection(repoWiki, repoWikiPath));
   push("skills", buildSkillsSection(skills));
   push("memory", buildMemorySection(memories, memoryIndex));
-  push("todos", buildTodoSection(todos));
+  if (includeTodosInSystem) {
+    push("todos", buildTodoSection(todos));
+  }
   if (enableTools) {
     push("tools", buildToolSection(toolDocs));
     push("subagents", buildSubagentSection(workDir));
@@ -488,7 +531,9 @@ function buildSystemContext({
   push("workspace", buildWorkspaceSection(matchedWorkspace, workDir));
   push("worktree", buildWorktreeSection(workDir));
   push("environment", buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode }));
-  push("git", buildGitSection(gitInfo));
+  if (includeGitInSystem) {
+    push("git", buildGitSection(gitInfo));
+  }
 
   return {
     text: sections.map((section) => section.content).join("\n\n"),
@@ -498,6 +543,11 @@ function buildSystemContext({
 
 module.exports = {
   buildSystemContext,
+  buildGitSection,
+  buildTodoSection,
+  buildGitReminder,
+  buildTodoReminder,
+  appendReminderToLastUserMessage,
   getGitSnapshot,
   getGitSnapshotAsync,
   truncate,

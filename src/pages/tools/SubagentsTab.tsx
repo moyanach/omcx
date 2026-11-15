@@ -75,7 +75,15 @@ export const SubagentsTab: React.FC<SubagentsTabProps> = ({
 
           <div className='space-y-2 pt-2.5 border-t border-[color:var(--ui-divider-hairline)]'>
             <div className='flex items-center justify-between text-[10.5px] font-mono text-[var(--ui-text-muted)]'>
-              <span>模型策略: {ag.modelTier === 'lite' ? 'Lite (高速轻量优先)' : 'Inherit (继承主模型)'}</span>
+              <span
+                title={
+                  ag.modelTier === 'lite'
+                    ? '优先选用在「设置 → 模型管理」中显式标记为 Lite 且已配置可用的模型；未配置时自动继承主模型'
+                    : '直接继承当前对话所选的主模型'
+                }
+              >
+                模型策略: {ag.modelTier === 'lite' ? 'Lite (优先显式 Lite，未配置继承主模型)' : 'Inherit (继承主模型)'}
+              </span>
               <span>最大轮次: {ag.maxRounds || 10} 轮</span>
             </div>
             <div className='flex items-center gap-1.5 flex-wrap'>

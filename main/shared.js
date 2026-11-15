@@ -709,16 +709,12 @@ function computeUsageCost(usage, pricing = {}) {
   return Math.round(cost * 100_000_000) / 100_000_000;
 }
 
-const LITE_MODEL_HINTS = ["mini", "flash", "haiku", "v3", "turbo", "small", "7b", "8b", "3b"];
-
 function pickLiteModel(currentModelId) {
-  const allModels = getStorageService().getModels();
-  const usable = allModels.filter((m) => m.api_key || m.provider === "ollama");
-  const found = usable.find((m) => {
-    const id = (m.model_id || m.id || "").toLowerCase();
-    return LITE_MODEL_HINTS.some((hint) => id.includes(hint));
-  });
-  return found?.id || currentModelId;
+  const storageService = getStorageService();
+  const allModels = storageService.getModels();
+  const current = allModels.find((m) => m.id === currentModelId || m.model_id === currentModelId);
+  const picked = storageService.selectExplicitLiteModel(allModels, current || {});
+  return picked?.id || currentModelId;
 }
 
 function buildReasoningPayload(apiModelId, provider, reasoningEffort) {

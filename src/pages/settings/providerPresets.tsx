@@ -87,6 +87,7 @@ export interface ModelDraftRow {
   name: string;
   contextLimit: number;
   supportsVision: boolean;
+  isLite: boolean;
   isManual: boolean;
   maxOutputTokens?: number;
   inputPrice?: number;
@@ -210,6 +211,7 @@ export const createEmptyRow = (defaultContext = 128000): ModelDraftRow => ({
   name: "",
   contextLimit: defaultContext,
   supportsVision: false,
+  isLite: false,
   isManual: false,
   maxOutputTokens: 8192,
   inputPrice: 0,

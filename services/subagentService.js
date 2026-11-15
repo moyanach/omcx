@@ -1,32 +1,49 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { isAnthropicProvider, streamAnthropicMessage } = require("./anthropicClient");
+const reasoningPolicy = require("./reasoningPolicy");
 
 const READ_ONLY_TOOL_LIST = [
   "read_file",
   "list_directory",
   "search_code",
+  "repo_map",
+  "search_symbols",
+  "find_references",
   "web_search",
   "web_fetch",
 ];
 
+const PLANNER_TOOL_LIST = [...READ_ONLY_TOOL_LIST, "spec_write"];
+
 const FULL_CODING_TOOL_LIST = [
-  "read_file",
+  ...READ_ONLY_TOOL_LIST,
   "write_file",
   "edit_file",
-  "list_directory",
-  "search_code",
   "run_command",
-  "web_search",
-  "web_fetch",
+  "run_skill_script",
 ];
+
+const PARALLEL_READ_ONLY_TOOLS = new Set([
+  ...READ_ONLY_TOOL_LIST,
+  "browser_logs",
+]);
+
+const WRITE_CAPABLE_TOOL_SET = new Set([
+  "write_file",
+  "edit_file",
+  "run_command",
+  "run_skill_script",
+  "browser_interact",
+]);
 
 const BUILTIN_SUBAGENTS = [
   {
     id: "explore",
     name: "Explore (代码探索专家)",
     description:
-      "高速只读代码库检索与调研子代理。擅长跨目录定位实现逻辑、梳理调用链、查找配置与外部文档，将海量中间文件内容隔离在子上下文之外。",
+      "高速只读代码库检索与调研子代理。优先使用 repo_map、search_symbols、find_references 定位符号定义与调用图，再按需精准读取源码，将海量中间输出隔离在子上下文之外。",
     tools: READ_ONLY_TOOL_LIST,
     readOnly: true,
     modelTier: "lite",
@@ -36,51 +53,58 @@ const BUILTIN_SUBAGENTS = [
 你的任务是针对主代理委派的调研问题，快速、精准地检索代码库并返回高密度的结构化证据报告。
 
 # 核心准则
-1. **只读边界**: 你只能使用检索和读取工具（search_code / list_directory / read_file / web_search / web_fetch），绝对不要尝试修改文件。
-2. **并发检索**: 尽可能在同一轮中并发发起多个 search_code 或 read_file 调用以提升速度。
-3. **证据导向**: 回复必须包含精确的 \`文件路径:行号\`、核心函数/类签名以及关键代码逻辑摘要，不要输出空泛套话。`,
+1. **只读边界**: 你只能使用只读检索与读取工具（repo_map / search_symbols / find_references / search_code / list_directory / read_file / web_search / web_fetch），绝对不要尝试修改文件。
+2. **符号优先与并发检索**: 面对未知模块先调用 \`repo_map\` 或 \`search_symbols\` 建立定位，涉及影响面用 \`find_references\` 追踪调用点，再用 \`read_file\` 分段读取关键段落；尽可能在同一轮中并发发起多个只读调用。
+3. **证据导向**: 回复必须包含精确的 \`文件路径:行号\`、核心函数/类签名、调用链与关键代码逻辑摘要，不要输出空泛套话或臆造未读取的内容。`,
   },
   {
     id: "planner",
     name: "Planner (架构规划专家)",
     description:
-      "只读架构分析与实施方案设计子代理。用于在复杂功能改动前深入阅读相关模块，识别边界条件与破坏性风险，输出分步改造蓝图。",
-    tools: READ_ONLY_TOOL_LIST,
+      "只读架构分析与实施方案设计子代理。结合符号地图与调用引用梳理上下游影响面，识别边界条件与破坏性风险，必要时可用 spec_write 将结构化规格落盘至 .omcx/specs/。",
+    tools: PLANNER_TOOL_LIST,
     readOnly: true,
     modelTier: "inherit",
     maxRounds: 10,
     scope: "builtin",
     systemPrompt: `你是 OMCX 的 Planner (架构分析与方案设计) 子代理。
-你的职责是在不修改任何代码的前提下，深入调查现有工程结构，为主代理制定严密、可直接落地的技术实施计划。
+你的职责是在不修改任何源码的前提下，深入调查现有工程结构与依赖调用链，为主代理制定严密、可直接落地的技术实施计划。
 
-# 输出结构要求
-1. **现状与根因分析**: 结合精确的 \`文件路径:行号\` 说明现有架构与关键数据流。
-2. **涉及文件清单**: 明确列出需要新增、修改或删除的文件及各自职责。
-3. **分步实施步骤**: 给出清晰的接口定义、函数签名与改动逻辑。
-4. **潜在风险与验证方案**: 指出可能受影响的上下游模块及验证命令。`,
+# 调研方式与输出要求
+1. **符号与影响面排查**: 先通过 \`repo_map\`、\`search_symbols\` 与 \`find_references\` 摸清模块边界与上下游调用方，再 \`read_file\` 核对真实实现。
+2. **规格落盘边界**: 除主代理明确要求输出到 \`.omcx/specs/\` 时才调用 \`spec_write\`，否则只返回文本规划，禁止修改任何项目源码。
+3. **输出结构**:
+   - **现状与根因分析**: 结合精确的 \`文件路径:行号\` 说明现有架构与关键数据流；
+   - **涉及文件清单**: 明确列出需要新增、修改或删除的文件及各自职责；
+   - **分步实施步骤**: 给出清晰的接口定义、函数签名、兼容性约束与改动逻辑；
+   - **潜在风险与验证方案**: 指出可能受影响的上下游模块及验证命令。`,
   },
   {
     id: "reviewer",
     name: "Reviewer (代码审查与安全专家)",
     description:
-      "专注于代码质量、潜在 Bug、并发竞态、未处理异常及安全漏洞的只读审查子代理。",
+      "以 P0/P1/P2 工业级标准开展只读代码审查与安全审计。结合调用引用分析排查功能缺陷、并发竞态、跨平台/Headless 边界破坏与安全漏洞。",
     tools: READ_ONLY_TOOL_LIST,
     readOnly: true,
     modelTier: "inherit",
     maxRounds: 8,
     scope: "builtin",
     systemPrompt: `你是 OMCX 的 Reviewer (代码审查与质量把关) 子代理。
-请以严苛的工业级标准审查目标代码或近期改动，重点排查：
-1. 逻辑漏洞、空指针/未定义边界、异步竞态与内存泄漏；
+请以严苛的工业级标准只读审查目标代码或近期改动，重点排查：
+1. 逻辑漏洞、空指针/未定义边界、异步竞态、资源/监听器泄漏与异常静默吞没；
 2. 安全隐患（命令注入、路径穿越、敏感信息泄露、越权访问）；
-3. 与现有工程规范不一致或破坏公共接口的改动。
-请按「高危 / 中危 / 建议」分级输出具体位置（\`文件路径:行号\`）与修复建议。`,
+3. 公共接口与上下游调用破坏（主动用 \`find_references\` 核对调用方，结合 \`read_file\` 验证契约一致性）。
+
+# 输出标准（与 /review 命令保持一致）
+- 仅报告真实存在、可复现的问题，不报纯风格问题、不臆测未读到的代码；
+- 严格按 **P0（致命/安全/数据丢失） / P1（高：功能错误/卡死/越权） / P2（中：性能/健壮性）** 分级；
+- 每条给出 \`文件路径:行号\`、问题机制、触发条件、实际影响与最小修复建议，并在末尾给出简短结论（可合并 / 修复后合并 / 阻断）。`,
   },
   {
     id: "general",
     name: "General (独立模块开发专家)",
     description:
-      "具备完整读写与命令执行权限的通用工程子代理。适用于边界清晰、模块解耦的子任务（如编写独立组件、补齐单元测试、修复局部模块）。",
+      "具备完整读写、命令与技能脚本执行权限的通用工程子代理。适用于边界清晰、模块解耦的子任务（编写独立组件、补齐单元测试、局部重构与闭环验证）。",
     tools: FULL_CODING_TOOL_LIST,
     readOnly: false,
     modelTier: "inherit",
@@ -90,9 +114,10 @@ const BUILTIN_SUBAGENTS = [
 你拥有独立的上下文窗口与完整工程工具链，负责闭环完成主代理委派的独立子任务。
 
 # 执行铁律
-1. 先通过 search_code / read_file 摸清上下文，再使用 edit_file / write_file 进行微创修改。
-2. 严格遵守主代理划定的文件修改范围，严禁触碰主代理未授权的其他模块文件，避免并行冲突。
-3. 完成后向主代理汇报修改了哪些文件（含行号）、核心改动逻辑以及验证结果。`,
+1. **先查后改**: 先通过 \`search_symbols\` / \`find_references\` / \`search_code\` / \`read_file\` 摸清上下文与调用影响面，再使用 \`edit_file\` 进行微创修改（\`write_file\` 仅用于新建文件）。
+2. **文件边界隔离**: 严格遵守主代理划定的文件范围与当前沙箱权限，严禁触碰未授权的其他模块文件，避免与并行任务产生写冲突。
+3. **验证闭环**: 完成代码修改后，主动运行 \`run_command\` 执行对应范围的语法检查、单测或最小验证命令（如适用可用 \`run_skill_script\`），禁止谎称未验证的通过状态。
+4. **结构化汇报**: 向主代理汇报改动文件路径（含行号）、核心改动逻辑以及实际验证命令与输出摘要。`,
   },
 ];
 
@@ -147,7 +172,7 @@ function parseAgentMarkdown(filePath, scope) {
       readOnly:
         typeof meta.readOnly === "boolean"
           ? meta.readOnly
-          : !tools.some((t) => ["write_file", "edit_file", "run_command"].includes(t)),
+          : !tools.some((t) => WRITE_CAPABLE_TOOL_SET.has(t)),
       modelTier: meta.model || meta.modelTier || "inherit",
       maxRounds: meta.maxRounds || 10,
       scope,
@@ -222,7 +247,13 @@ function resolveSubagentProfile({ agentId, role, readOnly, workDir, permissionMo
     : typeof readOnly === "boolean"
     ? readOnly
     : baseProfile.readOnly;
-  const effectiveTools = effectiveReadOnly ? READ_ONLY_TOOL_LIST : baseProfile.tools;
+  const effectiveTools = effectiveReadOnly
+    ? Array.isArray(baseProfile.tools)
+      ? baseProfile.tools.filter((t) => !WRITE_CAPABLE_TOOL_SET.has(t))
+      : READ_ONLY_TOOL_LIST
+    : matched && !matched.readOnly
+    ? matched.tools
+    : FULL_CODING_TOOL_LIST;
   const customRoleTitle = role && role.trim() ? role.trim() : null;
 
   return {
@@ -240,23 +271,34 @@ function resolveSubagentProfile({ agentId, role, readOnly, workDir, permissionMo
 function selectSubagentModel(parentModel, modelTier, storageService) {
   if (!modelTier || modelTier === "inherit") return parentModel;
   try {
-    const allModels = storageService.getModels() || [];
-    if (modelTier === "lite" && allModels.length > 1) {
-      const lite = allModels.find((m) =>
-        /mini|flash|haiku|lite|fast|small|v3|turbo/i.test(
-          `${m.name || ""} ${m.model_id || ""} ${m.id || ""} ${m.modelName || ""}`
-        )
-      );
+    const allModels = storageService?.getModels?.() || [];
+    if (modelTier === "lite" && allModels.length > 0) {
+      const selector =
+        typeof storageService?.selectExplicitLiteModel === "function"
+          ? storageService.selectExplicitLiteModel
+          : require("./storage/configWorkspaceStorage").selectExplicitLiteModel;
+      const lite = selector(allModels, parentModel);
       if (lite) {
         return {
           baseUrl: lite.base_url || lite.baseUrl || parentModel.baseUrl,
-          apiKey: lite.api_key || lite.apiKey || parentModel.apiKey,
+          apiKey: lite.api_key || lite.apiKey || "",
+          provider: lite.provider || parentModel.provider || "openai",
           modelName: lite.model_id || lite.modelName || lite.id || parentModel.modelName,
+          maxOutputTokens: Number(lite.max_output_tokens) || parentModel.maxOutputTokens || 8192,
+          inputPrice: Number(lite.input_price) || 0,
+          outputPrice: Number(lite.output_price) || 0,
+          cacheReadPrice: Number(lite.cache_read_price) || 0,
+          cacheWritePrice: Number(lite.cache_write_price) || 0,
         };
       }
     }
   } catch {}
   return parentModel;
+}
+
+function buildSubagentSystemPrompt(agentDef, workDir, dateStr = new Date().toISOString().slice(0, 10)) {
+  const workspaceDesc = workDir ? `\n当前工作空间主目录: ${workDir}` : "";
+  return `${agentDef.systemPrompt}${workspaceDesc}\n当前日期: ${dateStr}`;
 }
 
 /**
@@ -292,7 +334,9 @@ async function runSubagentLoop({
   }
 
   const targetModel = selectSubagentModel(parentModel, agentDef.modelTier, storageService);
-  const baseUrl = targetModel.baseUrl.replace(/\/+$/, "");
+  const baseUrl = String(targetModel.baseUrl || "").trim().replace(/\/+$/, "");
+  const provider = targetModel.provider || "openai";
+  const isAnthropic = isAnthropicProvider(provider, baseUrl);
   const chatUrl = baseUrl.endsWith("/chat/completions")
     ? baseUrl
     : `${baseUrl}/chat/completions`;
@@ -305,8 +349,56 @@ async function runSubagentLoop({
     allowedSet
   );
 
-  const workspaceDesc = workDir ? `\n当前工作空间主目录: ${workDir}` : "";
-  const sysContent = `${agentDef.systemPrompt}${workspaceDesc}\n当前系统时间: ${new Date().toLocaleString("zh-CN")}`;
+  const replayScope = storageService?.getConfig?.("reasoning_replay_scope");
+  const replayPolicy = reasoningPolicy.resolveReplayPolicy({
+    provider,
+    baseUrl,
+    modelId: targetModel.modelName,
+    hasTools: openAITools.length > 0,
+    scope: replayScope || "current-run",
+  });
+
+  const stripLegacyThinking = (rawText) => {
+    const raw = String(rawText || "");
+    if (!raw.includes("<think")) return raw.trim();
+    if (typeof storageService?.extractLegacyThinking === "function") {
+      return storageService.extractLegacyThinking(raw).content.trim();
+    }
+    return raw
+      .replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, "")
+      .replace(/<(?:think|thinking)>[\s\S]*$/i, "")
+      .trim();
+  };
+
+  const normalizeSubagentUsage = (rawUsage) => {
+    if (!rawUsage || typeof rawUsage !== "object") return null;
+    if (isAnthropic && rawUsage.raw && typeof rawUsage.prompt_tokens === "number") {
+      return rawUsage;
+    }
+    if (isAnthropic && typeof rawUsage.input_tokens === "number") {
+      const { normalizeAnthropicUsage } = require("./anthropicClient");
+      return normalizeAnthropicUsage(rawUsage);
+    }
+    const prompt = Number(rawUsage.prompt_tokens ?? rawUsage.input_tokens) || 0;
+    const completion = Number(rawUsage.completion_tokens ?? rawUsage.output_tokens) || 0;
+    const cached =
+      Number(rawUsage.prompt_tokens_details?.cached_tokens) ||
+      Number(rawUsage.cached_tokens) ||
+      Number(rawUsage.cache_read_input_tokens) ||
+      0;
+    const cacheCreation = Number(rawUsage.cache_creation_input_tokens) || 0;
+    if (!prompt && !completion && !rawUsage.total_tokens) return null;
+    return {
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      total_tokens: Number(rawUsage.total_tokens) || prompt + completion,
+      cached_tokens: cached,
+      cache_creation_tokens: cacheCreation,
+      raw: rawUsage,
+    };
+  };
+
+  const sysContent = buildSubagentSystemPrompt(agentDef, workDir);
 
   const userContent = contextHint
     ? `【主代理补充背景】\n${contextHint}\n\n【委派子任务】\n${taskPrompt}`
@@ -321,7 +413,158 @@ async function runSubagentLoop({
   let round = 0;
   const subSteps = [];
   let lastAssistantText = "";
-  const READ_ONLY_SET = new Set(READ_ONLY_TOOL_LIST);
+  let totalUsage = null;
+  let totalCostUsd = 0;
+  const READ_ONLY_SET = PARALLEL_READ_ONLY_TOOLS;
+  const configuredMaxTokens = Number(targetModel.maxOutputTokens) || 8192;
+
+  const recordSubUsage = (rawUsage) => {
+    const normalized = normalizeSubagentUsage(rawUsage);
+    if (!normalized) return;
+    if (!totalUsage) {
+      totalUsage = {
+        prompt_tokens: normalized.prompt_tokens,
+        completion_tokens: normalized.completion_tokens,
+        total_tokens: normalized.total_tokens,
+        cached_tokens: normalized.cached_tokens || 0,
+        cache_creation_tokens: normalized.cache_creation_tokens || 0,
+      };
+    } else {
+      totalUsage.prompt_tokens += normalized.prompt_tokens;
+      totalUsage.completion_tokens += normalized.completion_tokens;
+      totalUsage.total_tokens += normalized.total_tokens;
+      totalUsage.cached_tokens += normalized.cached_tokens || 0;
+      totalUsage.cache_creation_tokens += normalized.cache_creation_tokens || 0;
+    }
+    const inputPrice = Number(targetModel.inputPrice) || 0;
+    const outputPrice = Number(targetModel.outputPrice) || 0;
+    const cacheReadPrice =
+      Number(targetModel.cacheReadPrice) || (inputPrice > 0 ? inputPrice * 0.1 : 0);
+    const cacheWritePrice =
+      Number(targetModel.cacheWritePrice) || (inputPrice > 0 ? inputPrice * 1.25 : 0);
+    const cached = Math.min(normalized.cached_tokens || 0, normalized.prompt_tokens);
+    const cacheCreation = normalized.cache_creation_tokens || 0;
+    const normalPrompt = Math.max(0, normalized.prompt_tokens - cached - cacheCreation);
+    totalCostUsd +=
+      (normalPrompt * inputPrice +
+        cached * cacheReadPrice +
+        cacheCreation * cacheWritePrice +
+        normalized.completion_tokens * outputPrice) /
+      1_000_000;
+  };
+
+  const buildSubAssistantReplay = (turnResult, toolCalls) => {
+    const msg = {
+      role: "assistant",
+      content: turnResult.rawContent || "",
+    };
+    if (replayPolicy.mode === "openai-field") {
+      const replay = reasoningPolicy.buildReplayPayload(replayPolicy, turnResult);
+      if (replay) msg[replay.field] = replay.value;
+    } else if (replayPolicy.mode === "anthropic-block") {
+      const rawReasoning = reasoningPolicy.extractReplayReasoning(turnResult);
+      const signatures = Array.isArray(turnResult.reasoningMeta?.signatures)
+        ? turnResult.reasoningMeta.signatures
+        : [];
+      if (rawReasoning && signatures.some(Boolean)) {
+        msg.reasoning = rawReasoning;
+        msg.reasoningSignatures = signatures;
+      }
+    }
+    if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+      msg.tool_calls = toolCalls;
+    }
+    return msg;
+  };
+
+  const callSubagentModelOnce = async (toolsForTurn) => {
+    const abortSig =
+      parentToolContext?.abortSignal ||
+      parentToolContext?.sessionAbort?.abortController?.signal ||
+      parentToolContext?.sessionAbort?.controller?.signal;
+
+    if (isAnthropic) {
+      const anthropicRes = await streamAnthropicMessage({
+        baseUrl,
+        apiKey: targetModel.apiKey,
+        model: targetModel.modelName,
+        messages,
+        tools: toolsForTurn,
+        maxTokens: configuredMaxTokens,
+        temperature: 0.2,
+        signal: abortSig,
+      });
+      recordSubUsage(anthropicRes.usage);
+      return {
+        rawContent: anthropicRes.content || "",
+        cleanContent: stripLegacyThinking(anthropicRes.content || ""),
+        reasoning: anthropicRes.reasoning || "",
+        reasoningMeta: anthropicRes.reasoningMeta || null,
+        toolCalls: Array.isArray(anthropicRes.toolCalls) ? anthropicRes.toolCalls : [],
+      };
+    }
+
+    const headers = { "Content-Type": "application/json" };
+    if (targetModel.apiKey) {
+      headers.Authorization = `Bearer ${targetModel.apiKey}`;
+    }
+
+    const buildBody = (includeMaxTokens) => {
+      const body = {
+        model: targetModel.modelName,
+        messages,
+        temperature: 0.2,
+        stream: false,
+      };
+      if (includeMaxTokens && configuredMaxTokens > 0) {
+        body.max_tokens = configuredMaxTokens;
+      }
+      if (Array.isArray(toolsForTurn) && toolsForTurn.length > 0) {
+        body.tools = toolsForTurn;
+        body.tool_choice = "auto";
+      }
+      return body;
+    };
+
+    let response = await fetch(chatUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(buildBody(true)),
+      signal: abortSig,
+    });
+
+    if (!response.ok && response.status === 400) {
+      const errProbe = await response.text().catch(() => "");
+      if (/max_tokens|max_completion_tokens|unsupported parameter/i.test(errProbe)) {
+        response = await fetch(chatUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(buildBody(false)),
+          signal: abortSig,
+        });
+      } else {
+        throw new Error(`Subagent API 请求失败 (400): ${errProbe.slice(0, 200)}`);
+      }
+    }
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      throw new Error(`Subagent API 请求失败 (${response.status}): ${errText.slice(0, 200)}`);
+    }
+
+    const data = await response.json();
+    recordSubUsage(data.usage);
+    const choice = data.choices?.[0]?.message;
+    if (!choice) return null;
+
+    return {
+      rawContent: choice.content || "",
+      cleanContent: stripLegacyThinking(choice.content || ""),
+      reasoning: choice.reasoning_content || choice.reasoning || "",
+      reasoningMeta: null,
+      toolCalls: choice.tool_calls || [],
+    };
+  };
 
   const childToolContext = {
     ...parentToolContext,
@@ -337,66 +580,27 @@ async function runSubagentLoop({
         agentName: agentDef.name,
         error: "任务已被用户取消",
         subSteps,
+        usage: totalUsage,
+        costUsd: Math.round(totalCostUsd * 100_000_000) / 100_000_000,
       };
     }
 
-    const reqBody = {
-      model: targetModel.modelName,
-      messages,
-      temperature: 0.2,
-      stream: false,
-    };
-    if (openAITools.length > 0) {
-      reqBody.tools = openAITools;
-      reqBody.tool_choice = "auto";
-    }
-
-    const headers = { "Content-Type": "application/json" };
-    if (targetModel.apiKey) {
-      headers.Authorization = `Bearer ${targetModel.apiKey}`;
-    }
-
-    const abortSig =
-      parentToolContext?.abortSignal ||
-      parentToolContext?.sessionAbort?.abortController?.signal ||
-      parentToolContext?.sessionAbort?.controller?.signal;
-
-    const response = await fetch(chatUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(reqBody),
-      signal: abortSig,
-    });
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => "");
-      throw new Error(`Subagent API 请求失败 (${response.status}): ${errText.slice(0, 200)}`);
-    }
-
-    const data = await response.json();
-    const choice = data.choices?.[0]?.message;
-    if (!choice) {
+    const turnResult = await callSubagentModelOnce(openAITools);
+    if (!turnResult) {
       break;
     }
 
-    const content = (choice.content || "")
-      .replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, "")
-      .trim();
-    if (content) {
-      lastAssistantText = content;
+    if (turnResult.cleanContent) {
+      lastAssistantText = turnResult.cleanContent;
     }
 
-    const toolCalls = choice.tool_calls || [];
+    const toolCalls = turnResult.toolCalls || [];
     if (toolCalls.length === 0) {
       break;
     }
 
     round++;
-    messages.push({
-      role: "assistant",
-      content: choice.content || "",
-      tool_calls: toolCalls,
-    });
+    messages.push(buildSubAssistantReplay(turnResult, toolCalls));
 
     const prepared = toolCalls.map((tc, idx) => {
       const subCallId = tc.id || `subcall_${Date.now()}_${round}_${idx}`;
@@ -489,28 +693,9 @@ async function runSubagentLoop({
       role: "user",
       content: "请立即汇总以上工具执行获取到的事实与代码结论，向主代理输出精炼完整的总结报告（不要再调用工具）。",
     });
-    const headers = { "Content-Type": "application/json" };
-    if (targetModel.apiKey) headers.Authorization = `Bearer ${targetModel.apiKey}`;
-    const abortSig =
-      parentToolContext?.abortSignal ||
-      parentToolContext?.sessionAbort?.abortController?.signal ||
-      parentToolContext?.sessionAbort?.controller?.signal;
-    const res = await fetch(chatUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model: targetModel.modelName,
-        messages,
-        temperature: 0.2,
-        stream: false,
-      }),
-      signal: abortSig,
-    });
-    if (res.ok) {
-      const data = await res.json();
-      lastAssistantText = (data.choices?.[0]?.message?.content || "")
-        .replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, "")
-        .trim();
+    const finalTurn = await callSubagentModelOnce([]).catch(() => null);
+    if (finalTurn?.cleanContent) {
+      lastAssistantText = finalTurn.cleanContent;
     }
   }
 
@@ -522,6 +707,8 @@ async function runSubagentLoop({
     toolCallsCount: subSteps.length,
     report: lastAssistantText || "子代理已完成执行，但未返回额外文本摘要。",
     subSteps,
+    usage: totalUsage,
+    costUsd: Math.round(totalCostUsd * 100_000_000) / 100_000_000,
   };
 }
 
@@ -561,7 +748,7 @@ async function runSubagentBatch({
       const label = item.role || item.agent || `并行子代理 #${idx + 1}`;
       try {
         results[idx] = await runSubagentLoop({
-          agentId: item.agent || "explore",
+          agentId: item.agent,
           role: item.role,
           readOnly: item.readOnly,
           taskPrompt: item.task,
@@ -588,10 +775,33 @@ async function runSubagentBatch({
   const workerCount = Math.min(maxConcurrency, tasks.length);
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
+  const totalCostUsd = results.reduce((sum, r) => sum + (Number(r?.costUsd) || 0), 0);
+  let aggregatedUsage = null;
+  for (const r of results) {
+    if (!r?.usage) continue;
+    if (!aggregatedUsage) {
+      aggregatedUsage = {
+        prompt_tokens: Number(r.usage.prompt_tokens) || 0,
+        completion_tokens: Number(r.usage.completion_tokens) || 0,
+        total_tokens: Number(r.usage.total_tokens) || 0,
+        cached_tokens: Number(r.usage.cached_tokens) || 0,
+        cache_creation_tokens: Number(r.usage.cache_creation_tokens) || 0,
+      };
+    } else {
+      aggregatedUsage.prompt_tokens += Number(r.usage.prompt_tokens) || 0;
+      aggregatedUsage.completion_tokens += Number(r.usage.completion_tokens) || 0;
+      aggregatedUsage.total_tokens += Number(r.usage.total_tokens) || 0;
+      aggregatedUsage.cached_tokens += Number(r.usage.cached_tokens) || 0;
+      aggregatedUsage.cache_creation_tokens += Number(r.usage.cache_creation_tokens) || 0;
+    }
+  }
+
   return {
     success: results.every((r) => r?.success),
     parallelTasksCount: tasks.length,
     totalToolCallsCount: mergedStepsByTask.flat().length,
+    usage: aggregatedUsage,
+    costUsd: Math.round(totalCostUsd * 100_000_000) / 100_000_000,
     results: results.map((r, i) => ({
       index: i + 1,
       agentName: r.agentName,
@@ -605,7 +815,13 @@ async function runSubagentBatch({
 
 module.exports = {
   BUILTIN_SUBAGENTS,
+  READ_ONLY_TOOL_LIST,
+  PLANNER_TOOL_LIST,
+  FULL_CODING_TOOL_LIST,
   discoverSubagents,
+  resolveSubagentProfile,
+  selectSubagentModel,
+  buildSubagentSystemPrompt,
   runSubagentLoop,
   runSubagentBatch,
 };

@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useMemo } from 'react';
+import React, { useRef, useEffect, useState, useMemo, useId } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import {
   Copy,
@@ -60,6 +60,9 @@ export const AgentLiveStatusBar: React.FC<{
   };
 
   const [elapsedSec, setElapsedSec] = useState<number>(computeElapsedSec);
+  const barRef = useRef<HTMLDivElement>(null);
+  const [boxSize, setBoxSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  const beamGradId = useId().replace(/:/g, '');
 
   useEffect(() => {
     setElapsedSec(computeElapsedSec());
@@ -68,6 +71,21 @@ export const AgentLiveStatusBar: React.FC<{
     }, 1000);
     return () => clearInterval(timer);
   }, [sessionStartTime]);
+
+  // 实时测量外层圆角容器尺寸，使 SVG 环绕流光与 1px 边框中心线精确重合
+  useEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    const syncSize = () => {
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      setBoxSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
+    };
+    syncSize();
+    const observer = new ResizeObserver(syncSize);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const visibleSteps = activeToolCalls.filter((t) => t.tool !== 'todo_write');
   const runningStep = visibleSteps.slice().reverse().find((t) => t.status === 'running');
@@ -97,8 +115,59 @@ export const AgentLiveStatusBar: React.FC<{
   };
 
   return (
-    <div className='sticky bottom-0 z-10 pt-1 pb-0.5 w-full pointer-events-none'>
-      <div className='relative w-full px-1 py-1.5 border-t border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between gap-3 text-xs select-none overflow-hidden'>
+    <div className='w-full pointer-events-none'>
+      <div
+        ref={barRef}
+        className='relative w-full rounded-xl px-3.5 py-2 border border-[color:var(--ui-border-hairline)] bg-[var(--ui-composer-bg)] flex items-center justify-between gap-3 text-xs select-none'
+      >
+        {/* 顺时针环绕边框流光特效 (Border Beam)：仅在运行期挂载，精确贴合 1px 边框中心线 */}
+        {boxSize.w > 2 && boxSize.h > 2 && (
+          <svg
+            aria-hidden='true'
+            width={boxSize.w}
+            height={boxSize.h}
+            viewBox={`0 0 ${boxSize.w} ${boxSize.h}`}
+            className='pointer-events-none absolute -left-[1px] -top-[1px] overflow-visible z-0'
+          >
+            <defs>
+              <linearGradient id={beamGradId} x1='0%' y1='0%' x2='100%' y2='100%'>
+                <stop offset='0%' stopColor='var(--ui-accent-sky)' stopOpacity='0' />
+                <stop offset='28%' stopColor='var(--ui-accent-blue)' stopOpacity='0.55' />
+                <stop offset='68%' stopColor='var(--ui-accent-blue)' stopOpacity='1' />
+                <stop offset='100%' stopColor='var(--ui-accent-sky)' stopOpacity='0' />
+              </linearGradient>
+            </defs>
+            <rect
+              x={0.5}
+              y={0.5}
+              width={boxSize.w - 1}
+              height={boxSize.h - 1}
+              rx={11.5}
+              ry={11.5}
+              fill='none'
+              stroke={`url(#${beamGradId})`}
+              strokeWidth={2}
+              strokeLinecap='round'
+              pathLength={100}
+              className='omcx-border-beam-glow opacity-65'
+            />
+            <rect
+              x={0.5}
+              y={0.5}
+              width={boxSize.w - 1}
+              height={boxSize.h - 1}
+              rx={11.5}
+              ry={11.5}
+              fill='none'
+              stroke={`url(#${beamGradId})`}
+              strokeWidth={1.35}
+              strokeLinecap='round'
+              pathLength={100}
+              className='omcx-border-beam-core'
+            />
+          </svg>
+        )}
+
         {/* 左侧：微光呼吸图标 + 当前实时动作语义 (已移除雷达同心圆扩散) */}
         <div className='flex items-center gap-2.5 min-w-0 relative z-10'>
           <div className='relative flex items-center justify-center w-4 h-4 flex-shrink-0'>

@@ -109,7 +109,15 @@ class DispatchSubagentTool extends StructuredTool {
             }
           },
         });
-        return JSON.stringify(batchResult);
+        if (
+          batchResult &&
+          typeof activeContext?.onSubagentUsage === "function" &&
+          (batchResult.usage || Number(batchResult.costUsd) > 0)
+        ) {
+          activeContext.onSubagentUsage(batchResult.usage, batchResult.costUsd);
+        }
+        const { usage: _batchUsage, costUsd: _batchCost, ...publicBatchResult } = batchResult;
+        return JSON.stringify(publicBatchResult);
       }
 
       // 模式 B：单个 Subagent 委派（支持预设 ID 或动态 role）
@@ -121,7 +129,7 @@ class DispatchSubagentTool extends StructuredTool {
       }
 
       const result = await subagentService.runSubagentLoop({
-        agentId: agent || "explore",
+        agentId: agent,
         role,
         readOnly,
         taskPrompt: task,
@@ -135,6 +143,14 @@ class DispatchSubagentTool extends StructuredTool {
           }
         },
       });
+
+      if (
+        result &&
+        typeof activeContext?.onSubagentUsage === "function" &&
+        (result.usage || Number(result.costUsd) > 0)
+      ) {
+        activeContext.onSubagentUsage(result.usage, result.costUsd);
+      }
 
       return JSON.stringify({
         success: result.success,
