@@ -614,6 +614,8 @@ const LeftSidebar: React.FC = () => {
             <Settings size={15} />
           </button>
         </div>
+        {deleteSessionModal}
+        {newSessionModal}
       </aside>
     );
   }

@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { FolderGit2, Loader2, Trash2, X } from 'lucide-react';
 import { useChatStore } from '@/stores/chatStore';
@@ -111,9 +112,9 @@ export function useDeleteSessionWithWorktree() {
     }
   }, [alsoRemoveWorktree, deleteSession, pending, submitting]);
 
-  const modal = pending ? (
+  const modalNode = pending ? (
     <div
-      className='fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-sm p-4'
+      className='fixed inset-0 z-[99999] flex items-center justify-center bg-[var(--ui-modal-overlay)] backdrop-blur-sm p-4 titlebar-no-drag'
       onClick={cancelDelete}
     >
       <div
@@ -194,5 +195,8 @@ export function useDeleteSessionWithWorktree() {
     </div>
   ) : null;
 
-  return { requestDeleteSession, deleteSessionModal: modal };
+  const deleteSessionModal =
+    modalNode && typeof document !== 'undefined' ? createPortal(modalNode, document.body) : null;
+
+  return { requestDeleteSession, deleteSessionModal };
 }
