@@ -11,7 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { listWorkspaceFiles } = require("../utils/tools/fileIndexer");
+const { listWorkspaceFiles, listWorkspaceFilesAsync } = require("../utils/tools/fileIndexer");
 const projectArtifactService = require("./projectArtifactService");
 
 // 索引是仓库派生产物：默认随项目落盘到 <workDir>/.omcx/index/，可通过配置回退全局
@@ -56,6 +56,22 @@ const IGNORED_EXT = new Set([
 ]);
 
 const scanCache = new Map();
+const inFlightScans = new Map();
+const ASYNC_READ_CONCURRENCY = 16;
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const runWorker = async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      results[idx] = await worker(items[idx], idx);
+    }
+  };
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => runWorker());
+  await Promise.all(workers);
+  return results;
+}
 
 function hashKey(text) {
   return crypto.createHash("sha1").update(String(text)).digest("hex");
@@ -66,6 +82,16 @@ function safeRead(filePath) {
     const stat = fs.statSync(filePath);
     if (!stat.isFile() || stat.size > MAX_FILE_READ_BYTES) return "";
     return fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+async function safeReadAsync(filePath, maxBytes = MAX_FILE_READ_BYTES) {
+  try {
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile() || stat.size > maxBytes) return "";
+    return await fs.promises.readFile(filePath, "utf-8");
   } catch {
     return "";
   }
@@ -266,6 +292,135 @@ function scanRepo(workDir, { force = false } = {}) {
   return value;
 }
 
+async function readValidDiskIndexAsync(filePath, resolved, now) {
+  try {
+    const stat = await fs.promises.stat(filePath);
+    if (now - stat.mtimeMs >= DISK_TTL_MS) return null;
+    const raw = await fs.promises.readFile(filePath, "utf-8");
+    const disk = JSON.parse(raw);
+    if (disk && disk.workDir === resolved && Array.isArray(disk.files)) {
+      return disk;
+    }
+  } catch {
+    // 缓存不存在或已损坏
+  }
+  return null;
+}
+
+/**
+ * 异步无阻塞仓库扫描（避免 Electron 主线程同步读取大量文件导致卡顿）。
+ */
+async function scanRepoAsync(workDir, { force = false } = {}) {
+  if (!workDir || typeof workDir !== "string") {
+    return { workDir: null, files: [], symbols: [], stats: { fileCount: 0, symbolCount: 0 } };
+  }
+  const resolved = path.resolve(workDir);
+  const cacheKey = resolved;
+  const now = Date.now();
+  const cached = scanCache.get(cacheKey);
+  if (!force && cached && now - cached.at < SCAN_TTL_MS) {
+    return cached.value;
+  }
+
+  if (!force && inFlightScans.has(cacheKey)) {
+    return inFlightScans.get(cacheKey);
+  }
+
+  const runScan = async () => {
+    const indexTarget = projectArtifactService.resolveDir(KIND, resolved);
+    const diskPath = indexTarget.dir ? path.join(indexTarget.dir, `${hashKey(resolved)}.json`) : null;
+
+    if (!force && diskPath) {
+      const disk = await readValidDiskIndexAsync(diskPath, resolved, now);
+      if (disk) {
+        scanCache.set(cacheKey, { at: Date.now(), value: disk });
+        return disk;
+      }
+      for (const legacyDir of projectArtifactService.readCandidates(KIND, resolved)) {
+        const legacyPath = path.join(legacyDir, `${hashKey(resolved)}.json`);
+        if (legacyPath === diskPath) continue;
+        const legacyDisk = await readValidDiskIndexAsync(legacyPath, resolved, now);
+        if (legacyDisk) {
+          scanCache.set(cacheKey, { at: Date.now(), value: legacyDisk });
+          return legacyDisk;
+        }
+      }
+    }
+
+    const listed = await listWorkspaceFilesAsync(resolved, [resolved]);
+    const candidates = (listed.files || [])
+      .filter((entry) => entry && entry.isDir === false)
+      .filter((entry) => {
+        const ext = path.extname(entry.path).toLowerCase();
+        return LANGUAGE_BY_EXT[ext] && !IGNORED_EXT.has(ext);
+      })
+      .slice(0, MAX_SCAN_FILES);
+
+    const languageCounts = {};
+    const scannedEntries = await mapWithConcurrency(
+      candidates,
+      ASYNC_READ_CONCURRENCY,
+      async (entry) => {
+        const absPath = path.isAbsolute(entry.path) ? entry.path : path.join(resolved, entry.path);
+        const relPath = path.isAbsolute(entry.path)
+          ? path.relative(resolved, entry.path).replace(/\\/g, "/")
+          : String(entry.path).replace(/\\/g, "/");
+        const ext = path.extname(relPath).toLowerCase();
+        const language = LANGUAGE_BY_EXT[ext];
+        languageCounts[language] = (languageCounts[language] || 0) + 1;
+        const content = await safeReadAsync(absPath);
+        if (!content) return null;
+        const symbols = extractSymbols(relPath, content);
+        if (symbols.length === 0) return null;
+        return {
+          path: relPath,
+          language,
+          size: content.length,
+          symbols,
+        };
+      }
+    );
+
+    const files = scannedEntries.filter(Boolean);
+    const value = {
+      workDir: resolved,
+      generatedAt: Date.now(),
+      files,
+      stats: {
+        fileCount: files.length,
+        symbolCount: files.reduce((sum, file) => sum + file.symbols.length, 0),
+        languages: languageCounts,
+        scannedFiles: candidates.length,
+        truncated: Boolean(listed.truncated) || (listed.files || []).length > MAX_SCAN_FILES,
+      },
+    };
+
+    scanCache.set(cacheKey, { at: Date.now(), value });
+    if (scanCache.size > 20) {
+      const oldest = Array.from(scanCache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest) scanCache.delete(oldest[0]);
+    }
+
+    if (diskPath) {
+      try {
+        projectArtifactService.prepareDir(KIND, resolved);
+        await fs.promises.writeFile(diskPath, JSON.stringify(value), "utf-8");
+      } catch {
+        // 索引落盘失败不影响内存可用性
+      }
+    }
+    return value;
+  };
+
+  const promise = runScan().finally(() => {
+    inFlightScans.delete(cacheKey);
+  });
+  if (!force) {
+    inFlightScans.set(cacheKey, promise);
+  }
+  return promise;
+}
+
 function flattenSymbols(index) {
   const out = [];
   for (const file of index.files || []) {
@@ -276,11 +431,7 @@ function flattenSymbols(index) {
   return out;
 }
 
-/**
- * 生成受字符预算约束的 Repo Map。
- */
-function buildRepoMap(workDir, { maxChars = 6000, force = false } = {}) {
-  const index = scanRepo(workDir, { force });
+function formatRepoMapFromIndex(index, maxChars = 6000) {
   if (!index.files || index.files.length === 0) return "";
 
   const budget = Math.max(800, Math.min(20000, Number(maxChars) || 6000));
@@ -341,10 +492,22 @@ function buildRepoMap(workDir, { maxChars = 6000, force = false } = {}) {
   return lines.join("\n");
 }
 
-function searchSymbols(workDir, query, { limit = 40, force = false } = {}) {
+/**
+ * 生成受字符预算约束的 Repo Map。
+ */
+function buildRepoMap(workDir, { maxChars = 6000, force = false } = {}) {
+  const index = scanRepo(workDir, { force });
+  return formatRepoMapFromIndex(index, maxChars);
+}
+
+async function buildRepoMapAsync(workDir, { maxChars = 6000, force = false } = {}) {
+  const index = await scanRepoAsync(workDir, { force });
+  return formatRepoMapFromIndex(index, maxChars);
+}
+
+function matchSymbolsFromIndex(index, query, limit = 40) {
   const needle = String(query || "").trim().toLowerCase();
   if (!needle) return [];
-  const index = scanRepo(workDir, { force });
   const all = flattenSymbols(index);
   const scored = [];
 
@@ -363,8 +526,23 @@ function searchSymbols(workDir, query, { limit = 40, force = false } = {}) {
     .slice(0, Math.max(1, Math.min(200, Number(limit) || 40)));
 }
 
+function searchSymbols(workDir, query, { limit = 40, force = false } = {}) {
+  const index = scanRepo(workDir, { force });
+  return matchSymbolsFromIndex(index, query, limit);
+}
+
+async function searchSymbolsAsync(workDir, query, { limit = 40, force = false } = {}) {
+  const index = await scanRepoAsync(workDir, { force });
+  return matchSymbolsFromIndex(index, query, limit);
+}
+
 function getRepoStats(workDir, { force = false } = {}) {
   const index = scanRepo(workDir, { force });
+  return index.stats;
+}
+
+async function getRepoStatsAsync(workDir, { force = false } = {}) {
+  const index = await scanRepoAsync(workDir, { force });
   return index.stats;
 }
 
@@ -471,6 +649,97 @@ function findReferences(workDir, symbol, { limit = 60, maxFiles = 5000 } = {}) {
   return result;
 }
 
+async function findReferencesAsync(workDir, symbol, { limit = 60, maxFiles = 5000 } = {}) {
+  const name = String(symbol || "").trim();
+  const result = {
+    query: name,
+    definitions: [],
+    references: [],
+    total: 0,
+    scannedFiles: 0,
+    truncated: false,
+  };
+  if (!workDir || !name) {
+    result.error = "缺少工作目录或符号名";
+    return result;
+  }
+
+  const index = await scanRepoAsync(workDir);
+  const wordRe = new RegExp(`\\b${escapeRegExp(name)}\\b`);
+  const callRe = new RegExp(`\\b${escapeRegExp(name)}\\s*[(<]`);
+  const defLineMap = new Map();
+  for (const file of index.files) {
+    for (const sym of file.symbols || []) {
+      if (sym.name === name) defLineMap.set(`${file.path}:${sym.line}`, sym.kind);
+    }
+  }
+
+  const listed = await listWorkspaceFilesAsync(path.resolve(workDir), [path.resolve(workDir)]);
+  const candidates = (listed.files || [])
+    .filter((entry) => entry && entry.isDir === false)
+    .filter((entry) => {
+      const ext = path.extname(entry.path).toLowerCase();
+      return LANGUAGE_BY_EXT[ext] && !IGNORED_EXT.has(ext);
+    })
+    .slice(0, maxFiles);
+
+  // 分批异步读取，既避免阻塞主线程又可在达到 limit 后提前停止
+  for (let start = 0; start < candidates.length; start += ASYNC_READ_CONCURRENCY) {
+    if (result.truncated) break;
+    const batch = candidates.slice(start, start + ASYNC_READ_CONCURRENCY);
+    const contents = await Promise.all(
+      batch.map((entry) => {
+        const absPath = path.isAbsolute(entry.path) ? entry.path : path.join(workDir, entry.path);
+        return safeReadAsync(absPath, 2 * 1024 * 1024);
+      })
+    );
+    for (let i = 0; i < batch.length; i += 1) {
+      if (result.scannedFiles >= maxFiles) {
+        result.truncated = true;
+        break;
+      }
+      result.scannedFiles += 1;
+      const content = contents[i];
+      if (!content || !content.includes(name)) continue;
+      const relPath = String(batch[i].path).replace(/\\/g, "/");
+      const language = LANGUAGE_BY_EXT[path.extname(relPath).toLowerCase()];
+      const lines = content.split(/\r?\n/);
+      for (let lineIdx = 0; lineIdx < lines.length; lineIdx += 1) {
+        const line = lines[lineIdx];
+        if (!line.includes(name) || !wordRe.test(line)) continue;
+        const key = `${relPath}:${lineIdx + 1}`;
+        const text = line.trim().slice(0, 240);
+        if (defLineMap.has(key)) {
+          result.definitions.push({
+            path: relPath,
+            line: lineIdx + 1,
+            kind: "definition",
+            symbolKind: defLineMap.get(key),
+            language,
+            text,
+          });
+        } else {
+          result.references.push({
+            path: relPath,
+            line: lineIdx + 1,
+            kind: callRe.test(line) ? "call" : "reference",
+            language,
+            text,
+          });
+        }
+        if (result.references.length >= limit) {
+          result.truncated = true;
+          break;
+        }
+      }
+      if (result.truncated) break;
+    }
+  }
+
+  result.total = result.definitions.length + result.references.length;
+  return result;
+}
+
 /**
  * 索引落盘目录（按项目解析）。
  * @param {string} [workDir] 工作目录；缺省时返回全局旧目录，仅作兼容用途
@@ -481,10 +750,15 @@ function getIndexDir(workDir) {
 
 module.exports = {
   scanRepo,
+  scanRepoAsync,
   buildRepoMap,
+  buildRepoMapAsync,
   searchSymbols,
+  searchSymbolsAsync,
   findReferences,
+  findReferencesAsync,
   getRepoStats,
+  getRepoStatsAsync,
   extractSymbols,
   getIndexDir,
   INDEX_DIR: projectArtifactService.globalDir(KIND),

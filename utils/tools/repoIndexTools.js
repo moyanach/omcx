@@ -1,6 +1,11 @@
 const { z } = require("zod");
 const { StructuredTool } = require("./baseTool");
-const { buildRepoMap, searchSymbols, getRepoStats, findReferences } = require("../../services/repoIndexService");
+const {
+  buildRepoMapAsync,
+  searchSymbolsAsync,
+  getRepoStatsAsync,
+  findReferencesAsync,
+} = require("../../services/repoIndexService");
 
 class RepoMapTool extends StructuredTool {
   constructor() {
@@ -25,11 +30,11 @@ class RepoMapTool extends StructuredTool {
       return JSON.stringify({ success: false, error: "当前会话未绑定工作目录" });
     }
     try {
-      const map = buildRepoMap(__workDir, {
+      const map = await buildRepoMapAsync(__workDir, {
         maxChars: maxChars || 6000,
         force: Boolean(refresh),
       });
-      const stats = getRepoStats(__workDir, { force: false });
+      const stats = await getRepoStatsAsync(__workDir, { force: false });
       return JSON.stringify({
         success: true,
         map: map || "(未扫描到可索引的源码符号)",
@@ -58,7 +63,7 @@ class SearchSymbolsTool extends StructuredTool {
       return JSON.stringify({ success: false, error: "当前会话未绑定工作目录" });
     }
     try {
-      const results = searchSymbols(__workDir, query, { limit: limit || 40 });
+      const results = await searchSymbolsAsync(__workDir, query, { limit: limit || 40 });
       return JSON.stringify({
         success: true,
         query,
@@ -101,7 +106,7 @@ class FindReferencesTool extends StructuredTool {
       return JSON.stringify({ success: false, error: "当前会话未绑定工作目录" });
     }
     try {
-      const result = findReferences(__workDir, symbol, { limit: limit || 60 });
+      const result = await findReferencesAsync(__workDir, symbol, { limit: limit || 60 });
       return JSON.stringify({ success: true, ...result });
     } catch (err) {
       return JSON.stringify({ success: false, error: err.message });

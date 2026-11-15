@@ -21,6 +21,7 @@ const {
   extractTextContent,
   hasUnclosedCodeFence,
   sendStreamEvent,
+  notifyDesktopIfBackground,
   getStorageService,
   getReasoningPolicy,
   getContextCompactor,
@@ -44,6 +45,7 @@ const { supersedeSessionPermissions, createPermissionChecker } = require("./runn
 const { createStreamTransport } = require("./runner/streamTransport");
 const { evaluateNoToolResponse } = require("./runner/continuationPolicy");
 const { executeToolBatch } = require("./runner/toolExecutor");
+const { initializeTurnContext } = require("./runner/contextInitializer");
 
 function registerAgentRunner() {
   if (!ipcMain) return;
@@ -460,138 +462,55 @@ async function runAgentTurn(payload = {}, options = {}) {
       headers["Authorization"] = `Bearer ${modelApiKey}`;
     }
 
-    const historyMessageIds = new WeakMap();
-    let apiMessages = (Array.isArray(messages) ? messages : []).map((m) => {
-      if (!m || typeof m !== "object") return m;
-      const cloned = { ...m };
-      if (m.id) historyMessageIds.set(cloned, m.id);
-      delete cloned.id;
-      if (
-        cloned.role === "assistant" &&
-        typeof cloned.content === "string" &&
-        cloned.content.includes("<think")
-      ) {
-        cloned.content = storageService.extractLegacyThinking(cloned.content).content;
-      }
-      return cloned;
-    });
-
-    const reasoningReplay = reasoningPolicy.resolveReplayPolicy({
+    const turnInit = await initializeTurnContext({
+      messages,
+      sessionId,
+      sessionWorkDir,
       provider,
-      baseUrl: modelBaseUrl,
-      modelId: apiModelId,
-      hasTools: Boolean(enableTools),
-      scope: storageService.getConfig("reasoning_replay_scope"),
-      window: storageService.getConfig("reasoning_replay_window"),
+      apiModelId,
+      modelBaseUrl,
+      enableTools,
+      supportsVision,
+      matchedWorkspace,
+      allowedFolders,
+      initialTodos,
+      sessionToolContext,
+      replyStream,
+      storageService,
+      reasoningPolicy,
+      commandService,
+      hookService,
+      mcpClientService,
+      repoIndexService,
+      repoWikiService,
+      toolRegistry,
+      buildMentionContext,
+      buildAttachmentMessagesAsync,
+      isImageFile,
+      extractTextContent,
+      buildSystemContext,
+      buildGitReminder,
+      appendReminderToLastUserMessage,
+      getGitSnapshotAsync,
+      estimateTokens,
     });
-    console.log(
-      `[reasoning-replay] mode=${reasoningReplay.mode} scope=${reasoningReplay.scope} window=${reasoningReplay.window} includeHistory=${reasoningReplay.includeHistory}`
-    );
+    if (turnInit.aborted) return;
 
-    if (reasoningReplay.includeHistory && reasoningReplay.mode === "openai-field") {
-      const MAX_HISTORY_REPLAY_ITEMS = 12;
-      let userTurnsSeen = 0;
-      let replayed = 0;
-      for (let i = apiMessages.length - 1; i >= 0; i--) {
-        if (replayed >= MAX_HISTORY_REPLAY_ITEMS) break;
-        const msg = apiMessages[i];
-        if (!msg) continue;
-        if (msg.role === "user") {
-          userTurnsSeen += 1;
-          if (userTurnsSeen > reasoningReplay.window) break;
-          continue;
-        }
-        if (msg.role !== "assistant" || msg.reasoning_content) continue;
-        const persistedId = historyMessageIds.get(msg);
-        if (!persistedId) continue;
-        try {
-          const text = storageService.getMessageReasoning(persistedId);
-          const replay = reasoningPolicy.buildReplayPayload(reasoningReplay, {
-            reasoning: text,
-          });
-          if (replay) {
-            msg[replay.field] = replay.value;
-            replayed += 1;
-          }
-        } catch (err) {
-          console.warn(`[reasoning-replay] 历史思考回填失败 (${persistedId}):`, err.message);
-        }
-      }
-      if (replayed > 0) {
-        console.log(
-          `[reasoning-replay] 已回填 ${replayed} 条历史推理 (window=${reasoningReplay.window})`
-        );
-      }
-    }
-
-    const buildAssistantReplayMessage = (result, { toolCalls, content } = {}) => {
-      const message = {
-        role: "assistant",
-        content: content !== undefined ? content : result.content || "",
-      };
-      if (reasoningReplay.mode === "openai-field") {
-        const replayPayload = reasoningPolicy.buildReplayPayload(reasoningReplay, result);
-        if (replayPayload) message[replayPayload.field] = replayPayload.value;
-      } else if (reasoningReplay.mode === "anthropic-block") {
-        const rawReasoning = reasoningPolicy.extractReplayReasoning(result);
-        const signatures = Array.isArray(result.reasoningMeta?.signatures)
-          ? result.reasoningMeta.signatures
-          : [];
-        if (rawReasoning && signatures.some(Boolean)) {
-          message.reasoning = rawReasoning;
-          message.reasoningSignatures = signatures;
-        } else if (rawReasoning) {
-          console.warn("[reasoning-replay] Anthropic thinking 缺少 signature，本轮跳过推理回传");
-        }
-      }
-      if (Array.isArray(toolCalls) && toolCalls.length > 0) {
-        message.tool_calls = toolCalls;
-      }
-      return message;
-    };
-
-    let slashCommandInfo = null;
-    try {
-      const lastUserIndex = (() => {
-        for (let i = apiMessages.length - 1; i >= 0; i--) {
-          if (apiMessages[i]?.role === "user") return i;
-        }
-        return -1;
-      })();
-      if (lastUserIndex >= 0) {
-        const rawText = extractTextContent(apiMessages[lastUserIndex].content);
-        if (/^\/btw(?:\s|$)/i.test(rawText.trim())) {
-          replyStream(
-            "error",
-            "旁路提问请直接在主输入框发送 /btw <问题>：它不会打断主任务，也不会写入主会话。"
-          );
-          return;
-        }
-        const expanded = await commandService.expandCommand(rawText, sessionWorkDir);
-        if (expanded) {
-          slashCommandInfo = {
-            command: expanded.command,
-            scope: expanded.scope,
-            builtin: expanded.builtin,
-            original: rawText,
-          };
-          apiMessages[lastUserIndex] = {
-            ...apiMessages[lastUserIndex],
-            content: expanded.prompt,
-          };
-          if (expanded.allowedTools?.length) {
-            sessionToolContext.allowedToolNames = new Set([
-              ...expanded.allowedTools,
-              "todo_write",
-              "run_skill_script",
-            ]);
-          }
-          console.log(`[slash-command] 已展开 /${expanded.command} (${expanded.scope})`);
-        }
-      }
-    } catch (slashErr) {
-      console.warn("[slash-command] 展开失败，回退原文:", slashErr.message);
-    }
+    let apiMessages = turnInit.apiMessages;
+    const {
+      reasoningReplay,
+      buildAssistantReplayMessage,
+      slashCommandInfo,
+      compactCfg,
+      mcpTools,
+      hooksEnabled,
+      hookOptions,
+      getActiveToolDefs,
+      toolDefsTokenEstimate,
+      getSystemInstruction,
+      getCurrentSkillsTokens,
+      refreshSystemInstruction,
+    } = turnInit;
 
     let compactionSummary = "";
     const compactionStats = { count: 0, beforeTokens: 0, afterTokens: 0 };
@@ -619,249 +538,6 @@ async function runAgentTurn(payload = {}, options = {}) {
     });
     let consecutiveCompactFailures = 0;
     let turnCompactionCount = 0;
-    const compactCfg = {
-      enabled: storageService.getConfig("context_auto_compact") !== "false",
-      thresholdPercent: Number(storageService.getConfig("context_compact_threshold_percent")) || 85,
-      keepTokens: Number(storageService.getConfig("context_compact_keep_tokens")) || 20000,
-      toolResultMaxChars: Number(storageService.getConfig("context_tool_result_max_chars")) || 8000,
-      keepRecentToolResults: Number(storageService.getConfig("context_microcompact_keep_results")) || 5,
-      outputReserve: 4096,
-      maxConsecutiveFailures: 3,
-    };
-    const availableSkills = storageService.getSkills(sessionWorkDir);
-    const memories = storageService.getMemories(sessionWorkDir);
-
-    for (const skill of availableSkills) {
-      if (skill?.filePath) {
-        const skillDir = path.resolve(path.dirname(skill.filePath));
-        if (!allowedFolders.includes(skillDir)) {
-          allowedFolders.push(skillDir);
-        }
-      }
-    }
-    for (const mem of memories) {
-      if (mem?.path) {
-        const memDir = path.resolve(path.dirname(mem.path));
-        if (!allowedFolders.includes(memDir)) {
-          allowedFolders.push(memDir);
-        }
-      }
-    }
-
-    const hasAnyAttachments = apiMessages.some(
-      (m) => Array.isArray(m.attachments) && m.attachments.length > 0
-    );
-
-    const hasRealImageAttachments = apiMessages.some(
-      (m) => Array.isArray(m.attachments) && m.attachments.some(isImageFile)
-    );
-
-    if (hasRealImageAttachments && !supportsVision) {
-      replyStream("error", "当前模型不支持图片输入，请切换到支持视觉的模型");
-      return;
-    }
-
-    if (hasAnyAttachments) {
-      const attached = await buildAttachmentMessagesAsync(apiMessages);
-      apiMessages = attached.messages;
-      console.log(
-        `[attachment-pipeline] resolved ${attached.imageCount} images / ${attached.textAttachmentCount} text inlines / ${attached.binaryAttachmentCount} file guides`
-      );
-    }
-
-    const memoryIndex = storageService.getMemoryIndex(sessionWorkDir);
-    const projectRules = storageService.getProjectInstructions(sessionWorkDir);
-
-    const mentionUserMsg = apiMessages.slice().reverse().find((m) => m.role === "user");
-    const mentionText = extractTextContent(mentionUserMsg?.content);
-    let mentionBlock = "";
-    let mentionContext = null;
-    if (mentionText) {
-      mentionContext = buildMentionContext(mentionText, sessionWorkDir, allowedFolders, {
-        skills: availableSkills,
-        mcpServers: storageService
-          .getMcpServers(sessionWorkDir)
-          .filter((s) => s.source !== "project" || s.trusted === true),
-      });
-      if (mentionContext.block) {
-        mentionBlock = mentionContext.block;
-        console.log(
-          `[mention] resolved ${mentionContext.skills.length} skills / ${mentionContext.mcps.length} mcps / ${mentionContext.files.length} files / ${mentionContext.dirs.length} dirs` +
-            (mentionContext.skipped.length > 0 ? ` / skipped ${mentionContext.skipped.length}` : "")
-        );
-      }
-      if (Array.isArray(mentionContext.allowedTools) && mentionContext.allowedTools.length > 0) {
-        sessionToolContext.allowedToolNames = new Set([
-          ...mentionContext.allowedTools,
-          "todo_write",
-          "run_skill_script",
-        ]);
-        console.log(
-          `[skill-permission] 本轮工具白名单: ${[...sessionToolContext.allowedToolNames].join(", ")}`
-        );
-      }
-    }
-
-    const hooksEnabled = storageService.getConfig("hooks_enabled") !== "false";
-    const hooksTrusted = storageService.isProjectHooksTrusted(sessionWorkDir);
-    const hookOptions = {
-      workDir: sessionWorkDir,
-      sessionId,
-      projectTrusted: hooksTrusted,
-      enabled: hooksEnabled,
-    };
-    if (hooksEnabled) {
-      try {
-        const promptHook = await hookService.runHooks(
-          "UserPromptSubmit",
-          {
-            prompt: mentionText,
-            slash_command: slashCommandInfo?.command || null,
-            session_id: sessionId,
-            cwd: sessionWorkDir,
-          },
-          hookOptions
-        );
-        if (promptHook.blocked) {
-          replyStream("error", `Hook 阻断了本次请求：${promptHook.reason}`);
-          return;
-        }
-        if (promptHook.additionalContext) {
-          mentionBlock = mentionBlock
-            ? `${mentionBlock}\n\n【Hooks 注入的额外上下文】\n${promptHook.additionalContext}`
-            : `【Hooks 注入的额外上下文】\n${promptHook.additionalContext}`;
-        }
-      } catch (hookErr) {
-        console.warn("[hook] UserPromptSubmit 执行异常:", hookErr.message);
-      }
-    }
-
-    const [gitInfo, mcpTools] = await Promise.all([
-      getGitSnapshotAsync(sessionWorkDir),
-      enableTools ? mcpClientService.getActiveMcpTools(sessionWorkDir) : Promise.resolve([]),
-    ]);
-    sessionToolContext.mcpTools = mcpTools;
-
-    const getActiveToolPromptDocs = () =>
-      enableTools && (toolRegistry.size > 0 || mcpTools.length > 0)
-        ? toolRegistry.getToolPromptDocs(mcpTools, {
-            permissionMode: sessionToolContext.permissionMode,
-          })
-        : [];
-
-    const globalCustomSystemPrompt = storageService.getConfig("custom_system_prompt") || "";
-
-    let repoMapText = "";
-    if (sessionWorkDir && storageService.getConfig("repo_map_enabled") !== "false") {
-      try {
-        repoMapText = repoIndexService.buildRepoMap(sessionWorkDir, {
-          maxChars: Number(storageService.getConfig("repo_map_max_chars")) || 6000,
-        });
-      } catch (repoErr) {
-        console.warn(`[repo-map] 生成失败: ${repoErr.message}`);
-      }
-    }
-
-    let wikiInfo = null;
-    if (sessionWorkDir) {
-      try {
-        wikiInfo = repoWikiService.getRepoWiki(sessionWorkDir);
-      } catch (wikiErr) {
-        console.warn(`[repo-wiki] 读取失败: ${wikiErr.message}`);
-      }
-    }
-
-    const buildInstruction = ({ includeTodos = false } = {}) =>
-      buildSystemContext({
-        workDir: sessionWorkDir,
-        matchedWorkspace,
-        skills: availableSkills,
-        memories,
-        memoryIndex,
-        projectRules,
-        repoMap: repoMapText,
-        repoWiki: wikiInfo?.exists ? String(wikiInfo.content || "").slice(0, 3500) : "",
-        repoWikiPath: wikiInfo?.path || "",
-        todos: includeTodos ? initialTodos : [],
-        toolDocs: getActiveToolPromptDocs(),
-        model: `${provider}/${apiModelId}`,
-        enableTools,
-        permissionMode: sessionToolContext.permissionMode,
-        customSystemPrompt: globalCustomSystemPrompt,
-        gitInfo,
-        includeTodosInSystem: includeTodos,
-        includeGitInSystem: false,
-      });
-
-    const buildInstructionText = (built) =>
-      mentionBlock ? `${built.text}\n\n${mentionBlock}` : built.text;
-
-    const composeSystemInstruction = (built) => {
-      const base = buildInstructionText(built);
-      return compactionSummary ? `${base}\n\n${compactionSummary}` : base;
-    };
-
-    const initialContext = buildInstruction({ includeTodos: false });
-    let systemInstruction = composeSystemInstruction(initialContext);
-    console.log(
-      `[context] ${initialContext.sections.map((section) => `${section.name}=${section.chars}`).join(" ")}`
-    );
-
-    let currentSkillsTokens =
-      initialContext.sections.find((s) => s.name === "skills")?.tokens || 0;
-    if (mentionContext && Array.isArray(mentionContext.skills) && mentionContext.skills.length > 0) {
-      currentSkillsTokens += estimateTokens(mentionBlock);
-    }
-
-    const systemIndex = apiMessages.findIndex((m) => m.role === "system");
-    const baseSystemContent = systemIndex >= 0 ? apiMessages[systemIndex].content || "" : "";
-    if (systemIndex >= 0) {
-      apiMessages[systemIndex].content = `${baseSystemContent}\n\n${systemInstruction}`;
-    } else {
-      apiMessages.unshift({ role: "system", content: systemInstruction });
-    }
-
-    // 易变的 Git 快照只附着到本轮请求末尾最后一条 user 消息，避免破环跨轮次 System 前缀缓存
-    const gitReminder = buildGitReminder(gitInfo);
-    if (gitReminder) {
-      appendReminderToLastUserMessage(apiMessages, gitReminder);
-    }
-
-    const refreshSystemInstruction = ({ includeTodos = false } = {}) => {
-      const rebuilt = buildInstruction({ includeTodos });
-      systemInstruction = composeSystemInstruction(rebuilt);
-      currentSkillsTokens =
-        rebuilt.sections.find((s) => s.name === "skills")?.tokens || 0;
-      if (mentionContext && Array.isArray(mentionContext.skills) && mentionContext.skills.length > 0) {
-        currentSkillsTokens += estimateTokens(mentionBlock);
-      }
-      const idx = apiMessages.findIndex((m) => m.role === "system");
-      if (idx >= 0) {
-        apiMessages[idx].content = baseSystemContent
-          ? `${baseSystemContent}\n\n${systemInstruction}`
-          : systemInstruction;
-      }
-    };
-
-    const getActiveToolDefs = () =>
-      enableTools
-        ? toolRegistry.getToolDefinitions(
-            mcpTools,
-            sessionToolContext.allowedToolNames || null,
-            {
-              permissionMode: sessionToolContext.permissionMode,
-            }
-          )
-        : [];
-
-    const toolDefsTokenEstimate = (() => {
-      try {
-        const defs = getActiveToolDefs();
-        return defs.length > 0 ? estimateTokens(JSON.stringify(defs)) : 0;
-      } catch {
-        return 0;
-      }
-    })();
 
     const maybeCompact = async (reason = "preflight", options = {}) => {
       if (!compactCfg.enabled) return false;
@@ -870,7 +546,7 @@ async function runAgentTurn(payload = {}, options = {}) {
       const nonSystemMessages = apiMessages.filter((message) => message.role !== "system");
       let tokens =
         estimateMessagesTokens(nonSystemMessages) +
-        estimateTokens(systemInstruction) +
+        estimateTokens(getSystemInstruction()) +
         toolDefsTokenEstimate;
       if (lastProviderUsage?.prompt_tokens) {
         tokens = Math.max(tokens, Number(lastProviderUsage.prompt_tokens) || 0);
@@ -879,14 +555,19 @@ async function runAgentTurn(payload = {}, options = {}) {
       const force = reason === "overflow" || options.force === true;
       if (!force && !shouldMicroCompact(tokens, thresholds)) return false;
 
-      const micro = microCompact(apiMessages, compactCfg);
+      const urgentMicro = force || tokens >= thresholds.threshold * 0.96;
+      const micro = microCompact(apiMessages, {
+        ...compactCfg,
+        batchWatermark: true,
+        urgent: urgentMicro,
+      });
       if (micro.cleared > 0) {
         apiMessages = micro.messages;
         lastProviderUsage = null;
         console.log(`[microcompact] saved=${micro.saved} cleared=${micro.cleared}`);
         tokens =
           estimateMessagesTokens(apiMessages.filter((message) => message.role !== "system")) +
-          estimateTokens(systemInstruction) +
+          estimateTokens(getSystemInstruction()) +
           toolDefsTokenEstimate;
       }
 
@@ -923,7 +604,7 @@ async function runAgentTurn(payload = {}, options = {}) {
         compactionSummary = todosSection
           ? `${result.summaryBlock}\n\n${todosSection}`
           : result.summaryBlock;
-        refreshSystemInstruction({ includeTodos: false });
+        refreshSystemInstruction(apiMessages, { includeTodos: false, compactionSummary });
         lastProviderUsage = null;
         compactionStats.count += 1;
         compactionStats.beforeTokens += result.before;
@@ -969,8 +650,8 @@ async function runAgentTurn(payload = {}, options = {}) {
       calculateContextMetrics({
         messages: apiMessages,
         tools: getActiveToolDefs(),
-        systemPrompt: systemInstruction,
-        skillsTokens: currentSkillsTokens,
+        systemPrompt: getSystemInstruction(),
+        skillsTokens: getCurrentSkillsTokens(),
         maxTokensLimit: contextLimit,
       });
 
@@ -1016,6 +697,7 @@ async function runAgentTurn(payload = {}, options = {}) {
 
     let continuationCount = 0;
     let emptyRoundRetry = 0;
+    let lastTurnResult = null;
     const MAX_CONTINUATIONS = 4;
 
     while (toolRound < MAX_TOOL_ROUNDS) {
@@ -1052,6 +734,7 @@ async function runAgentTurn(payload = {}, options = {}) {
       })();
 
       recordUsage(result.usage);
+      lastTurnResult = result;
 
       if (sessionAbort.cancelled) break;
 
@@ -1133,17 +816,73 @@ async function runAgentTurn(payload = {}, options = {}) {
         content:
           "请基于以上工具执行获取到的全部信息、代码与事实，直接给出条理清晰、完整详尽的最终总结分析与答复（不要再调用工具，精简思考过程直接输出正文）。",
       });
-      await maybeCompact("preflight");
-      let finalResult;
-      try {
-        finalResult = await doStreamRequest(apiMessages, { reasoning_effort: "low" });
-      } catch (err) {
-        if (!isContextOverflowError(err.message)) throw err;
-        const compacted = await maybeCompact("overflow", { force: true });
-        if (!compacted) throw err;
-        finalResult = await doStreamRequest(apiMessages, { reasoning_effort: "low" });
+
+      // 保持与主循环一致的 tools 定义以命中前缀缓存，并为兜底总结轮补齐续写保护
+      const summaryRequestBody = enableTools
+        ? { tools: getActiveToolDefs(), tool_choice: "auto" }
+        : {};
+      let summaryContinuations = 0;
+      let summaryEmptyRetry = 0;
+
+      for (let summaryStep = 0; summaryStep <= MAX_CONTINUATIONS; summaryStep++) {
+        if (sessionAbort.cancelled) break;
+        await maybeCompact("preflight");
+        let finalResult;
+        try {
+          finalResult = await doStreamRequest(apiMessages, summaryRequestBody);
+        } catch (err) {
+          if (!isContextOverflowError(err.message)) throw err;
+          const compacted = await maybeCompact("overflow", { force: true });
+          if (!compacted) throw err;
+          finalResult = await doStreamRequest(apiMessages, summaryRequestBody);
+        }
+        if (!finalResult) break;
+        recordUsage(finalResult.usage);
+        lastTurnResult = finalResult;
+        if (sessionAbort.cancelled) break;
+
+        if (Array.isArray(finalResult.toolCalls) && finalResult.toolCalls.length > 0) {
+          if (summaryContinuations >= MAX_CONTINUATIONS) break;
+          summaryContinuations++;
+          apiMessages.push(buildAssistantReplayMessage(finalResult));
+          for (const tc of finalResult.toolCalls) {
+            apiMessages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: "当前已进入最终总结阶段，禁止再调用任何工具，请直接输出最终文本总结。",
+            });
+          }
+          continue;
+        }
+
+        const decision = evaluateNoToolResponse({
+          result: finalResult,
+          steerQueue: [],
+          initialTodos: [],
+          permissionMode: sessionToolContext.permissionMode,
+          planModeValue: PERMISSION_MODES.PLAN,
+          fullGeneratedText,
+          toolRound,
+          emptyRoundRetry: summaryEmptyRetry,
+          continuationCount: summaryContinuations,
+          maxContinuations: MAX_CONTINUATIONS,
+          buildAssistantReplayMessage,
+        });
+
+        if (decision.action === "retry_empty") {
+          summaryEmptyRetry++;
+          console.warn(decision.log);
+          await new Promise((r) => setTimeout(r, 600));
+          continue;
+        }
+        if (decision.action === "continue") {
+          summaryContinuations++;
+          console.log(`[summary] ${decision.log}`);
+          apiMessages.push(...decision.messagesToAppend);
+          continue;
+        }
+        break;
       }
-      if (finalResult) recordUsage(finalResult.usage);
     }
 
     if (!sessionAbort.cancelled && initialTodos.some((t) => t.status === "in_progress")) {
@@ -1177,7 +916,11 @@ async function runAgentTurn(payload = {}, options = {}) {
     replyStream("metrics", withUsageMetrics(finalMetrics));
 
     const finalVisibleForCheck = fullGeneratedText;
-    const outputTruncated = hasUnclosedCodeFence(finalVisibleForCheck);
+    const outputTruncated = Boolean(
+      (!sessionAbort.cancelled &&
+        (lastTurnResult?.abruptlyClosed || lastTurnResult?.hitLengthLimit)) ||
+        hasUnclosedCodeFence(finalVisibleForCheck)
+    );
     replyStream("end", {
       content: fullGeneratedText,
       reasoning: fullGeneratedReasoning,
@@ -1202,6 +945,13 @@ async function runAgentTurn(payload = {}, options = {}) {
 
     try {
       const currentSession = storageService.getSessions().find((s) => s.id === sessionId);
+      const elapsedMs = Date.now() - runStartedAt;
+      if (!sessionAbort.cancelled && (toolRound > 0 || elapsedMs >= 15000)) {
+        notifyDesktopIfBackground({
+          title: outputTruncated ? "OMCX 任务输出可能被截断" : "OMCX 任务已完成",
+          body: `${currentSession?.title || "Agent 会话"} · 用时 ${formatRunDuration(elapsedMs)}${toolRound > 0 ? ` · ${toolRound} 轮工具` : ""}`,
+        });
+      }
       const shouldGenTitle =
         currentSession &&
         currentSession.title_source !== "custom" &&
@@ -1236,6 +986,10 @@ async function runAgentTurn(payload = {}, options = {}) {
       } catch {}
     } else {
       console.error(`[chat-stream error ${sessionId}]`, err);
+      notifyDesktopIfBackground({
+        title: "OMCX 任务执行中断",
+        body: err?.message || "请求发生异常",
+      });
       replyStream("error", err.message);
     }
   } finally {

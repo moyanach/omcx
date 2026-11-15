@@ -1,0 +1,121 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const path = require("node:path");
+const Module = require("node:module");
+const esbuild = require("esbuild");
+
+function loadChatStoreInTestEnv() {
+  // 提供极简 window/localStorage 垫片供 Zustand Store 在 Node 下运行
+  const memStore = new Map();
+  global.window = {
+    localStorage: {
+      getItem: (k) => (memStore.has(k) ? memStore.get(k) : null),
+      setItem: (k, v) => memStore.set(k, String(v)),
+      removeItem: (k) => memStore.delete(k),
+    },
+    electronAPI: {
+      dbAddMessage: async () => ({ success: true }),
+      dbGetMessages: async () => [],
+      dbGetSessionOutputs: async () => [],
+      dbAddSession: async () => ({ success: true }),
+      dbDeleteMessagesAfter: async () => ({ success: true }),
+    },
+  };
+
+  const entryPath = path.resolve(__dirname, "../src/stores/chatStore.ts");
+  const built = esbuild.buildSync({
+    entryPoints: [entryPath],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    write: false,
+    alias: {
+      "@": path.resolve(__dirname, "../src"),
+    },
+    external: ["zustand", "zustand/*"],
+  });
+
+  const code = built.outputFiles[0].text;
+  const mod = new Module(entryPath);
+  mod.filename = entryPath;
+  mod.paths = Module._nodeModulePaths(path.dirname(entryPath));
+  mod._compile(code, entryPath);
+  return mod.exports.useChatStore;
+}
+
+test("chatStore sessionSlice 消息缓存淘汰上限 (MAX=3) 且保护活跃与生成中会话", async () => {
+  const useChatStore = loadChatStoreInTestEnv();
+
+  const sessions = [
+    { id: "s1", title: "S1", updatedAt: 100 },
+    { id: "s2", title: "S2", updatedAt: 200 },
+    { id: "s3", title: "S3", updatedAt: 300 },
+    { id: "s4", title: "S4", updatedAt: 400 },
+    { id: "s5", title: "S5", updatedAt: 500 },
+  ];
+
+  useChatStore.setState({
+    sessions,
+    activeSessionId: "s1",
+    generatingBySession: { s2: true },
+    messages: {
+      s1: [{ id: "m1", role: "user", content: "1", createdAt: 1 }],
+      s2: [{ id: "m2", role: "user", content: "2", createdAt: 2 }],
+      s3: [{ id: "m3", role: "user", content: "3", createdAt: 3 }],
+      s4: [{ id: "m4", role: "user", content: "4", createdAt: 4 }],
+    },
+  });
+
+  // 切换到 s5 触发 LRU 淘汰：总数 5 个会话，保留 s5(新活跃)、s1(旧? 不，s5 成为活跃后 s1 不再是 activeSessionId)、s2(正在生成中)、s4(较新)
+  await useChatStore.getState().setActiveSession("s5");
+  const cacheKeys = Object.keys(useChatStore.getState().messages);
+
+  assert.equal(cacheKeys.length, 3);
+  assert.equal(cacheKeys.includes("s5"), true, "新活跃会话必须保留");
+  assert.equal(cacheKeys.includes("s2"), true, "正在生成的后台会话必须保留");
+  assert.equal(cacheKeys.includes("s1"), false, "最老的闲置会话 s1 应被淘汰");
+});
+
+test("chatStore 队列调度与上下文指标按会话隔离不串台", () => {
+  const useChatStore = loadChatStoreInTestEnv();
+
+  useChatStore.setState({
+    activeSessionId: "sess_A",
+    messages: {
+      sess_A: [{ id: "msg_a", role: "assistant", content: "", createdAt: 1 }],
+      sess_B: [{ id: "msg_b", role: "assistant", content: "", createdAt: 1 }],
+    },
+    promptQueueBySession: {},
+    contextMetricsBySession: {},
+    contextMetrics: null,
+  });
+
+  // 增量拼接仅作用于对应会话与消息 ID
+  useChatStore.getState().appendMessageDelta("sess_A", "msg_a", "hello ");
+  useChatStore.getState().appendMessageDelta("sess_A", "msg_a", "world");
+  assert.equal(useChatStore.getState().messages.sess_A[0].content, "hello world");
+  assert.equal(useChatStore.getState().messages.sess_B[0].content, "");
+
+  // 排队插队顺序
+  useChatStore.getState().enqueuePrompt("sess_A", {
+    id: "p1",
+    sessionId: "sess_A",
+    content: "first",
+    createdAt: 1,
+  });
+  useChatStore.getState().enqueuePrompt("sess_A", {
+    id: "p2",
+    sessionId: "sess_A",
+    content: "second",
+    createdAt: 2,
+  });
+  useChatStore.getState().moveQueuedPromptToTop("sess_A", "p2");
+  const firstOut = useChatStore.getState().dequeuePrompt("sess_A");
+  assert.equal(firstOut.id, "p2");
+
+  // 上下文指标隔离：后台会话 sess_B 的指标不应覆盖当前活跃 sess_A 的 contextMetrics
+  useChatStore.getState().setContextMetrics({ totalTokens: 1000, maxTokens: 128000 }, "sess_A");
+  useChatStore.getState().setContextMetrics({ totalTokens: 9999, maxTokens: 128000 }, "sess_B");
+  assert.equal(useChatStore.getState().contextMetrics.totalTokens, 1000);
+  assert.equal(useChatStore.getState().contextMetricsBySession.sess_B.totalTokens, 9999);
+});

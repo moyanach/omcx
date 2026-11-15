@@ -116,6 +116,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // ─── 会话与消息管理 ────────────────────────────────
   dbGetSessions: () => ipcRenderer.invoke("db-get-sessions"),
+  dbSearchSessions: (query, limit = 40) =>
+    ipcRenderer.invoke("db-search-sessions", { query, limit }),
   dbAddSession: (session) => ipcRenderer.invoke("db-add-session", session),
   dbUpdateSessionTitle: (id, title) => ipcRenderer.invoke("db-update-session-title", id, title),
   dbDeleteSession: (id) => ipcRenderer.invoke("db-delete-session", id),
@@ -275,6 +277,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("workspace-list-dir", { workDir, dirPath }),
   readWorkspaceFile: (workDir, filePath, maxChars) =>
     ipcRenderer.invoke("workspace-read-file", { workDir, filePath, maxChars }),
+  revertFileModification: (payload) =>
+    ipcRenderer.invoke("revert-file-modification", payload),
   runTerminalCommand: (params, onStream) => {
     const cmdId = params?.cmdId || `term_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const channel = `terminal-stream-${cmdId}`;

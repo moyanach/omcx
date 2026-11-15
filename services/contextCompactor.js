@@ -6,6 +6,8 @@ const DEFAULTS = {
   keepTokens: 20000,
   microRatio: 0.9,
   keepRecentToolResults: 5,
+  microBatchMinCount: 4,
+  microBatchMinSavedChars: 12000,
   toolResultMaxChars: 8000,
   summaryMaxTokens: 4096,
   maxConsecutiveFailures: 3,
@@ -116,19 +118,42 @@ function microCompact(messages, cfg = {}) {
   });
   const keepSet = new Set(toolIndexes.slice(-keepRecent));
 
-  let saved = 0;
-  let cleared = 0;
-  const next = messages.map((message, index) => {
-    if (message.role !== "tool" || keepSet.has(index)) return message;
-    const original = typeof message.content === "string" ? message.content : JSON.stringify(message.content || "");
-    if (!original || original.startsWith("[旧工具输出已清理")) return message;
+  const candidates = [];
+  let potentialSaved = 0;
+  messages.forEach((message, index) => {
+    if (message.role !== "tool" || keepSet.has(index)) return;
+    const original =
+      typeof message.content === "string" ? message.content : JSON.stringify(message.content || "");
+    if (!original || original.startsWith("[旧工具输出已清理")) return;
     const replacement = `[旧工具输出已清理，原始 ${original.length} 字符]`;
-    saved += Math.max(0, original.length - replacement.length);
-    cleared += 1;
-    return { ...message, content: replacement };
+    const delta = Math.max(0, original.length - replacement.length);
+    candidates.push({ index, replacement, delta });
+    potentialSaved += delta;
   });
 
-  return { messages: next, saved, cleared };
+  if (candidates.length === 0) {
+    return { messages, saved: 0, cleared: 0, skippedForCache: false };
+  }
+
+  // 滞后批量水位线策略：攒够一批或达到显著回收收益/逼近主压缩阈值再一次性清理，
+  // 避免刚过 microThreshold 后每新增 1 轮就向前改写 1 条中间消息导致 Prompt Cache 逐轮雪崩。
+  if (cfg.batchWatermark) {
+    const minCount = Number(cfg.microBatchMinCount) || DEFAULTS.microBatchMinCount;
+    const minSavedChars =
+      Number(cfg.microBatchMinSavedChars) || DEFAULTS.microBatchMinSavedChars;
+    const urgent = Boolean(cfg.urgent);
+    if (!urgent && candidates.length < minCount && potentialSaved < minSavedChars) {
+      return { messages, saved: 0, cleared: 0, skippedForCache: true };
+    }
+  }
+
+  const replaceMap = new Map(candidates.map((item) => [item.index, item.replacement]));
+  const next = messages.map((message, index) => {
+    const replacement = replaceMap.get(index);
+    return replacement ? { ...message, content: replacement } : message;
+  });
+
+  return { messages: next, saved: potentialSaved, cleared: candidates.length, skippedForCache: false };
 }
 
 function truncateToolResult(content, maxChars = DEFAULTS.toolResultMaxChars) {

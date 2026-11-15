@@ -381,6 +381,7 @@ async function streamAnthropicMessage({
   let usage = null;
   let finishReason = null;
   let hitLengthLimit = false;
+  let receivedMessageStop = false;
   let receivedBytes = 0;
   let eventName = "";
   let dataLines = [];
@@ -476,7 +477,10 @@ async function streamAnthropicMessage({
       const message = json.error?.message || "Anthropic 流式响应返回错误";
       throw new Error(message);
     }
-    // message_stop / ping 无需额外处理
+    if (type === "message_stop") {
+      receivedMessageStop = true;
+    }
+    // ping 无需额外处理
   };
 
   // 流读取空闲超时：Anthropic 通道此前没有 watchdog，上游静默挂起会让 Agent 永久卡住
@@ -549,6 +553,9 @@ async function streamAnthropicMessage({
     thinkingBlocksByIndex.clear();
   }
 
+  const abruptlyClosed =
+    !signal?.aborted && !receivedMessageStop && !finishReason && !hitLengthLimit;
+
   if (!finishReason && toolCalls.length > 0) finishReason = "tool_calls";
 
   // 按产出顺序输出 signature 列表，供下一轮请求原样回传 thinking block
@@ -566,6 +573,7 @@ async function streamAnthropicMessage({
     toolCalls,
     usage,
     hitLengthLimit,
+    abruptlyClosed,
     finishReason,
     receivedBytes,
   };

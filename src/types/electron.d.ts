@@ -21,6 +21,18 @@ export interface ElectronAPI {
 
   // ─── 会话与消息管理 ────────────────────────────────
   dbGetSessions: () => Promise<any[]>;
+  dbSearchSessions: (
+    query: string,
+    limit?: number
+  ) => Promise<
+    Array<{
+      sessionId: string;
+      title: string;
+      updatedAt?: number;
+      matchType: "title" | "message";
+      matchSnippet?: string;
+    }>
+  >;
   dbAddSession: (session: any) => Promise<any>;
   dbUpdateSessionTitle: (id: string, title: string) => Promise<any>;
   dbDeleteSession: (id: string) => Promise<any>;
@@ -130,6 +142,16 @@ export interface ElectronAPI {
   browserAutoClose: () => Promise<any>;
   listWorkspaceDir: (workDir: string, dirPath?: string) => Promise<any>;
   readWorkspaceFile: (workDir: string, filePath: string, maxChars?: number) => Promise<any>;
+  revertFileModification: (payload: {
+    workDir?: string | null;
+    filePath: string;
+    tool: "edit_file" | "write_file";
+    oldText?: string;
+    newText?: string;
+    isNewFile?: boolean;
+    noSnapshot?: boolean;
+    replaceAll?: boolean;
+  }) => Promise<{ success: boolean; action?: string; path?: string; error?: string }>;
   runTerminalCommand: (params: any, onStream?: (payload: any) => void) => Promise<any>;
   killTerminalCommand: (cmdId: string) => Promise<any>;
 

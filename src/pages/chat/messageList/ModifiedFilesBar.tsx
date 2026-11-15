@@ -9,8 +9,12 @@ import {
   FileDiff,
   Pin,
   X,
+  ExternalLink,
+  RotateCcw,
+  Check,
 } from 'lucide-react';
 import { SplitDiffViewer } from '@/components/common/CodeBlock';
+import { useChatStore } from '@/stores/chatStore';
 import { ToolStatusEvent } from './types';
 import { getBaseName } from './ToolSteps';
 
@@ -25,6 +29,7 @@ interface FileModificationItem {
   actionLabel: '修改' | '新建' | '覆写' | '写入';
   isNewFile: boolean;
   noSnapshot: boolean;
+  replaceAll: boolean;
   oldText: string;
   newText: string;
   addedLines: number;
@@ -110,6 +115,7 @@ function extractFileModifications(events: ToolStatusEvent[]): FileModificationIt
       actionLabel,
       isNewFile,
       noSnapshot,
+      replaceAll: Boolean(args.replace_all),
       oldText,
       newText,
       addedLines,
@@ -199,9 +205,20 @@ function computeAnchoredPopoverCoords(anchorEl: HTMLElement): PopoverCoords | nu
 export const ModifiedFilesBar: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) => {
   const modItems = useMemo(() => extractFileModifications(events), [events]);
 
+  const activeSessionWorkDir = useChatStore((s) => {
+    const sess = s.sessions.find((item) => item.id === s.activeSessionId);
+    return sess?.workDir || null;
+  });
+  const openFileInWorkbench = useChatStore((s) => s.openFileInWorkbench);
+  const refreshGitStatus = useChatStore((s) => s.refreshGitStatus);
+
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isPinned, setIsPinned] = useState(false);
   const [coords, setCoords] = useState<PopoverCoords | null>(null);
+  const [confirmRevertId, setConfirmRevertId] = useState<string | null>(null);
+  const [revertingId, setRevertingId] = useState<string | null>(null);
+  const [revertedIds, setRevertedIds] = useState<Record<string, boolean>>({});
+  const [revertNotice, setRevertNotice] = useState<{ id: string; ok: boolean; msg: string } | null>(null);
 
   const anchorRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const popoverRef = useRef<HTMLDivElement | null>(null);
@@ -342,6 +359,61 @@ export const ModifiedFilesBar: React.FC<{ events: ToolStatusEvent[] }> = ({ even
     }
   };
 
+  useEffect(() => {
+    setConfirmRevertId(null);
+    setRevertNotice((prev) => (prev && prev.id === activeId ? prev : null));
+  }, [activeId]);
+
+  const handleOpenInWorkbench = (item: FileModificationItem) => {
+    if (!item.filePath) return;
+    openFileInWorkbench(item.filePath, { viewMode: 'code' });
+    setIsPinned(false);
+    setActiveId(null);
+  };
+
+  const handleRevertItem = async (item: FileModificationItem) => {
+    if (!window.electronAPI?.revertFileModification || !item.filePath) return;
+    setRevertingId(item.id);
+    try {
+      const res = await window.electronAPI.revertFileModification({
+        workDir: activeSessionWorkDir,
+        filePath: item.filePath,
+        tool: item.tool,
+        oldText: item.oldText,
+        newText: item.newText,
+        isNewFile: item.isNewFile,
+        noSnapshot: item.noSnapshot,
+        replaceAll: item.replaceAll,
+      });
+      if (res?.success) {
+        setRevertedIds((prev) => ({ ...prev, [item.id]: true }));
+        setConfirmRevertId(null);
+        setRevertNotice({
+          id: item.id,
+          ok: true,
+          msg: item.isNewFile ? '已删除新建文件' : '已还原本次修改',
+        });
+        void refreshGitStatus(activeSessionWorkDir);
+      } else {
+        setConfirmRevertId(null);
+        setRevertNotice({
+          id: item.id,
+          ok: false,
+          msg: res?.error || '还原失败',
+        });
+      }
+    } catch (err: any) {
+      setConfirmRevertId(null);
+      setRevertNotice({
+        id: item.id,
+        ok: false,
+        msg: err?.message || '还原异常',
+      });
+    } finally {
+      setRevertingId(null);
+    }
+  };
+
   if (modItems.length === 0) return null;
 
   const activeItem = activeId ? modItems.find((m) => m.id === activeId) || null : null;
@@ -419,6 +491,12 @@ export const ModifiedFilesBar: React.FC<{ events: ToolStatusEvent[] }> = ({ even
                     )}
                   </span>
                 )}
+
+                {revertedIds[item.id] && (
+                  <span className='text-[9.5px] px-1 rounded bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-muted)] flex-shrink-0'>
+                    已还原
+                  </span>
+                )}
               </button>
             );
           })}
@@ -459,26 +537,104 @@ export const ModifiedFilesBar: React.FC<{ events: ToolStatusEvent[] }> = ({ even
             />
 
             <div className='rounded-xl overflow-hidden'>
-              {/* 弹出层状态控制顶栏（当固定或需要快捷关闭时） */}
-              {isPinned && (
-                <div className='px-3 py-1 bg-[var(--ui-code-header-bg)] border-b border-[color:var(--ui-divider-hairline)] flex items-center justify-between text-[10.5px] text-[var(--ui-accent-blue)] select-none'>
-                  <span className='flex items-center gap-1.5'>
-                    <Pin size={11} />
-                    <span>对比浮层已固定（按 Esc 或点击外部关闭）</span>
-                  </span>
-                  <button
-                    type='button'
-                    onClick={() => {
-                      setIsPinned(false);
-                      setActiveId(null);
-                    }}
-                    className='p-0.5 rounded hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] transition-colors'
-                    title='关闭'
-                  >
-                    <X size={12} />
-                  </button>
+              {/* 弹出层操作工具栏：工作台跳转 / 单次修改还原 / 固定关闭 */}
+              <div className='px-3 py-1.5 bg-[var(--ui-code-header-bg)] border-b border-[color:var(--ui-divider-hairline)] flex items-center justify-between gap-2 text-[10.5px] select-none'>
+                <div className='flex items-center gap-1.5 min-w-0'>
+                  {isPinned ? (
+                    <span className='flex items-center gap-1.5 text-[var(--ui-accent-blue)] truncate'>
+                      <Pin size={11} className='flex-shrink-0' />
+                      <span className='truncate'>对比浮层已固定（Esc 关闭）</span>
+                    </span>
+                  ) : (
+                    <span className='font-mono text-[var(--ui-text-muted)] truncate'>
+                      {activeItem.filePath || activeItem.fileName}
+                    </span>
+                  )}
                 </div>
-              )}
+
+                <div className='flex items-center gap-1.5 flex-shrink-0'>
+                  {revertNotice && revertNotice.id === activeItem.id && (
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded ${
+                        revertNotice.ok
+                          ? 'bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)]'
+                          : 'bg-[var(--ui-accent-rose-soft)] text-[var(--ui-accent-rose)]'
+                      }`}
+                    >
+                      {revertNotice.msg}
+                    </span>
+                  )}
+
+                  {activeItem.filePath && (
+                    <button
+                      type='button'
+                      onClick={() => handleOpenInWorkbench(activeItem)}
+                      className='inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[color:var(--ui-border-hairline)] bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] transition-colors cursor-pointer'
+                      title='在右侧工作台打开该文件'
+                    >
+                      <ExternalLink size={10.5} />
+                      <span>在工作台打开</span>
+                    </button>
+                  )}
+
+                  {!activeItem.isError &&
+                    activeItem.status === 'done' &&
+                    (!activeItem.noSnapshot || activeItem.isNewFile) &&
+                    !revertedIds[activeItem.id] && (
+                      confirmRevertId === activeItem.id ? (
+                        <div className='inline-flex items-center gap-1'>
+                          <button
+                            type='button'
+                            disabled={revertingId === activeItem.id}
+                            onClick={() => void handleRevertItem(activeItem)}
+                            className='inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[var(--ui-accent-rose-soft)] border border-[color:var(--ui-accent-rose-border)] text-[var(--ui-accent-rose)] hover:opacity-90 font-medium transition-opacity cursor-pointer disabled:opacity-50'
+                          >
+                            {revertingId === activeItem.id ? (
+                              <Loader2 size={10.5} className='animate-spin' />
+                            ) : (
+                              <Check size={10.5} />
+                            )}
+                            <span>确认还原?</span>
+                          </button>
+                          <button
+                            type='button'
+                            onClick={() => setConfirmRevertId(null)}
+                            className='px-1.5 py-0.5 rounded text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] cursor-pointer'
+                          >
+                            取消
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type='button'
+                          onClick={() => {
+                            setIsPinned(true);
+                            setConfirmRevertId(activeItem.id);
+                          }}
+                          className='inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[color:var(--ui-border-hairline)] bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-accent-rose-soft)] hover:border-[color:var(--ui-accent-rose-border)] text-[var(--ui-text-secondary)] hover:text-[var(--ui-accent-rose)] transition-colors cursor-pointer'
+                          title='精确还原本次工具修改'
+                        >
+                          <RotateCcw size={10.5} />
+                          <span>还原此修改</span>
+                        </button>
+                      )
+                    )}
+
+                  {isPinned && (
+                    <button
+                      type='button'
+                      onClick={() => {
+                        setIsPinned(false);
+                        setActiveId(null);
+                      }}
+                      className='p-0.5 rounded hover:bg-[var(--ui-chip-hover-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] transition-colors cursor-pointer'
+                      title='关闭'
+                    >
+                      <X size={12} />
+                    </button>
+                  )}
+                </div>
+              </div>
 
               {activeItem.isError ? (
                 <div className='p-3.5 text-xs text-[var(--ui-accent-rose)] font-mono bg-[var(--ui-code-bg)]'>

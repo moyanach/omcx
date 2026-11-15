@@ -120,6 +120,7 @@ const {
   getModels,
   addModel,
   deleteModel,
+  migratePlaintextSecrets,
   getWorkspaces,
   saveWorkspace,
   deleteWorkspace,
@@ -159,6 +160,7 @@ const {
   addMessage,
   persistMessageSync,
   deleteMessagesAfter,
+  searchSessionsAsync,
   getSessionOutputs,
   getSessionOutputsAsync,
   addSessionOutput,
@@ -224,6 +226,11 @@ function initStorage() {
 
   dbEngine.initWorkerEngine();
   dbEngine.loadInitialSnapshot();
+  try {
+    migratePlaintextSecrets();
+  } catch (err) {
+    console.warn("[storageService] 启动迁移密钥加密失败（已忽略）:", err.message);
+  }
 
   if (!getConfig("default_model")) {
     setConfig("default_model", "gpt-4o");
@@ -273,6 +280,7 @@ module.exports = {
   flushPendingWritesSync: dbEngine.flushPendingWritesSync,
   checkpointWalSync: dbEngine.checkpointWalSync,
   deleteMessagesAfter,
+  searchSessionsAsync,
   saveAttachmentBuffer,
   getSessionAttachmentsDir,
   ensureDir,

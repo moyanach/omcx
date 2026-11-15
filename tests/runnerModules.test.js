@@ -2,7 +2,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { evaluateNoToolResponse } = require("../main/runner/continuationPolicy");
 const { isParallelSafeCall } = require("../main/runner/toolExecutor");
-const { isTransientSocketError, hasValidToolCalls } = require("../main/runner/streamTransport");
+const {
+  isTransientSocketError,
+  hasValidToolCalls,
+  detectAbruptClose,
+} = require("../main/runner/streamTransport");
 
 const dummyBuildReplay = (result, { content } = {}) => ({
   role: "assistant",
@@ -184,4 +188,161 @@ test("subagentService 显式 is_lite 选模、工具白名单与动态角色权�
   };
   const fallback = selectSubagentModel(parentModel, "lite", noLiteStorage);
   assert.equal(fallback, parentModel);
+});
+
+test("streamTransport.detectAbruptClose 与 continuationPolicy 模式 E 断流续写正确工作", () => {
+  assert.equal(
+    detectAbruptClose({ cancelled: false, streamFinished: true, finishReason: "stop" }),
+    false
+  );
+  assert.equal(
+    detectAbruptClose({ cancelled: false, streamFinished: false, finishReason: "stop" }),
+    false
+  );
+  assert.equal(
+    detectAbruptClose({ cancelled: false, streamFinished: false, finishReason: null }),
+    true
+  );
+  assert.equal(
+    detectAbruptClose({
+      cancelled: false,
+      streamFinished: false,
+      finishReason: null,
+      socketClosedAbruptly: true,
+    }),
+    true
+  );
+  assert.equal(
+    detectAbruptClose({
+      cancelled: true,
+      streamFinished: false,
+      finishReason: null,
+      socketClosedAbruptly: true,
+    }),
+    false
+  );
+
+  const modeE = evaluateNoToolResponse({
+    result: {
+      content: "第一部分分析：content 内含 `",
+      reasoning: "",
+      toolCalls: [],
+      hitLengthLimit: false,
+      abruptlyClosed: true,
+    },
+    steerQueue: [],
+    initialTodos: [],
+    permissionMode: "auto-sandbox",
+    planModeValue: "plan",
+    fullGeneratedText: "第一部分分析：content 内含 `",
+    toolRound: 2,
+    emptyRoundRetry: 0,
+    continuationCount: 0,
+    maxContinuations: 4,
+    buildAssistantReplayMessage: dummyBuildReplay,
+  });
+  assert.equal(modeE.action, "continue");
+  assert.equal(modeE.mode, "E");
+});
+
+test("subagentService SSE 流式解析、JSON 兼容与空闲超时看门狗正确工作", async () => {
+  const { readSubagentOpenAIResponse, isTransientSubagentError } = require("../services/subagentService");
+
+  // 1) SSE 分片拼接与 tool_calls 解析
+  const sseChunks = [
+    'data: {"choices":[{"delta":{"reasoning_content":"思考"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"你好，"}}]}\n',
+    'data: {"choices":[{"delta":{"content":"世界","tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\\"path\\":"}}]}}]}\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"a.js\\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}\n',
+    "data: [DONE]\n",
+  ];
+  const encoder = new TextEncoder();
+  let idx = 0;
+  const sseResponse = {
+    headers: { get: () => "text/event-stream" },
+    body: {
+      getReader: () => ({
+        read: async () =>
+          idx < sseChunks.length
+            ? { done: false, value: encoder.encode(sseChunks[idx++]) }
+            : { done: true },
+        cancel: async () => {},
+      }),
+    },
+  };
+  const parsedSse = await readSubagentOpenAIResponse(sseResponse, 5000);
+  assert.equal(parsedSse.rawContent, "你好，世界");
+  assert.equal(parsedSse.reasoning, "思考");
+  assert.equal(parsedSse.toolCalls.length, 1);
+  assert.equal(parsedSse.toolCalls[0].function.name, "read_file");
+  assert.equal(parsedSse.toolCalls[0].function.arguments, '{"path":"a.js"}');
+  assert.equal(parsedSse.usage.total_tokens, 15);
+
+  // 2) 空闲超时看门狗触发 SUBAGENT_IDLE_TIMEOUT 并被识别为可重试瞬时错误
+  const hangingResponse = {
+    headers: { get: () => "text/event-stream" },
+    body: {
+      getReader: () => ({
+        read: () => new Promise(() => {}),
+        cancel: async () => {},
+      }),
+    },
+  };
+  await assert.rejects(
+    () => readSubagentOpenAIResponse(hangingResponse, 40),
+    (err) => err.code === "SUBAGENT_IDLE_TIMEOUT" && isTransientSubagentError(err)
+  );
+
+  // 3) 兼容 application/json 响应
+  const jsonResponse = {
+    headers: { get: () => "application/json" },
+    json: async () => ({
+      choices: [{ message: { content: "ok", reasoning_content: "r" } }],
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+    }),
+  };
+  const parsedJson = await readSubagentOpenAIResponse(jsonResponse, 5000);
+  assert.equal(parsedJson.rawContent, "ok");
+  assert.equal(parsedJson.reasoning, "r");
+});
+
+test("repoIndexService 异步扫描与符号/引用检索正确返回结果", async () => {
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+  const {
+    scanRepoAsync,
+    buildRepoMapAsync,
+    searchSymbolsAsync,
+    findReferencesAsync,
+  } = require("../services/repoIndexService");
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-repo-async-"));
+  try {
+    fs.writeFileSync(
+      path.join(tmpDir, "alpha.js"),
+      "function computeCacheHit(a, b) {\n  return a + b;\n}\nmodule.exports = { computeCacheHit };\n",
+      "utf-8"
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "beta.js"),
+      "const { computeCacheHit } = require('./alpha');\nconst val = computeCacheHit(1, 2);\n",
+      "utf-8"
+    );
+
+    const index = await scanRepoAsync(tmpDir, { force: true });
+    assert.ok(index.stats.fileCount >= 2 || index.stats.symbolCount >= 1);
+
+    const map = await buildRepoMapAsync(tmpDir);
+    assert.match(map, /computeCacheHit/);
+
+    const syms = await searchSymbolsAsync(tmpDir, "computeCacheHit");
+    assert.ok(syms.some((s) => s.name === "computeCacheHit" && s.path === "alpha.js"));
+
+    const refs = await findReferencesAsync(tmpDir, "computeCacheHit");
+    assert.ok(refs.definitions.length >= 1);
+    assert.ok(refs.references.some((r) => r.path === "beta.js" && r.kind === "call"));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

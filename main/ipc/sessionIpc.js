@@ -18,15 +18,30 @@ const {
   activeStreamSessions,
 } = require("../shared");
 
+const {
+  maskSecret,
+  isMaskedSecret,
+  redactModelForRenderer,
+  redactModelsForRenderer,
+} = require("../../services/secretStorage");
+
 function registerSessionIpc() {
   ipcMain.handle(
     "get-config",
-    safeHandler((event, key) => getStorageService().getConfig(key))
+    safeHandler((event, key) => {
+      const val = getStorageService().getConfig(key);
+      return key === "api_key" && typeof val === "string" ? maskSecret(val) : val;
+    })
   );
 
   ipcMain.handle(
     "set-config",
-    safeHandler((event, key, value) => getStorageService().setConfig(key, value))
+    safeHandler((event, key, value) => {
+      if (key === "api_key" && isMaskedSecret(value)) {
+        return true;
+      }
+      return getStorageService().setConfig(key, value);
+    })
   );
 
   ipcMain.handle(
@@ -47,12 +62,18 @@ function registerSessionIpc() {
 
   ipcMain.handle(
     "db-get-models",
-    safeHandler(() => getStorageService().getModels())
+    safeHandler(() => redactModelsForRenderer(getStorageService().getModels()))
   );
 
   ipcMain.handle(
     "db-add-model",
-    safeHandler((event, model) => getStorageService().addModel(model))
+    safeHandler((event, model) => {
+      const res = getStorageService().addModel(model);
+      if (res && res.model) {
+        return { ...res, model: redactModelForRenderer(res.model) };
+      }
+      return res;
+    })
   );
 
   ipcMain.handle(
@@ -65,7 +86,18 @@ function registerSessionIpc() {
     safeHandler(async (event, params = {}) => {
       const globalCfg = getApiConfig();
       const activeBaseUrl = (params.baseUrl || globalCfg.baseUrl || "").trim().replace(/\/+$/, "");
-      const activeApiKey = params.apiKey !== undefined ? params.apiKey.trim() : (globalCfg.apiKey || "").trim();
+      let activeApiKey = params.apiKey !== undefined ? params.apiKey.trim() : (globalCfg.apiKey || "").trim();
+      if (isMaskedSecret(activeApiKey)) {
+        const models = getStorageService().getModels();
+        const ref =
+          (params.editingModelId && models.find((m) => m.id === params.editingModelId)) ||
+          models.find(
+            (m) =>
+              String(m.base_url || "").replace(/\/+$/, "") === activeBaseUrl &&
+              (!params.provider || m.provider === params.provider)
+          );
+        activeApiKey = ref?.api_key ? String(ref.api_key).trim() : "";
+      }
 
       if (!activeBaseUrl) {
         throw new Error("Base URL 不能为空");
@@ -119,6 +151,13 @@ function registerSessionIpc() {
   ipcMain.handle(
     "db-get-sessions",
     safeHandler(() => getStorageService().getSessions())
+  );
+
+  ipcMain.handle(
+    "db-search-sessions",
+    safeHandler((event, { query, limit } = {}) =>
+      getStorageService().searchSessionsAsync(query, { limit })
+    )
   );
 
   ipcMain.handle(

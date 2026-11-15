@@ -4,7 +4,7 @@
  * 设计原则：
  * 1. 松耦合：通过统一的 name/description/parameters/execute 四元组抽象
  * 2. 安全：工具执行带有效范围限制（cwd 限定在项目目录内）
- * 3. 增强：基于 LangChain StructuredTool 构建，支持 schema 校验、结构化输出
+ * 3. 增强：基于自研 StructuredTool 构建，支持 Zod schema 校验、结构化输出
  *
  * 所有工具的云原生定义、schema 校验、exec 逻辑均封装在 utils/tools/ 下。
  * 本模块负责集中注册并提供统一的 Function Calling 接口。
@@ -311,13 +311,13 @@ function zodShapeToJsonSchema(zodObj) {
 }
 
 /**
- * 从 LangChain StructuredTool 创建注册条目
+ * 从 StructuredTool 实例创建注册条目
  */
-function fromLangChainTool(lcTool) {
-  const parameters = zodShapeToJsonSchema(lcTool.schema);
+function registerStructuredTool(toolInstance) {
+  const parameters = zodShapeToJsonSchema(toolInstance.schema);
   return {
-    name: lcTool.name,
-    description: lcTool.description,
+    name: toolInstance.name,
+    description: toolInstance.description,
     parameters,
     execute: async (args, context = {}) => {
       // StructuredTool 的 _call 方法直接处理参数并返回 JSON string
@@ -326,7 +326,7 @@ function fromLangChainTool(lcTool) {
       const checkPermission = context?.checkPermission || null;
       const onTodosUpdate = context?.onTodosUpdate || null;
       const abortSignal = context?.abortSignal || null;
-      const resultStr = await lcTool._call({
+      const resultStr = await toolInstance._call({
         ...args,
         __workDir: workDir,
         __allowedFolders: allowedFolders,
@@ -348,29 +348,29 @@ function fromLangChainTool(lcTool) {
 // ─── 注册所有增强工具 ────────────────────────────────────────
 
 const ALL_TOOLS = [
-  fromLangChainTool(new ReadFileTool()),
-  fromLangChainTool(new EditFileTool()),
-  fromLangChainTool(new WriteFileTool()),
-  fromLangChainTool(new ListDirectoryTool()),
-  fromLangChainTool(new SearchCodeTool()),
-  fromLangChainTool(new RunCommandTool()),
-  fromLangChainTool(new WebFetchTool()),
-  fromLangChainTool(new TodoWriteTool()),
-  fromLangChainTool(new DispatchSubagentTool({}, toolRegistry)),
-  fromLangChainTool(new RepoMapTool()),
-  fromLangChainTool(new SearchSymbolsTool()),
-  fromLangChainTool(new FindReferencesTool()),
-  fromLangChainTool(new SpecWriteTool()),
-  fromLangChainTool(new RunSkillScriptTool()),
-  fromLangChainTool(new BrowserOpenTool()),
-  fromLangChainTool(new BrowserInspectTool()),
-  fromLangChainTool(new BrowserInteractTool()),
-  fromLangChainTool(new BrowserLogsTool()),
-  fromLangChainTool(new BrowserSnapshotTool()),
+  registerStructuredTool(new ReadFileTool()),
+  registerStructuredTool(new EditFileTool()),
+  registerStructuredTool(new WriteFileTool()),
+  registerStructuredTool(new ListDirectoryTool()),
+  registerStructuredTool(new SearchCodeTool()),
+  registerStructuredTool(new RunCommandTool()),
+  registerStructuredTool(new WebFetchTool()),
+  registerStructuredTool(new TodoWriteTool()),
+  registerStructuredTool(new DispatchSubagentTool({}, toolRegistry)),
+  registerStructuredTool(new RepoMapTool()),
+  registerStructuredTool(new SearchSymbolsTool()),
+  registerStructuredTool(new FindReferencesTool()),
+  registerStructuredTool(new SpecWriteTool()),
+  registerStructuredTool(new RunSkillScriptTool()),
+  registerStructuredTool(new BrowserOpenTool()),
+  registerStructuredTool(new BrowserInspectTool()),
+  registerStructuredTool(new BrowserInteractTool()),
+  registerStructuredTool(new BrowserLogsTool()),
+  registerStructuredTool(new BrowserSnapshotTool()),
 ];
 
 // web_search 需要一个可选的 searchConfig，注册时不传参使用默认配置
-ALL_TOOLS.push(fromLangChainTool(new WebSearchTool()));
+ALL_TOOLS.push(registerStructuredTool(new WebSearchTool()));
 
 for (const tool of ALL_TOOLS) {
   toolRegistry.register(tool);

@@ -196,10 +196,12 @@ npm run pack
 
 ```text
 omcx-desktop/
-├── main.js                  # Electron 主进程（窗口生命周期、安全协议、Agent 调度循环）
+├── main.js                  # Electron 主进程引导（窗口生命周期、安全协议注册）
+├── main/                    # 主进程业务模块（agentRunner、runner/*、ipc/*、protocol、shared）
 ├── preload.js               # 安全沙箱桥接（contextBridge 暴露 window.electronAPI）
 ├── services/                # 主进程核心服务层
-│   ├── storageService.js    # 本地数据持久化（~/.omcx/ JSON + Write-through 内存缓存）
+│   ├── storageService.js    # 持久化门面（memory snapshot + Worker SQLite WAL 异步写）
+│   ├── storage/             # 分域存储引擎（dbEngine、configWorkspace、sessionMessage 等）
 │   ├── mcpClientService.js  # 标准 MCP 连接池与工具动态路由（Stdio / HTTP / SSE）
 │   ├── mcpOAuthService.js   # MCP OAuth 2.1（授权码 + PKCE + 动态客户端注册）
 │   ├── contextCompactor.js  # 三级上下文自动压缩引擎
@@ -207,15 +209,14 @@ omcx-desktop/
 │   ├── workspaceGitService.js # 工作区 Git 状态与行数变更统计
 │   ├── gitHunkService.js    # Hunk 级暂存 / 取消暂存 / 丢弃与 PR 创建
 │   ├── gitWorktreeService.js# Git Worktree 隔离
-│   ├── checkpointService.js # 文件检查点与按回合回滚
 │   ├── specService.js       # Quest 规格文档存储
 │   ├── hookService.js       # 生命周期 Hooks
-│   ├── diagnosticsService.js# 项目诊断与测试运行
+│   ├── reasoningPolicy.js   # 思考落盘策略与协议回传策略
 │   └── subagentService.js   # 子代理生命周期管理
 ├── utils/                   # Agent 工具链与上下文组装
 │   ├── toolRegistry.js      # 工具注册中心（会话级隔离与权限收敛）
 │   ├── contextBuilder.js    # 动态上下文组装（规则/技能/记忆/Git/Todo）
-│   └── tools/               # 18 大内置工程工具实现（文件/搜索/终端/子代理/浏览器/规格）
+│   └── tools/               # 20 大内置工程工具实现（文件/搜索/符号/终端/子代理/浏览器/规格）
 ├── src/                     # React 渲染进程源码
 │   ├── pages/               # 核心视图页面（ChatView, Workspaces, Tools, Settings）
 │   ├── components/

@@ -106,6 +106,9 @@ const LeftSidebar: React.FC = () => {
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchHitMap, setSearchHitMap] = useState<
+    Record<string, { matchType: "title" | "message"; matchSnippet?: string }>
+  >({});
   const [filterOpen, setFilterOpen] = useState(false);
   const [filter, setFilter] = useState<"active" | "archived">("active");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -148,15 +151,50 @@ const LeftSidebar: React.FC = () => {
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q || !window.electronAPI?.dbSearchSessions) {
+      setSearchHitMap({});
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const hits = await window.electronAPI.dbSearchSessions(q, 50);
+        if (cancelled) return;
+        const map: Record<string, { matchType: "title" | "message"; matchSnippet?: string }> = {};
+        if (Array.isArray(hits)) {
+          for (const item of hits) {
+            if (item?.sessionId) {
+              map[item.sessionId] = {
+                matchType: item.matchType,
+                matchSnippet: item.matchSnippet,
+              };
+            }
+          }
+        }
+        setSearchHitMap(map);
+      } catch {
+        if (!cancelled) setSearchHitMap({});
+      }
+    }, 160);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery]);
+
   const matchesQuery = (session: Session) =>
-    !normalizedQuery || (session.title || "").toLowerCase().includes(normalizedQuery);
+    !normalizedQuery ||
+    (session.title || "").toLowerCase().includes(normalizedQuery) ||
+    Boolean(searchHitMap[session.id]);
 
   const visibleSessions = useMemo(
     () =>
       sessions
         .filter((session) => (filter === "archived" ? !!session.archived : !session.archived))
         .filter(matchesQuery),
-    [sessions, filter, normalizedQuery]
+    [sessions, filter, normalizedQuery, searchHitMap]
   );
 
   const { workspaceGroups, standaloneGroups, unassigned } = useMemo(() => {
@@ -343,9 +381,18 @@ const LeftSidebar: React.FC = () => {
           />
         ) : (
           <>
-            <span className="flex-1 min-w-0 text-xs font-normal truncate">
-              {session.title || "新的 Agent 会话"}
-            </span>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-normal truncate">
+                {session.title || "新的 Agent 会话"}
+              </div>
+              {normalizedQuery &&
+                searchHitMap[session.id]?.matchType === "message" &&
+                searchHitMap[session.id]?.matchSnippet && (
+                  <div className="text-[10px] text-[var(--ui-text-faint)] truncate mt-0.5">
+                    {searchHitMap[session.id].matchSnippet}
+                  </div>
+                )}
+            </div>
             <span className="text-[11px] text-[var(--ui-text-faint)] flex-shrink-0 group-hover/session:hidden">
               {formatRelativeTime(session.updatedAt)}
             </span>
@@ -601,6 +648,16 @@ const LeftSidebar: React.FC = () => {
           <span className="text-[10px] text-[var(--ui-text-faint)] font-mono">⌘N</span>
         </button>
 
+        <button
+          onClick={() => window.dispatchEvent(new CustomEvent("omcx-open-command-palette"))}
+          className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)] transition-colors"
+          title="全局搜索会话与快捷命令 (⌘K)"
+        >
+          <Search size={14} className="text-[var(--ui-text-muted)]" />
+          <span className="flex-1 text-left text-xs font-medium">快速检索</span>
+          <span className="text-[10px] text-[var(--ui-text-faint)] font-mono">⌘K</span>
+        </button>
+
         <button onClick={() => setActiveNavTab("workspaces")} className={navClass("workspaces")}>
           <FolderGit2 size={15} />
           <span className="text-xs font-medium">工作空间</span>
@@ -675,7 +732,7 @@ const LeftSidebar: React.FC = () => {
                 setSearchOpen(false);
               }
             }}
-            placeholder="搜索任务标题..."
+            placeholder="搜索任务标题或消息内容..."
             className="w-full h-7 px-2 text-[11px] rounded-lg bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] text-[var(--ui-text-primary)] placeholder-[var(--ui-text-faint)] outline-none focus:border-blue-500/60"
           />
         </div>

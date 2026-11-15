@@ -1,6 +1,7 @@
 import React, { Suspense, lazy } from 'react';
 import { Loader2 } from 'lucide-react';
 import LeftSidebar from '@/components/navigation/LeftSidebar';
+import CommandPaletteModal from '@/components/navigation/CommandPaletteModal';
 import { useAppStore } from '@/stores/appStore';
 import ChatView from '@/pages/ChatView';
 import SettingsModal from '@/components/settings/SettingsModal';
@@ -57,6 +58,9 @@ const Layout: React.FC = () => {
 
       {/* 设置弹出层：覆盖在当前视图之上，Esc / 点击遮罩 / 右上角关闭 */}
       <SettingsModal />
+
+      {/* 全局命令与消息全文检索面板 (⌘K) */}
+      <CommandPaletteModal />
     </div>
   );
 };

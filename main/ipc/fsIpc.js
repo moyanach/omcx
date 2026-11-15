@@ -424,6 +424,93 @@ function registerFsIpc() {
   );
 
   ipcMain.handle(
+    "revert-file-modification",
+    safeHandler(async (event, { workDir, filePath, tool, oldText, newText, isNewFile, noSnapshot, replaceAll } = {}) => {
+      if (!filePath || typeof filePath !== "string") {
+        return { success: false, error: "缺少目标文件路径" };
+      }
+      const { DEFAULT_ROOT } = getPathResolver();
+      const { checkSensitivePath, resolveRealPathSafe, isUnderFolderReal } = getSandboxPolicyService();
+      const { fileLockService } = require("../../services/fileLockService");
+
+      const baseRoot = workDir && String(workDir).trim() ? path.resolve(workDir.trim()) : DEFAULT_ROOT;
+      const { allowedFolders } = getWorkspaceFolders(baseRoot);
+      const validFolders = allowedFolders.length > 0 ? allowedFolders : [baseRoot];
+
+      let targetAbs = path.isAbsolute(filePath)
+        ? path.resolve(filePath)
+        : path.resolve(baseRoot, filePath);
+      if (!(await asyncPathExists(targetAbs))) {
+        for (const folder of validFolders) {
+          const candidate = path.resolve(folder, filePath);
+          if (await asyncPathExists(candidate)) {
+            targetAbs = candidate;
+            break;
+          }
+        }
+      }
+
+      const checkTarget = (await asyncPathExists(targetAbs))
+        ? resolveRealPathSafe(targetAbs) || targetAbs
+        : targetAbs;
+      const allowed = validFolders.some((root) => isUnderFolderReal(checkTarget, root));
+      if (!allowed || checkSensitivePath(checkTarget).blocked) {
+        return { success: false, error: `安全策略已拒绝修改工作空间外部或受保护路径: ${filePath}` };
+      }
+
+      return await fileLockService.withLock(targetAbs, async () => {
+        if (isNewFile) {
+          if (!(await asyncPathExists(targetAbs))) {
+            return { success: true, action: "already_removed", path: targetAbs };
+          }
+          await fsp.unlink(targetAbs);
+          return { success: true, action: "deleted", path: targetAbs };
+        }
+
+        if (tool === "edit_file") {
+          if (!(await asyncPathExists(targetAbs))) {
+            return { success: false, error: "目标文件不存在，无法还原" };
+          }
+          if (typeof newText !== "string" || typeof oldText !== "string") {
+            return { success: false, error: "缺少还原所需的修改前后片段" };
+          }
+          const current = await fsp.readFile(targetAbs, "utf-8");
+          if (!newText) {
+            return { success: false, error: "该次修改为纯删除操作，无法通过反向匹配安全还原，请使用 Git 丢弃" };
+          }
+          if (replaceAll) {
+            if (!current.includes(newText)) {
+              return { success: false, error: "文件内容后续已变化，无法自动还原此编辑" };
+            }
+            const restored = current.split(newText).join(oldText);
+            await fsp.writeFile(targetAbs, restored, "utf-8");
+            return { success: true, action: "reverted", path: targetAbs };
+          }
+          const firstIdx = current.indexOf(newText);
+          if (firstIdx === -1) {
+            return { success: false, error: "文件内容后续已变化，未找到对应的修改片段" };
+          }
+          const secondIdx = current.indexOf(newText, firstIdx + newText.length);
+          if (secondIdx !== -1) {
+            return { success: false, error: "文件中存在多处相同片段，为防误改请通过 Git Diff 手动还原" };
+          }
+          const restored =
+            current.slice(0, firstIdx) + oldText + current.slice(firstIdx + newText.length);
+          await fsp.writeFile(targetAbs, restored, "utf-8");
+          return { success: true, action: "reverted", path: targetAbs };
+        }
+
+        if (noSnapshot || typeof oldText !== "string") {
+          return { success: false, error: "大文件覆写未保留完整原始快照，建议使用 Git 丢弃更改" };
+        }
+        await fsp.mkdir(path.dirname(targetAbs), { recursive: true });
+        await fsp.writeFile(targetAbs, oldText, "utf-8");
+        return { success: true, action: "reverted", path: targetAbs };
+      });
+    })
+  );
+
+  ipcMain.handle(
     "get-workspace-file-index",
     safeHandler((event, workDir) => {
       if (!workDir || typeof workDir !== "string") {

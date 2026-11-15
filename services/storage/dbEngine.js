@@ -252,6 +252,59 @@ function createDbEngine({
           .prepare("SELECT * FROM session_outputs WHERE session_id = ? ORDER BY created_at ASC")
           .all(sessionId);
       }
+      case "SEARCH_SESSIONS": {
+        const query = String(payload?.query || "").trim();
+        const limit = Math.max(1, Math.min(100, Number(payload?.limit) || 40));
+        if (!query) return [];
+        const escaped = query.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+        const pattern = `%${escaped}%`;
+        const extractSnippet = (text) => {
+          const flat = String(text || "").replace(/\s+/g, " ").trim();
+          const idx = flat.toLowerCase().indexOf(query.toLowerCase());
+          if (idx === -1) return flat.slice(0, 88);
+          const start = Math.max(0, idx - 26);
+          const end = Math.min(flat.length, idx + query.length + 52);
+          return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
+        };
+        const bySession = new Map();
+        const titleRows = d
+          .prepare(
+            "SELECT id AS session_id, title, updated_at FROM sessions WHERE title LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?"
+          )
+          .all(pattern, limit);
+        for (const r of titleRows) {
+          bySession.set(r.session_id, {
+            sessionId: r.session_id,
+            title: r.title || "新的 Agent 会话",
+            updatedAt: r.updated_at || 0,
+            matchType: "title",
+            matchSnippet: "",
+          });
+        }
+        const msgRows = d
+          .prepare(
+            "SELECT m.session_id, s.title, s.updated_at, m.content FROM messages m INNER JOIN sessions s ON s.id = m.session_id WHERE m.content LIKE ? ESCAPE '\\' ORDER BY m.created_at DESC LIMIT ?"
+          )
+          .all(pattern, limit * 6);
+        for (const r of msgRows) {
+          if (bySession.size >= limit && !bySession.has(r.session_id)) continue;
+          const existing = bySession.get(r.session_id);
+          if (!existing) {
+            bySession.set(r.session_id, {
+              sessionId: r.session_id,
+              title: r.title || "新的 Agent 会话",
+              updatedAt: r.updated_at || 0,
+              matchType: "message",
+              matchSnippet: extractSnippet(r.content),
+            });
+          } else if (!existing.matchSnippet) {
+            existing.matchSnippet = extractSnippet(r.content);
+          }
+        }
+        return Array.from(bySession.values())
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+          .slice(0, limit);
+      }
     }
     return undefined;
   }

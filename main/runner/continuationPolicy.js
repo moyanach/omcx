@@ -2,7 +2,7 @@ const { hasUnclosedCodeFence } = require("../shared");
 
 /**
  * 评估无工具调用时的响应是否需要自动续写或重试（纯决策，便于单测守护）。
- * @returns {{ action: "steer" | "retry_empty" | "continue" | "break", mode?: "A" | "B" | "C" | "D", messagesToAppend?: Array<object>, log?: string }}
+ * @returns {{ action: "steer" | "retry_empty" | "continue" | "break", mode?: "A" | "B" | "C" | "D" | "E", messagesToAppend?: Array<object>, log?: string }}
  */
 function evaluateNoToolResponse({
   result,
@@ -78,9 +78,30 @@ function evaluateNoToolResponse({
   }
 
   if (
-    (result.hitLengthLimit || (result.reasoning && cleanRoundText.length === 0)) &&
+    (result.hitLengthLimit ||
+      result.abruptlyClosed ||
+      (result.reasoning && cleanRoundText.length === 0)) &&
     continuationCount < maxContinuations
   ) {
+    if (result.abruptlyClosed && cleanRoundText.length > 0) {
+      const nextCount = continuationCount + 1;
+      const tailSnippet = result.content.slice(-80);
+      return {
+        action: "continue",
+        mode: "E",
+        log: `[auto-continue] 模式E：上游流连接提前中断，发起第 ${nextCount} 次断点续写`,
+        messagesToAppend: [
+          buildAssistantReplayMessage(result, { content: result.content }),
+          {
+            role: "user",
+            content: `你的上一条回复因上游连接意外提前中断而在末尾截断（中断处末尾字符为：${JSON.stringify(
+              tailSnippet
+            )}）。请紧接在该位置之后无缝继续输出剩余内容，禁止重复前文或添加任何开场白。`,
+          },
+        ],
+      };
+    }
+
     const nextCount = continuationCount + 1;
     return {
       action: "continue",

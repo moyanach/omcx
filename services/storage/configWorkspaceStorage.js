@@ -1,4 +1,11 @@
 const path = require("path");
+const {
+  encryptSecret,
+  decryptSecret,
+  isMaskedSecret,
+  isEncrypted,
+  isEncryptionAvailable,
+} = require("../secretStorage");
 
 const DEFAULT_MODELS = [
   {
@@ -103,7 +110,8 @@ function createConfigWorkspaceStorage({
 
   function getConfig(key) {
     if (memoryConfigs.has(key)) {
-      return memoryConfigs.get(key);
+      const val = memoryConfigs.get(key);
+      return key === "api_key" && typeof val === "string" ? decryptSecret(val) : val;
     }
     // 内存未命中兜底
     if (isMemoryOnlyMode()) return null;
@@ -119,30 +127,47 @@ function createConfigWorkspaceStorage({
         parsed = row.value;
       }
       memoryConfigs.set(key, parsed);
-      return parsed;
+      return key === "api_key" && typeof parsed === "string" ? decryptSecret(parsed) : parsed;
     } catch {
       return null;
     }
   }
 
   function setConfig(key, value) {
-    memoryConfigs.set(key, value);
-    sendToWorker("SET_CONFIG", { key, value });
+    const storedVal =
+      key === "api_key" && typeof value === "string" ? encryptSecret(value) : value;
+    memoryConfigs.set(key, storedVal);
+    sendToWorker("SET_CONFIG", { key, value: storedVal });
     return true;
   }
 
   function getModels() {
     const models = getConfig("llm_models");
     if (Array.isArray(models) && models.length > 0) {
-      return models;
+      return models.map((m) =>
+        m && typeof m === "object"
+          ? { ...m, api_key: decryptSecret(String(m.api_key ?? m.apiKey ?? "")) }
+          : m
+      );
     }
     setConfig("llm_models", DEFAULT_MODELS);
-    return DEFAULT_MODELS;
+    return DEFAULT_MODELS.map((m) => ({ ...m }));
   }
 
   function addModel(model) {
     const models = getModels();
     const idx = models.findIndex((m) => m.id === model.id);
+    const sourceIdx =
+      model.sourceModelId && model.sourceModelId !== model.id
+        ? models.findIndex((m) => m.id === model.sourceModelId)
+        : -1;
+    const refModel = idx >= 0 ? models[idx] : sourceIdx >= 0 ? models[sourceIdx] : null;
+    const incomingRaw = String(model.api_key ?? model.apiKey ?? "").trim();
+    const plainApiKey =
+      (model.preserveApiKey || isMaskedSecret(incomingRaw)) && refModel
+        ? String(refModel.api_key || "")
+        : decryptSecret(incomingRaw);
+
     const now = Date.now();
     const safeModel = {
       id: model.id || `model_${now}_${Math.random().toString(36).slice(2, 6)}`,
@@ -150,7 +175,7 @@ function createConfigWorkspaceStorage({
       provider: model.provider || "openai",
       model_id: model.model_id || model.id,
       base_url: model.base_url || "https://api.openai.com/v1",
-      api_key: model.api_key || "",
+      api_key: plainApiKey,
       supports_vision: model.supports_vision ?? inferVisionSupport(model.model_id || model.id),
       is_lite: Boolean(model.is_lite ?? model.isLite),
       context_limit: Number(model.context_limit) || 128000,
@@ -166,8 +191,40 @@ function createConfigWorkspaceStorage({
     } else {
       models.push(safeModel);
     }
-    setConfig("llm_models", models);
+    const storedModels = models.map((m) => ({
+      ...m,
+      api_key: encryptSecret(String(m.api_key || "")),
+    }));
+    setConfig("llm_models", storedModels);
     return { success: true, model: safeModel };
+  }
+
+  function migratePlaintextSecrets() {
+    if (!isEncryptionAvailable()) return 0;
+    let migrated = 0;
+    const rawGlobalKey = memoryConfigs.has("api_key") ? memoryConfigs.get("api_key") : null;
+    if (typeof rawGlobalKey === "string" && rawGlobalKey.trim() && !isEncrypted(rawGlobalKey)) {
+      setConfig("api_key", rawGlobalKey);
+      migrated += 1;
+    }
+    const rawModels = getConfig("llm_models");
+    if (Array.isArray(rawModels) && rawModels.length > 0) {
+      let dirty = false;
+      const next = rawModels.map((m) => {
+        if (!m || typeof m !== "object") return m;
+        const key = String(m.api_key ?? m.apiKey ?? "").trim();
+        if (key && !isEncrypted(key)) {
+          dirty = true;
+          migrated += 1;
+          return { ...m, api_key: encryptSecret(key) };
+        }
+        return m;
+      });
+      if (dirty) {
+        setConfig("llm_models", next);
+      }
+    }
+    return migrated;
   }
 
   function deleteModel(id) {
@@ -287,6 +344,7 @@ function createConfigWorkspaceStorage({
     getModels,
     addModel,
     deleteModel,
+    migratePlaintextSecrets,
     getWorkspaces,
     saveWorkspace,
     deleteWorkspace,

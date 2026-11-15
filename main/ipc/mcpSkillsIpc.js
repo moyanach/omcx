@@ -289,14 +289,14 @@ function registerMcpSkillsIpc() {
   ipcMain.handle(
     "get-repo-index-stats",
     safeHandler((event, { workDir, refresh } = {}) =>
-      getRepoIndexService().getRepoStats(workDir, { force: Boolean(refresh) })
+      getRepoIndexService().getRepoStatsAsync(workDir, { force: Boolean(refresh) })
     )
   );
 
   ipcMain.handle(
     "get-repo-map",
     safeHandler((event, { workDir, maxChars, refresh } = {}) =>
-      getRepoIndexService().buildRepoMap(workDir, {
+      getRepoIndexService().buildRepoMapAsync(workDir, {
         maxChars: Number(maxChars) || 6000,
         force: Boolean(refresh),
       })
@@ -306,7 +306,7 @@ function registerMcpSkillsIpc() {
   ipcMain.handle(
     "search-repo-symbols",
     safeHandler((event, { workDir, query, limit } = {}) =>
-      getRepoIndexService().searchSymbols(workDir, query, { limit: Number(limit) || 40 })
+      getRepoIndexService().searchSymbolsAsync(workDir, query, { limit: Number(limit) || 40 })
     )
   );
 
@@ -390,7 +390,7 @@ function registerMcpSkillsIpc() {
         let repoMapText = "";
         if (targetWorkDir && storageService.getConfig("repo_map_enabled") !== "false") {
           try {
-            repoMapText = repoIndexService.buildRepoMap(targetWorkDir, {
+            repoMapText = await repoIndexService.buildRepoMapAsync(targetWorkDir, {
               maxChars: Number(storageService.getConfig("repo_map_max_chars")) || 6000,
             });
           } catch (repoErr) {

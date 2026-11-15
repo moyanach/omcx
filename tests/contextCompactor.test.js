@@ -58,3 +58,49 @@ test("truncateToolResult 与 hardTruncate、isContextOverflowError 边界正确"
   assert.equal(isContextOverflowError("maximum context length exceeded"), true);
   assert.equal(isContextOverflowError("network timeout"), false);
 });
+
+test("microCompact 启用 batchWatermark 后按批量水位线清理以保护前缀缓存", () => {
+  const base = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "work" },
+    { role: "tool", tool_call_id: "t1", content: "R1 ".repeat(200) },
+    { role: "tool", tool_call_id: "t2", content: "R2 ".repeat(200) },
+    { role: "tool", tool_call_id: "t3", content: "R3 ".repeat(200) },
+  ];
+  // 只有 1 条旧输出且体积较小（keepRecent=2 -> 仅 t1 可清）时，为保护缓存跳过改写
+  const skipped = microCompact(base, {
+    keepRecentToolResults: 2,
+    batchWatermark: true,
+    microBatchMinCount: 3,
+    microBatchMinSavedChars: 10000,
+  });
+  assert.equal(skipped.cleared, 0);
+  assert.equal(skipped.skippedForCache, true);
+  assert.equal(skipped.messages[2].content, "R1 ".repeat(200));
+
+  // 累积满 3 条可清理或 urgent=true 时一次性批量清理
+  const extended = [
+    ...base,
+    { role: "tool", tool_call_id: "t4", content: "R4 ".repeat(200) },
+    { role: "tool", tool_call_id: "t5", content: "R5 ".repeat(200) },
+  ];
+  const flushed = microCompact(extended, {
+    keepRecentToolResults: 2,
+    batchWatermark: true,
+    microBatchMinCount: 3,
+    microBatchMinSavedChars: 10000,
+  });
+  assert.equal(flushed.skippedForCache, false);
+  assert.equal(flushed.cleared, 3);
+  assert.match(flushed.messages[2].content, /旧工具输出已清理/);
+  assert.equal(flushed.messages[6].content, "R5 ".repeat(200));
+
+  // urgent=true 时即使只有 1 条也立即清理
+  const urgent = microCompact(base, {
+    keepRecentToolResults: 2,
+    batchWatermark: true,
+    urgent: true,
+  });
+  assert.equal(urgent.cleared, 1);
+  assert.equal(urgent.skippedForCache, false);
+});

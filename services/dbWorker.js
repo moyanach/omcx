@@ -25,6 +25,24 @@ if (!dbFile) {
 let db = null;
 let statements = null;
 
+function escapeSqlLike(raw) {
+  return String(raw || "").replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+function extractMatchSnippet(text, query) {
+  const flat = String(text || "").replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  const lower = flat.toLowerCase();
+  const q = String(query || "").trim().toLowerCase();
+  const idx = q ? lower.indexOf(q) : -1;
+  if (idx === -1) return flat.slice(0, 88);
+  const start = Math.max(0, idx - 26);
+  const end = Math.min(flat.length, idx + q.length + 52);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < flat.length ? "…" : "";
+  return `${prefix}${flat.slice(start, end)}${suffix}`;
+}
+
 /**
  * 兼容两种调用形态：直接传 sessionId 字符串，或传 { sessionId } 负载。
  * 早期主线程 GET_MESSAGES / GET_OUTPUTS 以对象负载发送，若按字符串绑定
@@ -175,6 +193,22 @@ function initDb() {
       VALUES (@session_id, @name, @file_path, @file_type, @action, @created_at)
     `),
     deleteSessionOutputs: db.prepare("DELETE FROM session_outputs WHERE session_id = ?"),
+
+    searchSessionTitles: db.prepare(`
+      SELECT id AS session_id, title, updated_at
+      FROM sessions
+      WHERE title LIKE ? ESCAPE '\\'
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `),
+    searchSessionMessages: db.prepare(`
+      SELECT m.session_id, s.title, s.updated_at, m.content, m.role, m.created_at
+      FROM messages m
+      INNER JOIN sessions s ON s.id = m.session_id
+      WHERE m.content LIKE ? ESCAPE '\\'
+      ORDER BY m.created_at DESC
+      LIMIT ?
+    `),
   };
 }
 
@@ -316,6 +350,48 @@ parentPort.on("message", (msg) => {
         if (!sessionId) throw new Error("GET_OUTPUTS 缺少 sessionId");
         const rows = statements.getSessionOutputs.all(sessionId);
         parentPort.postMessage({ id, success: true, result: rows });
+        break;
+      }
+
+      case "SEARCH_SESSIONS": {
+        const query = String(payload?.query || "").trim();
+        const limit = Math.max(1, Math.min(100, Number(payload?.limit) || 40));
+        if (!query) {
+          parentPort.postMessage({ id, success: true, result: [] });
+          break;
+        }
+        const pattern = `%${escapeSqlLike(query)}%`;
+        const bySession = new Map();
+        const titleRows = statements.searchSessionTitles.all(pattern, limit);
+        for (const r of titleRows) {
+          bySession.set(r.session_id, {
+            sessionId: r.session_id,
+            title: r.title || "新的 Agent 会话",
+            updatedAt: r.updated_at || 0,
+            matchType: "title",
+            matchSnippet: "",
+          });
+        }
+        const msgRows = statements.searchSessionMessages.all(pattern, limit * 6);
+        for (const r of msgRows) {
+          if (bySession.size >= limit && !bySession.has(r.session_id)) continue;
+          const existing = bySession.get(r.session_id);
+          if (!existing) {
+            bySession.set(r.session_id, {
+              sessionId: r.session_id,
+              title: r.title || "新的 Agent 会话",
+              updatedAt: r.updated_at || 0,
+              matchType: "message",
+              matchSnippet: extractMatchSnippet(r.content, query),
+            });
+          } else if (!existing.matchSnippet) {
+            existing.matchSnippet = extractMatchSnippet(r.content, query);
+          }
+        }
+        const sorted = Array.from(bySession.values())
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+          .slice(0, limit);
+        parentPort.postMessage({ id, success: true, result: sorted });
         break;
       }
 

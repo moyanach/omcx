@@ -8,7 +8,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { buildRepoMap, scanRepo } = require("./repoIndexService");
+const { buildRepoMapAsync, scanRepoAsync } = require("./repoIndexService");
 const projectArtifactService = require("./projectArtifactService");
 const { isAnthropicProvider, completeAnthropicMessage } = require("./anthropicClient");
 
@@ -33,8 +33,8 @@ function readFirstExisting(workDir, names, maxChars) {
   return null;
 }
 
-function buildWikiPrompt(workDir) {
-  const repoMap = buildRepoMap(workDir, { maxChars: 9000, force: true });
+async function buildWikiPrompt(workDir) {
+  const repoMap = await buildRepoMapAsync(workDir, { maxChars: 9000, force: true });
   const readme = readFirstExisting(
     workDir,
     ["README.md", "README.zh-CN.md", "README_EN.md", "readme.md", "Readme.md"],
@@ -45,7 +45,7 @@ function buildWikiPrompt(workDir) {
     ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml", "build.gradle"],
     4000
   );
-  const index = scanRepo(workDir, { force: true });
+  const index = await scanRepoAsync(workDir, { force: true });
 
   const parts = [
     `仓库根目录: ${workDir}`,
@@ -115,7 +115,7 @@ async function generateRepoWiki({ workDir, modelConfig, signal } = {}) {
     return { success: false, error: "缺少可用模型配置" };
   }
 
-  const prompt = buildWikiPrompt(workDir);
+  const prompt = await buildWikiPrompt(workDir);
   const maxTokens = Number(modelConfig.max_output_tokens) || 4096;
 
   let result;
@@ -147,7 +147,7 @@ async function generateRepoWiki({ workDir, modelConfig, signal } = {}) {
     return { success: false, error: "模型未返回 Wiki 内容" };
   }
 
-  const index = scanRepo(workDir, { force: false });
+  const index = await scanRepoAsync(workDir, { force: false });
   const meta = {
     workDir: path.resolve(workDir),
     generatedAt: Date.now(),

@@ -35,6 +35,19 @@ function hasValidToolCalls(list) {
   });
 }
 
+function detectAbruptClose({
+  cancelled = false,
+  streamFinished = false,
+  finishReason = null,
+  hitLengthLimit = false,
+  socketClosedAbruptly = false,
+} = {}) {
+  if (cancelled) return false;
+  if (socketClosedAbruptly) return true;
+  if (!streamFinished && !finishReason && !hitLengthLimit) return true;
+  return false;
+}
+
 function createStreamTransport({
   provider,
   modelBaseUrl,
@@ -151,6 +164,7 @@ function createStreamTransport({
     let streamFinished = false;
     let finishReason = null;
     let hitLengthLimit = false;
+    let socketClosedAbruptly = false;
     let receivedBytes = 0;
     let lastDataAt = Date.now();
     let waitingNotifiedSec = 0;
@@ -292,6 +306,9 @@ function createStreamTransport({
           hasValidToolCalls(toolCalls) ||
           fullContent.trim().length > 0)
       ) {
+        if (!streamFinished && !finishReason) {
+          socketClosedAbruptly = true;
+        }
         console.warn(
           `[chat-stream] 忽略流尾部的对端 Socket 提前关闭 (${readErr.cause?.code || readErr.message})，保留已接收的完整响应`
         );
@@ -309,6 +326,14 @@ function createStreamTransport({
       } catch {}
     }
 
+    const abruptlyClosed = detectAbruptClose({
+      cancelled: sessionAbort.cancelled,
+      streamFinished,
+      finishReason,
+      hitLengthLimit,
+      socketClosedAbruptly,
+    });
+
     return {
       content: fullContent,
       reasoning: fullReasoning,
@@ -316,6 +341,7 @@ function createStreamTransport({
       toolCalls: toolCalls.filter(Boolean),
       usage,
       hitLengthLimit,
+      abruptlyClosed,
       finishReason,
       receivedBytes,
     };
@@ -349,5 +375,6 @@ function createStreamTransport({
 module.exports = {
   isTransientSocketError,
   hasValidToolCalls,
+  detectAbruptClose,
   createStreamTransport,
 };

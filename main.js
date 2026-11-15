@@ -9,6 +9,7 @@ const {
   getMainWindow,
   flushActiveRunsAndStorageOnExit,
   notifyMainProcessError,
+  clearAppBadge,
   isSafeExternalUrl,
 } = require("./main/shared");
 const {
@@ -87,6 +88,10 @@ function createWindow() {
   const windowWebContents = win.webContents;
   windowWebContents.on("destroyed", () => {
     getLoadedModule(MODULES.terminalPtyService)?.terminalPtyService?.disposeBySender(windowWebContents);
+  });
+
+  win.on("focus", () => {
+    clearAppBadge();
   });
 
   win.on("closed", () => {

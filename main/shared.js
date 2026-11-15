@@ -10,6 +10,8 @@ try {
 } catch {}
 const nativeImage = electronMod?.nativeImage || null;
 const BrowserWindow = electronMod?.BrowserWindow || null;
+const ElectronNotification = electronMod?.Notification || null;
+const electronApp = electronMod?.app || null;
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 
@@ -179,6 +181,62 @@ function notifyMainProcessError(err, origin = "uncaughtException") {
 
 function isSafeExternalUrl(targetUrl) {
   return /^https?:\/\//i.test(String(targetUrl || "").trim());
+}
+
+function clearAppBadge() {
+  try {
+    if (process.platform === "darwin" && electronApp?.dock?.setBadge) {
+      electronApp.dock.setBadge("");
+    }
+  } catch {}
+}
+
+function notifyDesktopIfBackground({ title, body, badge = false, silent = false } = {}) {
+  try {
+    if (!title || !body) return false;
+    const storageService = getLoadedModule(MODULES.storageService);
+    if (storageService?.getConfig?.("desktop_notifications_enabled") === "false") {
+      return false;
+    }
+    const win = mainWindow;
+    if (!win || win.isDestroyed()) return false;
+    const isBackground = !win.isFocused() || win.isMinimized() || !win.isVisible();
+    if (!isBackground) return false;
+
+    if (badge && process.platform === "darwin" && electronApp?.dock?.setBadge) {
+      try {
+        electronApp.dock.setBadge("•");
+      } catch {}
+    }
+
+    if (
+      !ElectronNotification ||
+      typeof ElectronNotification.isSupported !== "function" ||
+      !ElectronNotification.isSupported()
+    ) {
+      return false;
+    }
+
+    const n = new ElectronNotification({
+      title: String(title),
+      body: String(body).slice(0, 180),
+      silent: Boolean(silent),
+    });
+    n.on("click", () => {
+      try {
+        if (!win.isDestroyed()) {
+          if (win.isMinimized()) win.restore();
+          win.show();
+          win.focus();
+        }
+        clearAppBadge();
+      } catch {}
+    });
+    n.show();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -864,6 +922,8 @@ module.exports = {
   asyncStatSafe,
   flushActiveRunsAndStorageOnExit,
   notifyMainProcessError,
+  notifyDesktopIfBackground,
+  clearAppBadge,
   isSafeExternalUrl,
   safeHandler,
   isKnownSessionOutputPath,

@@ -128,6 +128,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
     setNewModelProvider(model.provider || "custom");
     setNewModelBaseUrl(model.base_url || model.baseUrl || "");
     setNewModelApiKey(model.api_key || model.apiKey || "");
+    setShowApiKey(false);
     setFetchedRemoteModels([]);
     setModelRows([
       {
@@ -188,6 +189,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
           baseUrl: newModelBaseUrl.trim(),
           apiKey: newModelApiKey.trim(),
           provider: newModelProvider,
+          editingModelId,
         });
         if (Array.isArray(list) && list.length > 0) {
           setFetchedRemoteModels(list);
@@ -256,6 +258,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
 
       const modelPayload = {
         id: targetId,
+        sourceModelId: editingModelId || undefined,
         model_id: row.modelId.trim(),
         modelId: row.modelId.trim(),
         name: row.name.trim() || row.modelId.trim(),
@@ -305,6 +308,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
     const nextLite = !(model.is_lite ?? model.isLite);
     await window.electronAPI.dbAddModel({
       ...model,
+      preserveApiKey: true,
       is_lite: nextLite,
     });
     showToast(
@@ -379,17 +383,19 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
                         <label className="text-xs font-medium text-neutral-300">
                           3. API Key {newModelProvider === "ollama" ? "(本地免Key)" : "(必填)"}
                         </label>
-                        <button
-                          type="button"
-                          onClick={() => setShowApiKey(!showApiKey)}
-                          className="text-[10px] text-neutral-500 hover:text-neutral-300 flex items-center gap-1"
-                        >
-                          {showApiKey ? <EyeOff size={11} /> : <Eye size={11} />}
-                          <span>{showApiKey ? "隐藏" : "显示"}</span>
-                        </button>
+                        {!newModelApiKey.includes("••••") && (
+                          <button
+                            type="button"
+                            onClick={() => setShowApiKey(!showApiKey)}
+                            className="text-[10px] text-neutral-500 hover:text-neutral-300 flex items-center gap-1"
+                          >
+                            {showApiKey ? <EyeOff size={11} /> : <Eye size={11} />}
+                            <span>{showApiKey ? "隐藏" : "显示"}</span>
+                          </button>
+                        )}
                       </div>
                       <input
-                        type={showApiKey ? "text" : "password"}
+                        type={showApiKey && !newModelApiKey.includes("••••") ? "text" : "password"}
                         value={newModelApiKey}
                         onChange={(e) => {
                           setNewModelApiKey(e.target.value);
@@ -398,6 +404,11 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
                         placeholder={newModelProvider === "ollama" ? "本地服务无需填写" : "sk-..."}
                         className="w-full bg-[#171717] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 transition-all font-mono"
                       />
+                      {newModelApiKey.includes("••••") && (
+                        <p className="text-[10px] text-emerald-400/80">
+                          已加密保存在系统凭据库（保持掩码即沿用原密钥，清空或输入新密钥将覆盖）
+                        </p>
+                      )}
                     </div>
                   </div>
 

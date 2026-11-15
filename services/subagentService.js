@@ -4,6 +4,226 @@ const os = require("os");
 const { isAnthropicProvider, streamAnthropicMessage } = require("./anthropicClient");
 const reasoningPolicy = require("./reasoningPolicy");
 
+function isTransientSubagentError(err) {
+  if (!err) return false;
+  if (err.code === "SUBAGENT_IDLE_TIMEOUT" || err.name === "SubagentIdleTimeoutError") {
+    return true;
+  }
+  const msg = String(err.message || "").toLowerCase();
+  const causeCode = String(err.cause?.code || "").toUpperCase();
+  const causeMsg = String(err.cause?.message || "").toLowerCase();
+  return (
+    msg.includes("terminated") ||
+    msg.includes("fetch failed") ||
+    msg.includes("socket") ||
+    msg.includes("econnreset") ||
+    msg.includes("空闲超时") ||
+    causeCode === "UND_ERR_SOCKET" ||
+    causeCode === "ECONNRESET" ||
+    causeCode === "EPIPE" ||
+    causeMsg.includes("other side closed")
+  );
+}
+
+function createLinkedAbortController(parentSignal, timeoutMs) {
+  const controller = new AbortController();
+  let timer = null;
+  const onParentAbort = () => {
+    controller.abort(parentSignal?.reason || new Error("Aborted"));
+  };
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      controller.abort(parentSignal.reason || new Error("Aborted"));
+    } else {
+      parentSignal.addEventListener("abort", onParentAbort, { once: true });
+    }
+  }
+  if (timeoutMs > 0) {
+    timer = setTimeout(() => {
+      const err = new Error(`Subagent 请求超时（${Math.round(timeoutMs / 1000)} 秒无响应）`);
+      err.name = "SubagentIdleTimeoutError";
+      err.code = "SUBAGENT_IDLE_TIMEOUT";
+      controller.abort(err);
+    }, timeoutMs);
+  }
+  const cleanup = () => {
+    if (timer) clearTimeout(timer);
+    if (parentSignal) {
+      parentSignal.removeEventListener("abort", onParentAbort);
+    }
+  };
+  return { signal: controller.signal, controller, cleanup };
+}
+
+async function readSubagentOpenAIResponse(response, idleTimeoutMs, abortSig) {
+  const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase();
+  const hasStreamReader = response.body && typeof response.body.getReader === "function";
+
+  // 兼容非流式 JSON 端点或测试 mock 返回
+  if (contentType.includes("application/json") || !hasStreamReader) {
+    let timer = null;
+    try {
+      const data = await Promise.race([
+        response.json(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const err = new Error(
+              `Subagent 响应体读取超时（${Math.round(idleTimeoutMs / 1000)} 秒）`
+            );
+            err.name = "SubagentIdleTimeoutError";
+            err.code = "SUBAGENT_IDLE_TIMEOUT";
+            reject(err);
+          }, idleTimeoutMs);
+        }),
+      ]);
+      const choice = data?.choices?.[0]?.message;
+      if (!choice) return null;
+      return {
+        rawContent: choice.content || "",
+        reasoning: choice.reasoning_content || choice.reasoning || "",
+        toolCalls: Array.isArray(choice.tool_calls) ? choice.tool_calls : [],
+        usage: data?.usage || null,
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let fullContent = "";
+  let fullReasoning = "";
+  const toolCalls = [];
+  let usage = null;
+  let streamFinished = false;
+  let hasChoiceOrData = false;
+
+  const readChunkWithIdleGuard = () =>
+    new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const err = new Error(
+          `Subagent 上游连接已连续 ${Math.round(idleTimeoutMs / 1000)} 秒未返回任何数据`
+        );
+        err.name = "SubagentIdleTimeoutError";
+        err.code = "SUBAGENT_IDLE_TIMEOUT";
+        reject(err);
+      }, idleTimeoutMs);
+      reader.read().then(
+        (chunk) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(chunk);
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      );
+    });
+
+  try {
+    while (!streamFinished) {
+      if (abortSig?.aborted) break;
+      const { done, value } = await readChunkWithIdleGuard();
+      if (done) break;
+      if (!value || !value.byteLength) continue;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") {
+          streamFinished = true;
+          break;
+        }
+        try {
+          const json = JSON.parse(payload);
+          if (json.usage) usage = json.usage;
+          const choice = json.choices?.[0];
+          if (!choice) continue;
+          hasChoiceOrData = true;
+          const delta = choice.delta || choice.message || {};
+          const reasoningDelta = delta.reasoning_content || delta.reasoning;
+          if (reasoningDelta) fullReasoning += reasoningDelta;
+          if (delta.content) fullContent += delta.content;
+          if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              const idx = Number.isInteger(tc.index) ? tc.index : toolCalls.length;
+              if (!toolCalls[idx]) {
+                toolCalls[idx] = {
+                  index: idx,
+                  id: tc.id || "",
+                  type: tc.type || "function",
+                  function: { name: "", arguments: "" },
+                };
+              }
+              if (tc.id) toolCalls[idx].id = tc.id;
+              if (tc.type) toolCalls[idx].type = tc.type;
+              if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
+              if (tc.function?.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
+            }
+          }
+        } catch {
+          // 忽略非 JSON SSE 片段
+        }
+      }
+    }
+  } catch (readErr) {
+    if (
+      !abortSig?.aborted &&
+      isTransientSubagentError(readErr) &&
+      (streamFinished || fullContent.trim().length > 0)
+    ) {
+      console.warn(
+        `[subagent] 忽略流尾部的对端 Socket 提前关闭 (${readErr.cause?.code || readErr.message})`
+      );
+    } else {
+      throw readErr;
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {}
+  }
+
+  // 部分中转即使传入 stream:true 仍直接返一段无 data: 前缀的 JSON
+  if (!hasChoiceOrData && !fullContent && buffer.trim().startsWith("{")) {
+    try {
+      const fallbackJson = JSON.parse(buffer.trim());
+      if (fallbackJson.usage) usage = fallbackJson.usage;
+      const choice = fallbackJson.choices?.[0]?.message;
+      if (choice) {
+        return {
+          rawContent: choice.content || "",
+          reasoning: choice.reasoning_content || choice.reasoning || "",
+          toolCalls: Array.isArray(choice.tool_calls) ? choice.tool_calls : [],
+          usage,
+        };
+      }
+    } catch {}
+  }
+
+  const validTools = toolCalls.filter(Boolean);
+  if (!hasChoiceOrData && !fullContent && !fullReasoning && validTools.length === 0) {
+    return null;
+  }
+  return {
+    rawContent: fullContent,
+    reasoning: fullReasoning,
+    toolCalls: validTools,
+    usage,
+  };
+}
+
 const READ_ONLY_TOOL_LIST = [
   "read_file",
   "list_directory",
@@ -483,87 +703,125 @@ async function runSubagentLoop({
       parentToolContext?.sessionAbort?.abortController?.signal ||
       parentToolContext?.sessionAbort?.controller?.signal;
 
-    if (isAnthropic) {
-      const anthropicRes = await streamAnthropicMessage({
-        baseUrl,
-        apiKey: targetModel.apiKey,
-        model: targetModel.modelName,
-        messages,
-        tools: toolsForTurn,
-        maxTokens: configuredMaxTokens,
-        temperature: 0.2,
-        signal: abortSig,
-      });
-      recordSubUsage(anthropicRes.usage);
-      return {
-        rawContent: anthropicRes.content || "",
-        cleanContent: stripLegacyThinking(anthropicRes.content || ""),
-        reasoning: anthropicRes.reasoning || "",
-        reasoningMeta: anthropicRes.reasoningMeta || null,
-        toolCalls: Array.isArray(anthropicRes.toolCalls) ? anthropicRes.toolCalls : [],
-      };
-    }
+    const idleTimeoutSec = Math.max(
+      30,
+      Number(storageService?.getConfig?.("stream_idle_timeout")) || 180
+    );
+    const idleTimeoutMs = idleTimeoutSec * 1000;
 
-    const headers = { "Content-Type": "application/json" };
-    if (targetModel.apiKey) {
-      headers.Authorization = `Bearer ${targetModel.apiKey}`;
-    }
-
-    const buildBody = (includeMaxTokens) => {
-      const body = {
-        model: targetModel.modelName,
-        messages,
-        temperature: 0.2,
-        stream: false,
-      };
-      if (includeMaxTokens && configuredMaxTokens > 0) {
-        body.max_tokens = configuredMaxTokens;
-      }
-      if (Array.isArray(toolsForTurn) && toolsForTurn.length > 0) {
-        body.tools = toolsForTurn;
-        body.tool_choice = "auto";
-      }
-      return body;
-    };
-
-    let response = await fetch(chatUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(buildBody(true)),
-      signal: abortSig,
-    });
-
-    if (!response.ok && response.status === 400) {
-      const errProbe = await response.text().catch(() => "");
-      if (/max_tokens|max_completion_tokens|unsupported parameter/i.test(errProbe)) {
-        response = await fetch(chatUrl, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(buildBody(false)),
+    const runAttempt = async () => {
+      if (isAnthropic) {
+        const anthropicRes = await streamAnthropicMessage({
+          baseUrl,
+          apiKey: targetModel.apiKey,
+          model: targetModel.modelName,
+          messages,
+          tools: toolsForTurn,
+          maxTokens: configuredMaxTokens,
+          temperature: 0.2,
           signal: abortSig,
         });
-      } else {
-        throw new Error(`Subagent API 请求失败 (400): ${errProbe.slice(0, 200)}`);
+        recordSubUsage(anthropicRes.usage);
+        return {
+          rawContent: anthropicRes.content || "",
+          cleanContent: stripLegacyThinking(anthropicRes.content || ""),
+          reasoning: anthropicRes.reasoning || "",
+          reasoningMeta: anthropicRes.reasoningMeta || null,
+          toolCalls: Array.isArray(anthropicRes.toolCalls) ? anthropicRes.toolCalls : [],
+        };
+      }
+
+      const headers = { "Content-Type": "application/json" };
+      if (targetModel.apiKey) {
+        headers.Authorization = `Bearer ${targetModel.apiKey}`;
+      }
+
+      const buildBody = (includeMaxTokens) => {
+        const body = {
+          model: targetModel.modelName,
+          messages,
+          temperature: 0.2,
+          stream: true,
+        };
+        if (includeMaxTokens && configuredMaxTokens > 0) {
+          body.max_tokens = configuredMaxTokens;
+        }
+        if (Array.isArray(toolsForTurn) && toolsForTurn.length > 0) {
+          body.tools = toolsForTurn;
+          body.tool_choice = "auto";
+        }
+        return body;
+      };
+
+      const fetchWithTimeout = async (bodyObj) => {
+        const linked = createLinkedAbortController(abortSig, idleTimeoutMs);
+        try {
+          return await fetch(chatUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(bodyObj),
+            signal: linked.signal,
+          });
+        } finally {
+          linked.cleanup();
+        }
+      };
+
+      let response = await fetchWithTimeout(buildBody(true));
+
+      if (!response.ok && response.status === 400) {
+        const errProbe = await response.text().catch(() => "");
+        if (/max_tokens|max_completion_tokens|unsupported parameter/i.test(errProbe)) {
+          response = await fetchWithTimeout(buildBody(false));
+        } else {
+          throw new Error(`Subagent API 请求失败 (400): ${errProbe.slice(0, 200)}`);
+        }
+      }
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        throw new Error(`Subagent API 请求失败 (${response.status}): ${errText.slice(0, 200)}`);
+      }
+
+      const parsed = await readSubagentOpenAIResponse(response, idleTimeoutMs, abortSig);
+      if (!parsed) return null;
+      recordSubUsage(parsed.usage);
+
+      return {
+        rawContent: parsed.rawContent || "",
+        cleanContent: stripLegacyThinking(parsed.rawContent || ""),
+        reasoning: parsed.reasoning || "",
+        reasoningMeta: null,
+        toolCalls: parsed.toolCalls || [],
+      };
+    };
+
+    const maxAttempts = 3;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (abortSig?.aborted || parentToolContext?.sessionAbort?.cancelled) break;
+      try {
+        return await runAttempt();
+      } catch (err) {
+        lastErr = err;
+        if (
+          abortSig?.aborted ||
+          parentToolContext?.sessionAbort?.cancelled ||
+          !isTransientSubagentError(err) ||
+          attempt === maxAttempts
+        ) {
+          throw err;
+        }
+        const delayMs = attempt * 400;
+        console.warn(
+          `[subagent] 遇到瞬时网络/超时中断 (${err.cause?.code || err.message})，${delayMs}ms 后进行第 ${
+            attempt + 1
+          }/${maxAttempts} 次重试...`
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
       }
     }
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => "");
-      throw new Error(`Subagent API 请求失败 (${response.status}): ${errText.slice(0, 200)}`);
-    }
-
-    const data = await response.json();
-    recordSubUsage(data.usage);
-    const choice = data.choices?.[0]?.message;
-    if (!choice) return null;
-
-    return {
-      rawContent: choice.content || "",
-      cleanContent: stripLegacyThinking(choice.content || ""),
-      reasoning: choice.reasoning_content || choice.reasoning || "",
-      reasoningMeta: null,
-      toolCalls: choice.tool_calls || [],
-    };
+    throw lastErr;
   };
 
   const childToolContext = {
@@ -822,6 +1080,8 @@ module.exports = {
   resolveSubagentProfile,
   selectSubagentModel,
   buildSubagentSystemPrompt,
+  isTransientSubagentError,
+  readSubagentOpenAIResponse,
   runSubagentLoop,
   runSubagentBatch,
 };

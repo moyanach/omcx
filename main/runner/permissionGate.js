@@ -3,6 +3,8 @@ const {
   pendingPermissions,
   PERMISSION_TIMEOUT_MS,
   asyncStatSafe,
+  notifyDesktopIfBackground,
+  clearAppBadge,
 } = require("../shared");
 
 function supersedeSessionPermissions(sessionId, replyStream, event) {
@@ -63,6 +65,7 @@ function createPermissionChecker({
       const settleOnce = async (resp) => {
         if (settled) return;
         settled = true;
+        clearAppBadge();
         if (timer) clearTimeout(timer);
         pendingPermissions.delete(reqId);
         if (destroyedHandler && event?.sender) {
@@ -139,6 +142,11 @@ function createPermissionChecker({
       } catch {}
 
       pendingPermissions.set(reqId, { sessionId, settle: settleOnce });
+      notifyDesktopIfBackground({
+        title: "OMCX 需要审批确认",
+        body: `${actionDesc || "操作确认"}: ${meta?.command || targetPath || "等待授权"}`,
+        badge: true,
+      });
       replyStream("permission", {
         id: reqId,
         path: targetPath,

@@ -590,6 +590,102 @@ function createSessionMessageStorage({
     return true;
   }
 
+  function searchMemorySessions(query, limit) {
+    const q = String(query || "").trim().toLowerCase();
+    if (!q) return [];
+    const extractSnippet = (text) => {
+      const flat = String(text || "").replace(/\s+/g, " ").trim();
+      const idx = flat.toLowerCase().indexOf(q);
+      if (idx === -1) return "";
+      const start = Math.max(0, idx - 26);
+      const end = Math.min(flat.length, idx + q.length + 52);
+      return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
+    };
+    const bySession = new Map();
+    for (const s of memoryState.getSessions()) {
+      if (String(s?.title || "").toLowerCase().includes(q)) {
+        bySession.set(s.id, {
+          sessionId: s.id,
+          title: s.title || "新的 Agent 会话",
+          updatedAt: s.updated_at || 0,
+          matchType: "title",
+          matchSnippet: "",
+        });
+      }
+    }
+    for (const [sid, list] of memoryState.messagesBySession.entries()) {
+      const sess = memoryState.getSessions().find((s) => s.id === sid);
+      if (!sess || !Array.isArray(list)) continue;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const content = String(list[i]?.content || "");
+        if (!content.toLowerCase().includes(q)) continue;
+        const snippet = extractSnippet(content);
+        const existing = bySession.get(sid);
+        if (!existing) {
+          bySession.set(sid, {
+            sessionId: sid,
+            title: sess.title || "新的 Agent 会话",
+            updatedAt: sess.updated_at || 0,
+            matchType: "message",
+            matchSnippet: snippet,
+          });
+        } else if (!existing.matchSnippet && snippet) {
+          existing.matchSnippet = snippet;
+        }
+        break;
+      }
+    }
+    return Array.from(bySession.values())
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .slice(0, limit);
+  }
+
+  async function searchSessionsAsync(query, { limit = 40 } = {}) {
+    const clean = String(query || "").trim();
+    if (!clean) return [];
+    const safeLimit = Math.max(1, Math.min(100, Number(limit) || 40));
+
+    if (!hasLoadedSnapshot()) {
+      loadInitialSnapshot();
+    }
+
+    const memoryHits = searchMemorySessions(clean, safeLimit);
+    if (isMemoryOnlyMode()) {
+      return memoryHits;
+    }
+
+    let dbHits = [];
+    try {
+      const rows = await sendToWorkerWithPromise("SEARCH_SESSIONS", {
+        query: clean,
+        limit: safeLimit,
+      });
+      if (Array.isArray(rows)) dbHits = rows;
+    } catch {
+      const fallback = executeFallbackAction("SEARCH_SESSIONS", {
+        query: clean,
+        limit: safeLimit,
+      });
+      if (Array.isArray(fallback)) dbHits = fallback;
+    }
+
+    const merged = new Map();
+    for (const hit of dbHits) {
+      if (hit?.sessionId) merged.set(hit.sessionId, hit);
+    }
+    for (const hit of memoryHits) {
+      const existing = merged.get(hit.sessionId);
+      if (!existing) {
+        merged.set(hit.sessionId, hit);
+      } else if (!existing.matchSnippet && hit.matchSnippet) {
+        existing.matchSnippet = hit.matchSnippet;
+      }
+    }
+    return Array.from(merged.values())
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .slice(0, safeLimit);
+  }
+
   return {
     getSessions,
     getSession,
@@ -605,6 +701,7 @@ function createSessionMessageStorage({
     addMessage,
     persistMessageSync,
     deleteMessagesAfter,
+    searchSessionsAsync,
     getSessionOutputs,
     getSessionOutputsAsync,
     addSessionOutput,
