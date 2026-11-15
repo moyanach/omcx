@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { FileText, Folder, Sparkles, Network, Bot } from "lucide-react";
 import type { UnifiedMentionItem } from "@/lib/fileMention";
 
@@ -112,7 +113,7 @@ const MentionPopover: React.FC<Props> = ({
     );
   };
 
-  return (
+  const popoverNode = (
     <div
       style={{
         position: "fixed",
@@ -122,7 +123,7 @@ const MentionPopover: React.FC<Props> = ({
         maxWidth: "calc(100vw - 16px)",
         transform: position.above ? "translateY(-100%)" : "none",
       }}
-      className="z-[100] bg-[var(--ui-popover-bg)] backdrop-blur-xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] rounded-xl shadow-[var(--ui-popover-shadow)] overflow-hidden select-none"
+      className="z-[9999] bg-[var(--ui-popover-bg)] backdrop-blur-xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] rounded-xl shadow-[var(--ui-popover-shadow)] overflow-hidden select-none"
       onMouseDown={(e) => e.preventDefault()}
     >
       {/* 顶部标题与筛选指示器 */}
@@ -200,6 +201,8 @@ const MentionPopover: React.FC<Props> = ({
       </div>
     </div>
   );
+
+  return typeof document !== "undefined" ? createPortal(popoverNode, document.body) : popoverNode;
 };
 
 export default MentionPopover;

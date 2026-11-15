@@ -253,7 +253,7 @@ const MessageInput: React.FC<Props> = ({
     const availableBelow = window.innerHeight - rect.bottom - 16;
     const above = availableAbove >= 240 || availableAbove >= availableBelow;
     const maxHeight = Math.max(150, Math.min(400, above ? availableAbove : availableBelow));
-    const left = Math.max(8, Math.min(rect.left + coords.left, window.innerWidth - 452));
+    const left = Math.max(8, Math.min(rect.left + coords.left, window.innerWidth - 468));
 
     setMentionPos({
       top: above ? anchorTop - 8 : rect.bottom + 8,

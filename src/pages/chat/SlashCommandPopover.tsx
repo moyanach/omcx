@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Terminal, Sparkles, Folder } from "lucide-react";
 import type { MentionPosition } from "@/pages/chat/MentionPopover";
 
@@ -33,7 +34,7 @@ const SlashCommandPopover: React.FC<Props> = ({
     activeRef.current?.scrollIntoView({ block: "nearest" });
   }, [activeIndex]);
 
-  return (
+  const popoverNode = (
     <div
       style={{
         position: "fixed",
@@ -43,7 +44,7 @@ const SlashCommandPopover: React.FC<Props> = ({
         maxWidth: "calc(100vw - 16px)",
         transform: position.above ? "translateY(-100%)" : "none",
       }}
-      className="z-[100] bg-[var(--ui-popover-bg)] backdrop-blur-xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] rounded-xl shadow-[var(--ui-popover-shadow)] overflow-hidden select-none"
+      className="z-[9999] bg-[var(--ui-popover-bg)] backdrop-blur-xl backdrop-saturate-150 border border-[color:var(--ui-border-subtle)] rounded-xl shadow-[var(--ui-popover-shadow)] overflow-hidden select-none"
       onMouseDown={(e) => e.preventDefault()}
     >
       <div className="px-3 py-2 border-b border-[color:var(--ui-divider-hairline)] bg-[var(--ui-card-header-bg)] flex items-center justify-between">
@@ -131,6 +132,8 @@ const SlashCommandPopover: React.FC<Props> = ({
       </div>
     </div>
   );
+
+  return typeof document !== "undefined" ? createPortal(popoverNode, document.body) : popoverNode;
 };
 
 export default SlashCommandPopover;
