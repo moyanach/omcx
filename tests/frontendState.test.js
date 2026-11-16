@@ -119,3 +119,67 @@ test("chatStore 队列调度与上下文指标按会话隔离不串台", () => {
   assert.equal(useChatStore.getState().contextMetrics.totalTokens, 1000);
   assert.equal(useChatStore.getState().contextMetricsBySession.sess_B.totalTokens, 9999);
 });
+
+test("chatStore serviceSlice handleWorkspaceChanged 按区域精确递增版本号并触发刷新", async () => {
+  const useChatStore = loadChatStoreInTestEnv();
+  let gitCalls = 0;
+  let mcpCalls = 0;
+  window.electronAPI.getWorkspaceGitStatus = async (wd) => {
+    gitCalls += 1;
+    return { isGit: true, branch: "main", insertions: 0, deletions: 0, modifiedFiles: [], wd };
+  };
+  window.electronAPI.getMcpServers = async () => {
+    mcpCalls += 1;
+    return [];
+  };
+  window.electronAPI.getSkills = async () => [];
+  window.electronAPI.getSubagents = async () => [];
+
+  useChatStore.setState({
+    sessions: [{ id: "s1", title: "S1", updatedAt: 1, workDir: "/tmp/ws1" }],
+    activeSessionId: "s1",
+    filesRevision: 0,
+    gitRevision: 0,
+    specsRevision: 0,
+    commandsRevision: 0,
+    wikiRevision: 0,
+  });
+
+  useChatStore.getState().handleWorkspaceChanged({
+    workDir: "/tmp/ws1",
+    reason: "tool_write",
+    areas: ["files", "git"],
+  });
+
+  let state = useChatStore.getState();
+  assert.equal(state.filesRevision, 1);
+  assert.equal(state.gitRevision, 1);
+  assert.equal(state.specsRevision, 0);
+  assert.equal(state.commandsRevision, 0);
+  assert.equal(state.wikiRevision, 0);
+
+  useChatStore.getState().handleWorkspaceChanged({
+    workDir: "/tmp/ws1",
+    reason: "tool_spec",
+    areas: ["specs", "wiki"],
+  });
+
+  state = useChatStore.getState();
+  assert.equal(state.filesRevision, 1);
+  assert.equal(state.specsRevision, 1);
+  assert.equal(state.wikiRevision, 1);
+
+  useChatStore.getState().handleWorkspaceChanged({
+    workDir: "/tmp/ws1",
+    reason: "tools_config",
+    areas: ["skills", "commands"],
+  });
+
+  state = useChatStore.getState();
+  assert.equal(state.commandsRevision, 1);
+
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(gitCalls >= 1, true);
+  assert.equal(mcpCalls >= 1, true);
+});
+

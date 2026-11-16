@@ -5,6 +5,8 @@ const {
   getLoadedModule,
   getStorageService,
   getUpdaterService,
+  getWorkspaceRefreshService,
+  initWorkspaceRefreshBridge,
   setMainWindow,
   getMainWindow,
   flushActiveRunsAndStorageOnExit,
@@ -92,6 +94,9 @@ function createWindow() {
 
   win.on("focus", () => {
     clearAppBadge();
+    try {
+      getWorkspaceRefreshService().notifyWindowFocus();
+    } catch {}
   });
 
   win.on("closed", () => {
@@ -106,6 +111,7 @@ function createWindow() {
 app.whenReady().then(() => {
   // 初始化存储环境并注册协议、领域 IPC 与 Agent 执行循环
   getStorageService().initStorage();
+  initWorkspaceRefreshBridge();
   registerProtocols();
   registerSessionIpc();
   registerMcpSkillsIpc();
@@ -120,6 +126,9 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   flushActiveRunsAndStorageOnExit();
+  try {
+    getLoadedModule(MODULES.workspaceRefreshService)?.unwatchAllWorkspaces?.();
+  } catch {}
   try {
     getLoadedModule(MODULES.terminalPtyService)?.terminalPtyService?.disposeAll();
   } catch (err) {

@@ -20,6 +20,7 @@ const {
   getPathResolver,
   getFileIndexer,
   getToolRegistry,
+  getWorkspaceRefreshService,
 } = require("../shared");
 
 const DIRECT_READONLY_TOOLS = new Set([
@@ -38,12 +39,47 @@ function registerFsIpc() {
 
   ipcMain.handle(
     "save-workspace",
-    safeHandler((event, ws) => getStorageService().saveWorkspace(ws))
+    safeHandler((event, ws) => {
+      const res = getStorageService().saveWorkspace(ws);
+      const folders = Array.isArray(ws?.folders) ? ws.folders.map((f) => f.path).filter(Boolean) : [];
+      const primary = ws?.folders?.find?.((f) => f.isPrimary)?.path || folders[0] || null;
+      if (primary) {
+        getWorkspaceRefreshService().watchWorkspaceFolders(primary, folders);
+      }
+      getWorkspaceRefreshService().emitWorkspaceChanged({
+        workDir: primary,
+        reason: "workspace_config",
+        areas: ["all"],
+        invalidate: true,
+      });
+      return res;
+    })
   );
 
   ipcMain.handle(
     "delete-workspace",
-    safeHandler((event, id) => getStorageService().deleteWorkspace(id))
+    safeHandler((event, id) => {
+      const res = getStorageService().deleteWorkspace(id);
+      getWorkspaceRefreshService().emitWorkspaceChanged({
+        workDir: null,
+        reason: "workspace_config",
+        areas: ["all"],
+        invalidate: true,
+      });
+      return res;
+    })
+  );
+
+  ipcMain.handle(
+    "watch-workspace",
+    safeHandler((event, workDir) => {
+      if (!workDir || typeof workDir !== "string" || !workDir.trim()) {
+        getWorkspaceRefreshService().unwatchAllWorkspaces();
+        return [];
+      }
+      const { allowedFolders } = getWorkspaceFolders(workDir);
+      return getWorkspaceRefreshService().watchWorkspaceFolders(workDir, allowedFolders);
+    })
   );
   ipcMain.handle(
     "reorder-workspaces",
@@ -458,7 +494,7 @@ function registerFsIpc() {
         return { success: false, error: `安全策略已拒绝修改工作空间外部或受保护路径: ${filePath}` };
       }
 
-      return await fileLockService.withLock(targetAbs, async () => {
+      const revertResult = await fileLockService.withLock(targetAbs, async () => {
         if (isNewFile) {
           if (!(await asyncPathExists(targetAbs))) {
             return { success: true, action: "already_removed", path: targetAbs };
@@ -507,17 +543,29 @@ function registerFsIpc() {
         await fsp.writeFile(targetAbs, oldText, "utf-8");
         return { success: true, action: "reverted", path: targetAbs };
       });
+
+      if (revertResult?.success && revertResult.action !== "already_removed") {
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          workDir: baseRoot,
+          reason: "file_revert",
+          areas: ["files", "git"],
+          paths: [targetAbs],
+          invalidate: true,
+        });
+      }
+      return revertResult;
     })
   );
 
   ipcMain.handle(
     "get-workspace-file-index",
-    safeHandler((event, workDir) => {
+    safeHandler(async (event, workDir) => {
       if (!workDir || typeof workDir !== "string") {
         return { files: [], source: "none", truncated: false };
       }
       const { allowedFolders } = getWorkspaceFolders(workDir);
-      return getFileIndexer().listWorkspaceFiles(workDir, allowedFolders);
+      getWorkspaceRefreshService().watchWorkspaceFolders(workDir, allowedFolders);
+      return await getFileIndexer().listWorkspaceFilesAsync(workDir, allowedFolders);
     })
   );
 

@@ -40,6 +40,7 @@ export const GitGraphView: React.FC<{ refreshKey?: number }> = ({ refreshKey }) 
     activeSessionId,
     workspaces,
     activeWorkspaceId,
+    gitRevision,
     fetchWorkspaces,
     refreshGitStatus,
     notifyGitUpdated,
@@ -49,6 +50,7 @@ export const GitGraphView: React.FC<{ refreshKey?: number }> = ({ refreshKey }) 
       activeSessionId: s.activeSessionId,
       workspaces: s.workspaces,
       activeWorkspaceId: s.activeWorkspaceId,
+      gitRevision: s.gitRevision,
       fetchWorkspaces: s.fetchWorkspaces,
       refreshGitStatus: s.refreshGitStatus,
       notifyGitUpdated: s.notifyGitUpdated,
@@ -308,7 +310,7 @@ export const GitGraphView: React.FC<{ refreshKey?: number }> = ({ refreshKey }) 
 
   useEffect(() => {
     fetchGraph();
-  }, [fetchGraph, refreshKey]);
+  }, [fetchGraph, refreshKey, gitRevision]);
 
   const handleSelectCommit = async (hash: string) => {
     if (selectedHash === hash) {

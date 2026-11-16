@@ -1,6 +1,7 @@
 import { useCallback, useEffect } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useChatStore, type ChatAttachment, type QueuedPrompt } from "../stores/chatStore";
+import { invalidateFileIndex } from "../lib/fileMention";
 
 interface StreamCallbacks {
   onToolStatus?: (status: {
@@ -414,6 +415,13 @@ export function useStreamChat() {
             });
             updateMessageMetadata(targetSessionId, assistantMsgId, finalMeta);
 
+            if (currentWorkDir) {
+              invalidateFileIndex(currentWorkDir);
+              if (useChatStore.getState().activeSessionId === targetSessionId) {
+                void useChatStore.getState().refreshGitStatus(currentWorkDir);
+              }
+            }
+
             // 收尾瞬间注入但未被消费的纠偏指示 -> 回退为排队任务，插入队首
             recoverPendingSteers(
               targetSessionId,
@@ -708,6 +716,13 @@ export function useStreamChat() {
               reasoning: finalReasoning || undefined,
             });
             updateMessageMetadata(targetSessionId, assistantMsgId, finalMeta);
+
+            if (currentWorkDir) {
+              invalidateFileIndex(currentWorkDir);
+              if (useChatStore.getState().activeSessionId === targetSessionId) {
+                void useChatStore.getState().refreshGitStatus(currentWorkDir);
+              }
+            }
 
             // 收尾瞬间注入但未被消费的纠偏指示 -> 回退为排队任务，插入队首
             recoverPendingSteers(

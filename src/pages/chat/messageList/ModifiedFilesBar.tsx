@@ -211,6 +211,7 @@ export const ModifiedFilesBar: React.FC<{ events: ToolStatusEvent[] }> = ({ even
   });
   const openFileInWorkbench = useChatStore((s) => s.openFileInWorkbench);
   const refreshGitStatus = useChatStore((s) => s.refreshGitStatus);
+  const notifyGitUpdated = useChatStore((s) => s.notifyGitUpdated);
 
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isPinned, setIsPinned] = useState(false);
@@ -394,6 +395,7 @@ export const ModifiedFilesBar: React.FC<{ events: ToolStatusEvent[] }> = ({ even
           msg: item.isNewFile ? '已删除新建文件' : '已还原本次修改',
         });
         void refreshGitStatus(activeSessionWorkDir);
+        notifyGitUpdated();
       } else {
         setConfirmRevertId(null);
         setRevertNotice({

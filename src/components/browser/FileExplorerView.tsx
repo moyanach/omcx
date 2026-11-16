@@ -214,6 +214,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     sessions,
     activeSessionId,
     workspaces,
+    filesRevision,
     setPendingMentionInsert,
     openUrlInWorkbench,
   } = useChatStore(
@@ -221,6 +222,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
       sessions: s.sessions,
       activeSessionId: s.activeSessionId,
       workspaces: s.workspaces,
+      filesRevision: s.filesRevision,
       setPendingMentionInsert: s.setPendingMentionInsert,
       openUrlInWorkbench: s.openUrlInWorkbench,
     }))
@@ -422,14 +424,14 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   // 读取并打开某个文件
   const openFile = async (
     targetPath: string,
-    opts?: { line?: number; lineEnd?: number; mode?: "preview" | "code" }
+    opts?: { line?: number; lineEnd?: number; mode?: "preview" | "code"; silent?: boolean }
   ) => {
     if (!primaryWorkDir || !window.electronAPI?.readWorkspaceFile) return;
     const clean = String(targetPath || "").trim();
     if (!clean) return;
 
     const seq = ++openSeqRef.current;
-    setLoadingFile(true);
+    if (!opts?.silent) setLoadingFile(true);
     try {
       // 优先直接传递原始目标路径（主进程具备多源深度穿透匹配能力）
       let res = await window.electronAPI.readWorkspaceFile(primaryWorkDir, clean);
@@ -487,13 +489,15 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
           }
         }
 
-        // 平滑滚动定位左侧文件树中的对应选中文件项
-        setTimeout(() => {
-          const el = document.getElementById(`tree-file-${encodeURIComponent(abs)}`);
-          if (el) {
-            el.scrollIntoView({ behavior: "smooth", block: "nearest" });
-          }
-        }, 150);
+        // 平滑滚动定位左侧文件树中的对应选中文件项（后台静默刷新时不抢占滚动条）
+        if (!opts?.silent) {
+          setTimeout(() => {
+            const el = document.getElementById(`tree-file-${encodeURIComponent(abs)}`);
+            if (el) {
+              el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            }
+          }, 150);
+        }
       }
     } catch (err) {
       console.error("读取文件失败:", err);
@@ -529,6 +533,36 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
       mode: viewMode,
     });
   }, [refreshKey]);
+
+  // 响应工作区文件变更事件：同步刷新已展开目录、全局搜索索引与当前预览文件（保留树展开状态）
+  const filesRefreshHandlerRef = useRef<() => void>(() => {});
+  filesRefreshHandlerRef.current = () => {
+    const openDirs = Object.keys(expandedDirs).filter((dir) => expandedDirs[dir]);
+    const targets = openDirs.length > 0 ? openDirs : workspaceRoots.map((r) => r.path);
+    Promise.all(targets.map((dir) => loadDirectory(dir))).catch(() => {});
+    void loadFileIndex();
+    if (selectedFile?.absPath) {
+      void openFile(selectedFile.absPath, {
+        line: highlightLine,
+        lineEnd: highlightLineEnd,
+        mode: viewMode,
+        silent: true,
+      });
+    }
+  };
+
+  const filesRevisionRef = useRef(filesRevision);
+  useEffect(() => {
+    if (filesRevisionRef.current === filesRevision) return;
+    filesRevisionRef.current = filesRevision;
+    if (!primaryWorkDir) return;
+
+    const timer = window.setTimeout(() => {
+      filesRefreshHandlerRef.current();
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [filesRevision, primaryWorkDir]);
 
   // 自适应渲染守护：轮询检测 SyntaxHighlighter DOM 挂载完成，平滑居中滚动至指定代码行
   useEffect(() => {

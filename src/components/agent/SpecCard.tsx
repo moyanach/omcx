@@ -50,10 +50,11 @@ export const SpecCard: React.FC = () => {
   const [items, setItems] = useState<SpecItem[]>([]);
   const [message, setMessage] = useState('');
 
-  const { sessions, activeSessionId, openFileInWorkbench } = useChatStore(
+  const { sessions, activeSessionId, specsRevision, openFileInWorkbench } = useChatStore(
     useShallow((s) => ({
       sessions: s.sessions,
       activeSessionId: s.activeSessionId,
+      specsRevision: s.specsRevision,
       openFileInWorkbench: s.openFileInWorkbench,
     }))
   );
@@ -78,7 +79,7 @@ export const SpecCard: React.FC = () => {
 
   useEffect(() => {
     if (isOpen) load();
-  }, [isOpen, load]);
+  }, [isOpen, load, specsRevision]);
 
   const copyExecute = async (item: SpecItem) => {
     const command = `/execute-spec ${item.id}`;

@@ -63,6 +63,7 @@ const MODULES = {
   sandboxPolicyService: "../services/sandboxPolicyService",
   contextCompactor: "../services/contextCompactor",
   modelErrorService: "../services/modelErrorService",
+  workspaceRefreshService: "../services/workspaceRefreshService",
 };
 
 const getStorageService = () => lazyRequire(MODULES.storageService);
@@ -96,6 +97,7 @@ const getAnthropicClient = () => lazyRequire(MODULES.anthropicClient);
 const getSandboxPolicyService = () => lazyRequire(MODULES.sandboxPolicyService);
 const getContextCompactor = () => lazyRequire(MODULES.contextCompactor);
 const getModelErrorService = () => lazyRequire(MODULES.modelErrorService);
+const getWorkspaceRefreshService = () => lazyRequire(MODULES.workspaceRefreshService);
 
 // ─── 运行时全局可变状态（统一收敛到 shared，避免模块循环依赖） ───
 const activeStreamSnapshotFlushers = new Map();
@@ -879,6 +881,24 @@ function sendStreamEvent(sender, sessionId, type, data, runId = null) {
   }
 }
 
+let workspaceRefreshUnsub = null;
+function initWorkspaceRefreshBridge() {
+  if (workspaceRefreshUnsub) return workspaceRefreshUnsub;
+  const svc = getWorkspaceRefreshService();
+  workspaceRefreshUnsub = svc.subscribeWorkspaceChanged((payload) => {
+    try {
+      const wins = BrowserWindow?.getAllWindows?.() || [];
+      for (const win of wins) {
+        if (!win || win.isDestroyed()) continue;
+        win.webContents.send("workspace-changed", payload);
+      }
+    } catch {
+      // 忽略已关闭窗口异常
+    }
+  });
+  return workspaceRefreshUnsub;
+}
+
 module.exports = {
   PROJECT_ROOT,
   MODULES,
@@ -915,6 +935,8 @@ module.exports = {
   getSandboxPolicyService,
   getContextCompactor,
   getModelErrorService,
+  getWorkspaceRefreshService,
+  initWorkspaceRefreshBridge,
   activeStreamSnapshotFlushers,
   activeStreamSessions,
   pendingPermissions,

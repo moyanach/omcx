@@ -15,6 +15,7 @@ const {
   getToolRegistry,
   getContextBuilder,
   getContextCalculator,
+  getWorkspaceRefreshService,
 } = require("../shared");
 
 function registerMcpSkillsIpc() {
@@ -28,6 +29,10 @@ function registerMcpSkillsIpc() {
     safeHandler((event, servers) => {
       const saved = getStorageService().saveGlobalMcpServers(servers);
       getMcpClientService().reloadClients();
+      getWorkspaceRefreshService().emitWorkspaceChanged({
+        reason: "tools_config",
+        areas: ["mcp"],
+      });
       return saved;
     })
   );
@@ -37,6 +42,11 @@ function registerMcpSkillsIpc() {
     safeHandler((event, { workDir, trusted } = {}) => {
       const result = getStorageService().setProjectMcpTrust(workDir, Boolean(trusted));
       getMcpClientService().reloadClients();
+      getWorkspaceRefreshService().emitWorkspaceChanged({
+        workDir,
+        reason: "tools_config",
+        areas: ["mcp"],
+      });
       return result;
     })
   );
@@ -65,6 +75,10 @@ function registerMcpSkillsIpc() {
       if (!nextMap[id]) return { success: false, error: "未找到该全局 MCP 服务器" };
       storageService.saveGlobalMcpServers(nextMap);
       getMcpClientService().reloadClients();
+      getWorkspaceRefreshService().emitWorkspaceChanged({
+        reason: "tools_config",
+        areas: ["mcp"],
+      });
       return { success: true };
     })
   );
@@ -73,7 +87,13 @@ function registerMcpSkillsIpc() {
     "delete-mcp-server",
     safeHandler((event, { id } = {}) => {
       const result = getStorageService().deleteGlobalMcpServer(id);
-      if (result?.success) getMcpClientService().reloadClients();
+      if (result?.success) {
+        getMcpClientService().reloadClients();
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          reason: "tools_config",
+          areas: ["mcp"],
+        });
+      }
       return result;
     })
   );
@@ -215,16 +235,30 @@ function registerMcpSkillsIpc() {
 
   ipcMain.handle(
     "toggle-skill",
-    safeHandler((event, { name, enabled } = {}) =>
-      getStorageService().setSkillEnabled(name, Boolean(enabled))
-    )
+    safeHandler((event, { name, enabled } = {}) => {
+      const res = getStorageService().setSkillEnabled(name, Boolean(enabled));
+      getWorkspaceRefreshService().emitWorkspaceChanged({
+        reason: "tools_config",
+        areas: ["skills", "commands"],
+      });
+      return res;
+    })
   );
 
   ipcMain.handle(
     "delete-skill",
-    safeHandler((event, { filePath, workDir } = {}) =>
-      getStorageService().deleteSkill({ filePath, workDir })
-    )
+    safeHandler((event, { filePath, workDir } = {}) => {
+      const res = getStorageService().deleteSkill({ filePath, workDir });
+      if (res?.success !== false) {
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          workDir,
+          reason: "tools_config",
+          areas: ["skills", "commands", "files"],
+          invalidate: Boolean(workDir),
+        });
+      }
+      return res;
+    })
   );
 
   ipcMain.handle(
@@ -244,11 +278,20 @@ function registerMcpSkillsIpc() {
         target = result.filePaths[0];
       }
       const resolvedScope = scope === "project" ? "project" : "global";
-      return getStorageService().importSkill(target, {
+      const res = await getStorageService().importSkill(target, {
         overwrite: Boolean(overwrite),
         workDir: resolvedScope === "project" ? workDir : null,
         scope: resolvedScope,
       });
+      if (res && res.success !== false && !res.canceled) {
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          workDir: resolvedScope === "project" ? workDir : null,
+          reason: "tools_config",
+          areas: ["skills", "commands", ...(resolvedScope === "project" ? ["files"] : [])],
+          invalidate: resolvedScope === "project" && Boolean(workDir),
+        });
+      }
+      return res;
     })
   );
 
@@ -266,9 +309,16 @@ function registerMcpSkillsIpc() {
 
   ipcMain.handle(
     "install-market-skill",
-    safeHandler((event, { item, overwrite = false } = {}) =>
-      getSkillMarketService().installSkill(item, { overwrite: Boolean(overwrite) })
-    )
+    safeHandler(async (event, { item, overwrite = false } = {}) => {
+      const res = await getSkillMarketService().installSkill(item, { overwrite: Boolean(overwrite) });
+      if (res && res.success !== false) {
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          reason: "tools_config",
+          areas: ["skills", "commands"],
+        });
+      }
+      return res;
+    })
   );
 
   ipcMain.handle(
@@ -327,7 +377,7 @@ function registerMcpSkillsIpc() {
       if (!cfg.modelApiKey && cfg.provider !== "ollama") {
         return { success: false, error: "请先在【设置】中为当前模型配置 API Key" };
       }
-      return getRepoWikiService().generateRepoWiki({
+      const res = await getRepoWikiService().generateRepoWiki({
         workDir,
         modelConfig: {
           provider: cfg.provider,
@@ -337,6 +387,15 @@ function registerMcpSkillsIpc() {
           max_output_tokens: cfg.maxOutputTokens,
         },
       });
+      if (res?.success) {
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          workDir,
+          reason: "wiki_generated",
+          areas: ["wiki", "files"],
+          invalidate: true,
+        });
+      }
+      return res;
     })
   );
 

@@ -28,7 +28,7 @@ export const ChangesCard: React.FC = () => {
   const [prResult, setPrResult] = useState<{ success: boolean; text: string } | null>(null);
   const [message, setMessage] = useState('');
 
-  const { gitStatus, sessions, activeSessionId, openDiffInWorkbench, refreshGitStatus } =
+  const { gitStatus, sessions, activeSessionId, openDiffInWorkbench, refreshGitStatus, notifyGitUpdated } =
     useChatStore(
       useShallow((s) => ({
         gitStatus: s.gitStatus,
@@ -36,6 +36,7 @@ export const ChangesCard: React.FC = () => {
         activeSessionId: s.activeSessionId,
         openDiffInWorkbench: s.openDiffInWorkbench,
         refreshGitStatus: s.refreshGitStatus,
+        notifyGitUpdated: s.notifyGitUpdated,
       }))
     );
   const activeSession = sessions.find((s) => s.id === activeSessionId);
@@ -75,6 +76,7 @@ export const ChangesCard: React.FC = () => {
       setCommitMessage('');
       setCommitOpen(false);
       await refreshGitStatus(workDir);
+      notifyGitUpdated();
     } catch (err: any) {
       setMessage(err?.message || String(err));
     } finally {

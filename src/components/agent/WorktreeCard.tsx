@@ -66,6 +66,8 @@ export const WorktreeCard: React.FC = () => {
     activeSessionId,
     activeWorkspaceId,
     workspaces,
+    specsRevision,
+    gitRevision,
     addSession,
     setSessionWorkDir,
   } = useChatStore(
@@ -74,6 +76,8 @@ export const WorktreeCard: React.FC = () => {
       activeSessionId: s.activeSessionId,
       activeWorkspaceId: s.activeWorkspaceId,
       workspaces: s.workspaces,
+      specsRevision: s.specsRevision,
+      gitRevision: s.gitRevision,
       addSession: s.addSession,
       setSessionWorkDir: s.setSessionWorkDir,
     }))
@@ -146,7 +150,7 @@ export const WorktreeCard: React.FC = () => {
 
   useEffect(() => {
     if (isOpen) load();
-  }, [isOpen, load]);
+  }, [isOpen, load, specsRevision, gitRevision]);
 
   const handleCreate = async () => {
     if (!workDir || busy) return;

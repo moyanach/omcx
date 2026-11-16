@@ -1,4 +1,5 @@
 import { StateCreator } from "zustand";
+import { invalidateFileIndex } from "@/lib/fileMention";
 import type {
   ChatState,
   SessionOutput,
@@ -13,10 +14,22 @@ let outputsRefreshSeq = 0;
 let gitRefreshSeq = 0;
 let mcpRefreshSeq = 0;
 
+export interface WorkspaceChangedEvent {
+  workDir?: string | null;
+  reason?: string;
+  areas?: string[];
+  paths?: string[];
+  ts?: number;
+}
+
 export interface ServiceSlice {
   outputs: SessionOutput[];
   gitStatus: WorkspaceGitStatus | null;
   gitRevision: number;
+  filesRevision: number;
+  specsRevision: number;
+  commandsRevision: number;
+  wikiRevision: number;
   mcpServers: McpServerItem[];
   skills: SkillItem[];
   subagents: SubagentItem[];
@@ -24,6 +37,7 @@ export interface ServiceSlice {
   refreshOutputs: (sessionId: string) => Promise<void>;
   refreshGitStatus: (workDir?: string | null) => Promise<void>;
   notifyGitUpdated: () => void;
+  handleWorkspaceChanged: (payload?: WorkspaceChangedEvent) => void;
   refreshMcpAndSkills: (workDir?: string | null) => Promise<void>;
 }
 
@@ -36,11 +50,60 @@ export const createServiceSlice: StateCreator<
   outputs: [],
   gitStatus: null,
   gitRevision: 0,
+  filesRevision: 0,
+  specsRevision: 0,
+  commandsRevision: 0,
+  wikiRevision: 0,
   mcpServers: [],
   skills: [],
   subagents: [],
 
   notifyGitUpdated: () => set((s) => ({ gitRevision: s.gitRevision + 1 })),
+
+  handleWorkspaceChanged: (payload) => {
+    const areas =
+      Array.isArray(payload?.areas) && payload.areas.length > 0
+        ? payload.areas
+        : ["files", "git"];
+    const has = (name: string) => areas.includes("all") || areas.includes(name);
+
+    const state = get();
+    const activeSession = state.sessions.find((s) => s.id === state.activeSessionId);
+    const activeWorkDir = activeSession?.workDir || null;
+
+    if (has("files")) {
+      if (!payload?.workDir || payload.reason === "window_focus" || payload.reason === "workspace_config") {
+        invalidateFileIndex();
+      } else {
+        invalidateFileIndex(payload.workDir);
+        if (activeWorkDir && activeWorkDir !== payload.workDir) {
+          invalidateFileIndex(activeWorkDir);
+        }
+      }
+    }
+
+    const bumpFiles = has("files");
+    const bumpGit = has("git");
+    const bumpSpecs = has("specs") || has("worktrees");
+    const bumpCommands =
+      has("commands") || has("skills") || has("subagents") || has("mcp");
+    const bumpWiki = has("wiki");
+
+    set((s) => ({
+      filesRevision: bumpFiles ? s.filesRevision + 1 : s.filesRevision,
+      gitRevision: bumpGit ? s.gitRevision + 1 : s.gitRevision,
+      specsRevision: bumpSpecs ? s.specsRevision + 1 : s.specsRevision,
+      commandsRevision: bumpCommands ? s.commandsRevision + 1 : s.commandsRevision,
+      wikiRevision: bumpWiki ? s.wikiRevision + 1 : s.wikiRevision,
+    }));
+
+    if (activeWorkDir && bumpGit) {
+      void get().refreshGitStatus(activeWorkDir);
+    }
+    if (has("skills") || has("subagents") || has("mcp")) {
+      void get().refreshMcpAndSkills(activeWorkDir);
+    }
+  },
 
   refreshOutputs: async (sessionId) => {
     if (!window.electronAPI?.getSessionOutputs || !sessionId) return;

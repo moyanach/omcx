@@ -174,14 +174,18 @@ export const GitChangesView: React.FC<GitChangesViewProps> = ({
     sessions,
     activeSessionId,
     gitStatus,
+    gitRevision,
     refreshGitStatus,
+    notifyGitUpdated,
     openFileInWorkbench,
   } = useChatStore(
     useShallow((s) => ({
       sessions: s.sessions,
       activeSessionId: s.activeSessionId,
       gitStatus: s.gitStatus,
+      gitRevision: s.gitRevision,
       refreshGitStatus: s.refreshGitStatus,
+      notifyGitUpdated: s.notifyGitUpdated,
       openFileInWorkbench: s.openFileInWorkbench,
     }))
   );
@@ -213,7 +217,7 @@ export const GitChangesView: React.FC<GitChangesViewProps> = ({
     if (workDir) {
       refreshGitStatus(workDir);
     }
-  }, [workDir, refreshKey]);
+  }, [workDir, refreshKey, gitRevision]);
 
   useEffect(() => {
     if (initialFilePath) {
@@ -255,7 +259,7 @@ export const GitChangesView: React.FC<GitChangesViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [workDir, selectedPath, refreshKey]);
+  }, [workDir, selectedPath, refreshKey, gitRevision]);
 
   const allDiffLines = useMemo(() => {
     if (!diffData || diffData.isBinary) return [];
@@ -328,6 +332,7 @@ export const GitChangesView: React.FC<GitChangesViewProps> = ({
           text: `已成功提交 (${res.commitHash || "HEAD"})`,
         });
         await refreshGitStatus(workDir);
+        notifyGitUpdated();
       } else {
         setCommitResult({
           ok: false,

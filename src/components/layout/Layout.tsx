@@ -1,8 +1,10 @@
-import React, { Suspense, lazy } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo } from 'react';
 import { Loader2 } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import LeftSidebar from '@/components/navigation/LeftSidebar';
 import CommandPaletteModal from '@/components/navigation/CommandPaletteModal';
 import { useAppStore } from '@/stores/appStore';
+import { useChatStore } from '@/stores/chatStore';
 import ChatView from '@/pages/ChatView';
 import SettingsModal from '@/components/settings/SettingsModal';
 
@@ -46,6 +48,36 @@ const MainContent: React.FC = () => {
 };
 
 const Layout: React.FC = () => {
+  const { sessions, activeSessionId, workspaces } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      workspaces: s.workspaces,
+    }))
+  );
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const activeWorkDir = activeSession?.workDir || '';
+  const activeWorkspaceFoldersKey = useMemo(() => {
+    const matched = workspaces.find(
+      (ws) =>
+        ws.id === activeSession?.workspaceId ||
+        ws.folders?.some((f) => f.path === activeWorkDir)
+    );
+    return matched ? matched.folders.map((f) => f.path).join('|') : '';
+  }, [workspaces, activeSession?.workspaceId, activeWorkDir]);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onWorkspaceChanged) return;
+    return window.electronAPI.onWorkspaceChanged((payload) => {
+      useChatStore.getState().handleWorkspaceChanged(payload);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!window.electronAPI?.watchWorkspace) return;
+    void window.electronAPI.watchWorkspace(activeWorkDir || null).catch(() => {});
+  }, [activeWorkDir, activeWorkspaceFoldersKey]);
+
   return (
     <div className='flex h-full w-full overflow-hidden bg-[var(--ui-app-bg)]'>
       {/* 单栏任务中心 (对标主流 Agent 桌面端: 新建任务 + 自动化/工具 + 空间树 + 用户) */}

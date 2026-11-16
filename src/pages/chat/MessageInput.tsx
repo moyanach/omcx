@@ -138,6 +138,8 @@ const MessageInput: React.FC<Props> = ({
     skills,
     mcpServers,
     subagents,
+    filesRevision,
+    commandsRevision,
   } = useChatStore(
     useShallow((s) => ({
       activeSessionId: s.activeSessionId,
@@ -147,6 +149,8 @@ const MessageInput: React.FC<Props> = ({
       skills: s.skills,
       mcpServers: s.mcpServers,
       subagents: s.subagents,
+      filesRevision: s.filesRevision,
+      commandsRevision: s.commandsRevision,
     }))
   );
 
@@ -200,11 +204,15 @@ const MessageInput: React.FC<Props> = ({
     return () => {
       alive = false;
     };
-  }, [workDir]);
+  }, [workDir, commandsRevision]);
 
   // 匹配绑定的多目录工作空间项目名称
   const matchedWs = workspaces.find((w) =>
     w.folders.some((f) => f.path === workDir) || w.id === workDir
+  );
+  const workspaceFoldersKey = useMemo(
+    () => (matchedWs ? matchedWs.folders.map((f) => f.path).join("|") : ""),
+    [matchedWs]
   );
   const workspaceDisplayName = matchedWs?.name || (workDir ? workDir.split(/[\\/]/).filter(Boolean).pop() : "选择工作空间目录");
 
@@ -621,10 +629,13 @@ const MessageInput: React.FC<Props> = ({
     }
   };
 
-  // 工作目录变化时加载文件索引
+  // 工作目录变化时清理 @ 弹窗；目录、工作空间挂载文件夹或工作区文件变更时重载文件索引
+  useEffect(() => {
+    setMention(null);
+  }, [workDir]);
+
   useEffect(() => {
     let alive = true;
-    setMention(null);
 
     if (!workDir) {
       setFileIndex([]);
@@ -632,25 +643,31 @@ const MessageInput: React.FC<Props> = ({
       return;
     }
 
-    loadWorkspaceFileIndex(workDir)
-      .then((index) => {
-        if (alive) {
-          const files = index.files || [];
-          setFileIndex(files);
-          onFileIndexChange?.(files);
-        }
-      })
-      .catch(() => {
-        if (alive) {
-          setFileIndex([]);
-          onFileIndexChange?.([]);
-        }
-      });
+    const loadNow = () => {
+      loadWorkspaceFileIndex(workDir)
+        .then((index) => {
+          if (alive) {
+            const files = index.files || [];
+            setFileIndex(files);
+            onFileIndexChange?.(files);
+          }
+        })
+        .catch(() => {
+          if (alive) {
+            setFileIndex([]);
+            onFileIndexChange?.([]);
+          }
+        });
+    };
+
+    const timer = filesRevision > 0 ? window.setTimeout(loadNow, 200) : null;
+    if (timer === null) loadNow();
 
     return () => {
       alive = false;
+      if (timer !== null) window.clearTimeout(timer);
     };
-  }, [workDir]);
+  }, [workDir, workspaceFoldersKey, filesRevision]);
 
   // 同步富文本镜像层：将输入框内的 @文件 识别为「文件图标 + 文件名」胶囊，不展示完整路径
   const overlayRenderData = useMemo(() => {

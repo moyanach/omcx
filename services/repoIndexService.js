@@ -57,6 +57,8 @@ const IGNORED_EXT = new Set([
 
 const scanCache = new Map();
 const inFlightScans = new Map();
+const invalidatedAt = new Map();
+let scanEpoch = 0;
 const ASYNC_READ_CONCURRENCY = 16;
 
 async function mapWithConcurrency(items, concurrency, worker) {
@@ -195,10 +197,11 @@ function scanRepo(workDir, { force = false } = {}) {
 
   const indexTarget = projectArtifactService.resolveDir(KIND, resolved);
   const diskPath = indexTarget.dir ? path.join(indexTarget.dir, `${hashKey(resolved)}.json`) : null;
+  const minValidTime = invalidatedAt.get(resolved) || 0;
   if (!force && diskPath) {
     try {
       const stat = fs.statSync(diskPath);
-      if (now - stat.mtimeMs < DISK_TTL_MS) {
+      if (now - stat.mtimeMs < DISK_TTL_MS && stat.mtimeMs > minValidTime) {
         const disk = JSON.parse(fs.readFileSync(diskPath, "utf-8"));
         if (disk && disk.workDir === resolved && Array.isArray(disk.files)) {
           scanCache.set(cacheKey, { at: now, value: disk });
@@ -217,7 +220,7 @@ function scanRepo(workDir, { force = false } = {}) {
       if (legacyPath === diskPath) continue;
       try {
         const stat = fs.statSync(legacyPath);
-        if (now - stat.mtimeMs >= DISK_TTL_MS) continue;
+        if (now - stat.mtimeMs >= DISK_TTL_MS || stat.mtimeMs <= minValidTime) continue;
         const disk = JSON.parse(fs.readFileSync(legacyPath, "utf-8"));
         if (disk && disk.workDir === resolved && Array.isArray(disk.files)) {
           scanCache.set(cacheKey, { at: now, value: disk });
@@ -295,7 +298,8 @@ function scanRepo(workDir, { force = false } = {}) {
 async function readValidDiskIndexAsync(filePath, resolved, now) {
   try {
     const stat = await fs.promises.stat(filePath);
-    if (now - stat.mtimeMs >= DISK_TTL_MS) return null;
+    const minValidTime = invalidatedAt.get(resolved) || 0;
+    if (now - stat.mtimeMs >= DISK_TTL_MS || stat.mtimeMs <= minValidTime) return null;
     const raw = await fs.promises.readFile(filePath, "utf-8");
     const disk = JSON.parse(raw);
     if (disk && disk.workDir === resolved && Array.isArray(disk.files)) {
@@ -305,6 +309,50 @@ async function readValidDiskIndexAsync(filePath, resolved, now) {
     // 缓存不存在或已损坏
   }
   return null;
+}
+
+/**
+ * 主动失效指定工作目录的符号索引缓存（内存 + 磁盘），供文件写入/还原/切分支后调用。
+ */
+function invalidateRepoIndex(workDir) {
+  scanEpoch += 1;
+  const now = Date.now();
+  if (!workDir || typeof workDir !== "string" || !workDir.trim()) {
+    for (const key of scanCache.keys()) {
+      invalidatedAt.set(key, now);
+    }
+    scanCache.clear();
+    inFlightScans.clear();
+    return;
+  }
+  const resolved = path.resolve(workDir.trim());
+  invalidatedAt.set(resolved, now);
+  for (const key of Array.from(scanCache.keys())) {
+    if (
+      key === resolved ||
+      resolved.startsWith(key + path.sep) ||
+      key.startsWith(resolved + path.sep)
+    ) {
+      scanCache.delete(key);
+      invalidatedAt.set(key, now);
+    }
+  }
+  for (const key of Array.from(inFlightScans.keys())) {
+    if (
+      key === resolved ||
+      resolved.startsWith(key + path.sep) ||
+      key.startsWith(resolved + path.sep)
+    ) {
+      inFlightScans.delete(key);
+    }
+  }
+  try {
+    const indexTarget = projectArtifactService.resolveDir(KIND, resolved);
+    if (indexTarget.dir) {
+      const diskPath = path.join(indexTarget.dir, `${hashKey(resolved)}.json`);
+      fs.promises.unlink(diskPath).catch(() => {});
+    }
+  } catch {}
 }
 
 /**
@@ -326,6 +374,7 @@ async function scanRepoAsync(workDir, { force = false } = {}) {
     return inFlightScans.get(cacheKey);
   }
 
+  const startEpoch = scanEpoch;
   const runScan = async () => {
     const indexTarget = projectArtifactService.resolveDir(KIND, resolved);
     const diskPath = indexTarget.dir ? path.join(indexTarget.dir, `${hashKey(resolved)}.json`) : null;
@@ -395,25 +444,29 @@ async function scanRepoAsync(workDir, { force = false } = {}) {
       },
     };
 
-    scanCache.set(cacheKey, { at: Date.now(), value });
-    if (scanCache.size > 20) {
-      const oldest = Array.from(scanCache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
-      if (oldest) scanCache.delete(oldest[0]);
-    }
+    if (scanEpoch === startEpoch) {
+      scanCache.set(cacheKey, { at: Date.now(), value });
+      if (scanCache.size > 20) {
+        const oldest = Array.from(scanCache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) scanCache.delete(oldest[0]);
+      }
 
-    if (diskPath) {
-      try {
-        projectArtifactService.prepareDir(KIND, resolved);
-        await fs.promises.writeFile(diskPath, JSON.stringify(value), "utf-8");
-      } catch {
-        // 索引落盘失败不影响内存可用性
+      if (diskPath) {
+        try {
+          projectArtifactService.prepareDir(KIND, resolved);
+          await fs.promises.writeFile(diskPath, JSON.stringify(value), "utf-8");
+        } catch {
+          // 索引落盘失败不影响内存可用性
+        }
       }
     }
     return value;
   };
 
   const promise = runScan().finally(() => {
-    inFlightScans.delete(cacheKey);
+    if (inFlightScans.get(cacheKey) === promise) {
+      inFlightScans.delete(cacheKey);
+    }
   });
   if (!force) {
     inFlightScans.set(cacheKey, promise);
@@ -760,6 +813,7 @@ module.exports = {
   getRepoStats,
   getRepoStatsAsync,
   extractSymbols,
+  invalidateRepoIndex,
   getIndexDir,
   INDEX_DIR: projectArtifactService.globalDir(KIND),
 };

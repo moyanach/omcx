@@ -1,4 +1,5 @@
 const path = require("path");
+const workspaceRefreshService = require("../../services/workspaceRefreshService");
 
 const READ_ONLY_TOOLS = new Set([
   "read_file",
@@ -199,6 +200,41 @@ async function executeToolBatch({
       };
       storageService.addSessionOutput(sessionId, outItem);
       replyStream("outputs", outItem);
+      workspaceRefreshService.emitWorkspaceChanged({
+        workDir: sessionWorkDir,
+        reason: "tool_write",
+        areas: ["files", "git"],
+        paths: [fullOutPath],
+        invalidate: true,
+      });
+    } else if (
+      tc.function.name === "spec_write" &&
+      execResult?.success &&
+      execResult?.data?.success !== false
+    ) {
+      workspaceRefreshService.emitWorkspaceChanged({
+        workDir: sessionWorkDir,
+        reason: "tool_spec",
+        areas: ["files", "specs"],
+        invalidate: true,
+      });
+    } else if (tc.function.name === "run_command" && execResult?.success !== false) {
+      workspaceRefreshService.emitWorkspaceChanged({
+        workDir: sessionWorkDir,
+        reason: "tool_command",
+        areas: ["files", "git", "specs", "worktrees", "commands", "skills", "subagents"],
+        invalidate: true,
+      });
+    } else if (
+      tc.function.name === "dispatch_subagent" &&
+      !isParallelSafeCall({ tc, args })
+    ) {
+      workspaceRefreshService.emitWorkspaceChanged({
+        workDir: sessionWorkDir,
+        reason: "subagent",
+        areas: ["files", "git", "specs", "worktrees", "commands", "skills", "subagents"],
+        invalidate: true,
+      });
     }
 
     executedToolSteps.push({

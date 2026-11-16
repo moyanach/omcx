@@ -316,6 +316,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => ipcRenderer.removeListener("terminal-pty-exit", handler);
   },
   getWorkspaceFileIndex: (workDir) => ipcRenderer.invoke("get-workspace-file-index", workDir),
+  watchWorkspace: (workDir) => ipcRenderer.invoke("watch-workspace", workDir),
+  onWorkspaceChanged: (callback) => {
+    const handler = (event, payload) => callback(payload);
+    ipcRenderer.on("workspace-changed", handler);
+    return () => ipcRenderer.removeListener("workspace-changed", handler);
+  },
   getRecentProjects: () => ipcRenderer.invoke("get-recent-projects"),
   addRecentProject: (proj) => ipcRenderer.invoke("add-recent-project", proj),
   getWorkspaces: () => ipcRenderer.invoke("get-workspaces"),

@@ -29,8 +29,12 @@ export const RepoWikiCard: React.FC = () => {
   const [error, setError] = useState('');
   const [showModal, setShowModal] = useState(false);
 
-  const { sessions, activeSessionId } = useChatStore(
-    useShallow((s) => ({ sessions: s.sessions, activeSessionId: s.activeSessionId }))
+  const { sessions, activeSessionId, wikiRevision } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      wikiRevision: s.wikiRevision,
+    }))
   );
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const workDir = activeSession?.workDir;
@@ -60,7 +64,7 @@ export const RepoWikiCard: React.FC = () => {
 
   useEffect(() => {
     loadWiki();
-  }, [loadWiki]);
+  }, [loadWiki, wikiRevision]);
 
   const handleGenerate = async () => {
     if (!workDir || generating) return;

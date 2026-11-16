@@ -5,6 +5,7 @@ const { execFileSync, execFile } = require("child_process");
 const MAX_ENTRIES = 20000;
 const CACHE_TTL = 30000;
 const inFlightBuilds = new Map();
+let cacheEpoch = 0;
 
 const IGNORED_DIRS = new Set([
   ".git",
@@ -379,23 +380,69 @@ async function listWorkspaceFilesAsync(workDir, allowedFolders = []) {
   if (inFlightBuilds.has(key)) {
     return inFlightBuilds.get(key);
   }
+  const startEpoch = cacheEpoch;
   const promise = (async () => {
     const value = await buildIndexAsync(workDir, allowedFolders);
-    cache.set(key, { at: Date.now(), value });
-    if (cache.size > 50) {
-      const oldest = Array.from(cache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
-      if (oldest) cache.delete(oldest[0]);
+    // 若构建期间缓存已被主动失效，禁止将旧扫描结果重新写回缓存
+    if (cacheEpoch === startEpoch) {
+      cache.set(key, { at: Date.now(), value });
+      if (cache.size > 50) {
+        const oldest = Array.from(cache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) cache.delete(oldest[0]);
+      }
     }
     return value;
   })().finally(() => {
-    inFlightBuilds.delete(key);
+    if (inFlightBuilds.get(key) === promise) {
+      inFlightBuilds.delete(key);
+    }
   });
   inFlightBuilds.set(key, promise);
   return promise;
 }
 
-function clearFileIndexCache() {
-  cache.clear();
+function clearFileIndexCache(workDir) {
+  cacheEpoch += 1;
+  if (!workDir || typeof workDir !== "string" || !workDir.trim()) {
+    cache.clear();
+    inFlightBuilds.clear();
+    return;
+  }
+  const resolved = path.resolve(workDir.trim());
+  for (const key of Array.from(cache.keys())) {
+    const segments = key.split("|").filter(Boolean);
+    const hit = segments.some((seg) => {
+      try {
+        const norm = path.resolve(seg);
+        return (
+          norm === resolved ||
+          resolved.startsWith(norm + path.sep) ||
+          norm.startsWith(resolved + path.sep)
+        );
+      } catch {
+        return seg === workDir;
+      }
+    });
+    if (hit || segments.length === 0) {
+      cache.delete(key);
+    }
+  }
+  for (const key of Array.from(inFlightBuilds.keys())) {
+    const segments = key.split("|").filter(Boolean);
+    const hit = segments.some((seg) => {
+      try {
+        const norm = path.resolve(seg);
+        return (
+          norm === resolved ||
+          resolved.startsWith(norm + path.sep) ||
+          norm.startsWith(resolved + path.sep)
+        );
+      } catch {
+        return seg === workDir;
+      }
+    });
+    if (hit) inFlightBuilds.delete(key);
+  }
 }
 
 module.exports = {

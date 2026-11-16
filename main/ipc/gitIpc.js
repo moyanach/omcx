@@ -4,7 +4,19 @@ const {
   getWorkspaceGitService,
   getGitHunkService,
   getGitWorktreeService,
+  getWorkspaceRefreshService,
 } = require("../shared");
+
+function notifyGitMutation(workDir, res, { invalidateFiles = false, areas = ["git"] } = {}) {
+  if (res && res.success === false) return res;
+  getWorkspaceRefreshService().emitWorkspaceChanged({
+    workDir: workDir || null,
+    reason: "git_action",
+    areas,
+    invalidate: invalidateFiles,
+  });
+  return res;
+}
 
 function registerGitIpc() {
   ipcMain.handle(
@@ -35,8 +47,8 @@ function registerGitIpc() {
 
   ipcMain.handle(
     "workspace-git-commit",
-    safeHandler((event, { workDir, message }) =>
-      getWorkspaceGitService().commitWorkspaceChanges(workDir, message)
+    safeHandler(async (event, { workDir, message }) =>
+      notifyGitMutation(workDir, await getWorkspaceGitService().commitWorkspaceChanges(workDir, message))
     )
   );
 
@@ -47,18 +59,26 @@ function registerGitIpc() {
 
   ipcMain.handle(
     "workspace-checkout-branch",
-    safeHandler((event, { workDir, branchName, createNew }) =>
-      getWorkspaceGitService().checkoutWorkspaceBranch(workDir, branchName, createNew)
+    safeHandler(async (event, { workDir, branchName, createNew }) =>
+      notifyGitMutation(
+        workDir,
+        await getWorkspaceGitService().checkoutWorkspaceBranch(workDir, branchName, createNew),
+        { invalidateFiles: true, areas: ["files", "git", "worktrees"] }
+      )
     )
   );
 
   ipcMain.handle(
     "workspace-delete-branch",
-    safeHandler((event, { workDir, branchName, deleteRemote, force }) =>
-      getWorkspaceGitService().deleteWorkspaceBranch(workDir, branchName, {
-        deleteRemote: Boolean(deleteRemote),
-        force: Boolean(force),
-      })
+    safeHandler(async (event, { workDir, branchName, deleteRemote, force }) =>
+      notifyGitMutation(
+        workDir,
+        await getWorkspaceGitService().deleteWorkspaceBranch(workDir, branchName, {
+          deleteRemote: Boolean(deleteRemote),
+          force: Boolean(force),
+        }),
+        { areas: ["git", "worktrees"] }
+      )
     )
   );
 
@@ -69,51 +89,73 @@ function registerGitIpc() {
 
   ipcMain.handle(
     "git-commit-staged",
-    safeHandler((event, { workDir, message } = {}) =>
-      getWorkspaceGitService().commitStagedChanges(workDir, message)
+    safeHandler(async (event, { workDir, message } = {}) =>
+      notifyGitMutation(workDir, await getWorkspaceGitService().commitStagedChanges(workDir, message))
     )
   );
 
   ipcMain.handle(
     "git-fetch",
-    safeHandler((event, { workDir } = {}) => getWorkspaceGitService().gitFetch(workDir))
+    safeHandler(async (event, { workDir } = {}) =>
+      notifyGitMutation(workDir, await getWorkspaceGitService().gitFetch(workDir))
+    )
   );
 
   ipcMain.handle(
     "git-pull",
-    safeHandler((event, { workDir } = {}) => getWorkspaceGitService().gitPull(workDir))
+    safeHandler(async (event, { workDir } = {}) =>
+      notifyGitMutation(workDir, await getWorkspaceGitService().gitPull(workDir), {
+        invalidateFiles: true,
+        areas: ["files", "git"],
+      })
+    )
   );
 
   ipcMain.handle(
     "git-push",
-    safeHandler((event, { workDir } = {}) => getWorkspaceGitService().gitPush(workDir))
+    safeHandler(async (event, { workDir } = {}) =>
+      notifyGitMutation(workDir, await getWorkspaceGitService().gitPush(workDir))
+    )
   );
 
   ipcMain.handle(
     "git-merge-branch",
-    safeHandler((event, { workDir, sourceBranch } = {}) =>
-      getWorkspaceGitService().gitMergeBranch(workDir, sourceBranch)
+    safeHandler(async (event, { workDir, sourceBranch } = {}) =>
+      notifyGitMutation(workDir, await getWorkspaceGitService().gitMergeBranch(workDir, sourceBranch), {
+        invalidateFiles: true,
+        areas: ["files", "git", "worktrees"],
+      })
     )
   );
 
   ipcMain.handle(
     "git-stash-action",
-    safeHandler((event, { workDir, action } = {}) =>
-      getWorkspaceGitService().gitStashAction(workDir, action)
+    safeHandler(async (event, { workDir, action } = {}) =>
+      notifyGitMutation(workDir, await getWorkspaceGitService().gitStashAction(workDir, action), {
+        invalidateFiles: true,
+        areas: ["files", "git"],
+      })
     )
   );
 
   ipcMain.handle(
     "git-cherry-pick",
-    safeHandler((event, { workDir, hash } = {}) =>
-      getWorkspaceGitService().gitCherryPick(workDir, hash)
+    safeHandler(async (event, { workDir, hash } = {}) =>
+      notifyGitMutation(workDir, await getWorkspaceGitService().gitCherryPick(workDir, hash), {
+        invalidateFiles: true,
+        areas: ["files", "git"],
+      })
     )
   );
 
   ipcMain.handle(
     "git-create-branch-at",
-    safeHandler((event, { workDir, branchName, startPoint } = {}) =>
-      getWorkspaceGitService().gitCreateBranchAt(workDir, branchName, startPoint)
+    safeHandler(async (event, { workDir, branchName, startPoint } = {}) =>
+      notifyGitMutation(
+        workDir,
+        await getWorkspaceGitService().gitCreateBranchAt(workDir, branchName, startPoint),
+        { areas: ["git", "worktrees"] }
+      )
     )
   );
 
@@ -126,49 +168,63 @@ function registerGitIpc() {
 
   ipcMain.handle(
     "git-apply-hunks",
-    safeHandler((event, { workDir, filePath, hunkIds, staged, reverse, target } = {}) =>
-      getGitHunkService().applyHunks(workDir, filePath, hunkIds, {
-        staged: Boolean(staged),
-        reverse: Boolean(reverse),
-        target: target === "worktree" ? "worktree" : "index",
-      })
+    safeHandler(async (event, { workDir, filePath, hunkIds, staged, reverse, target } = {}) =>
+      notifyGitMutation(
+        workDir,
+        await getGitHunkService().applyHunks(workDir, filePath, hunkIds, {
+          staged: Boolean(staged),
+          reverse: Boolean(reverse),
+          target: target === "worktree" ? "worktree" : "index",
+        }),
+        { invalidateFiles: target === "worktree", areas: target === "worktree" ? ["files", "git"] : ["git"] }
+      )
     )
   );
 
   ipcMain.handle(
     "git-discard-hunks",
-    safeHandler((event, { workDir, filePath, hunkIds } = {}) =>
-      getGitHunkService().applyHunks(workDir, filePath, hunkIds, {
-        target: "worktree",
-        reverse: true,
-      })
+    safeHandler(async (event, { workDir, filePath, hunkIds } = {}) =>
+      notifyGitMutation(
+        workDir,
+        await getGitHunkService().applyHunks(workDir, filePath, hunkIds, {
+          target: "worktree",
+          reverse: true,
+        }),
+        { invalidateFiles: true, areas: ["files", "git"] }
+      )
     )
   );
 
   ipcMain.handle(
     "git-discard-file",
-    safeHandler((event, { workDir, filePath, staged } = {}) =>
-      getGitHunkService().discardFile(workDir, filePath, { staged: Boolean(staged) })
+    safeHandler(async (event, { workDir, filePath, staged } = {}) =>
+      notifyGitMutation(
+        workDir,
+        await getGitHunkService().discardFile(workDir, filePath, { staged: Boolean(staged) }),
+        { invalidateFiles: true, areas: ["files", "git"] }
+      )
     )
   );
 
   ipcMain.handle(
     "git-stage-file",
-    safeHandler((event, { workDir, filePath } = {}) =>
-      getGitHunkService().stageFile(workDir, filePath)
+    safeHandler(async (event, { workDir, filePath } = {}) =>
+      notifyGitMutation(workDir, await getGitHunkService().stageFile(workDir, filePath))
     )
   );
 
   ipcMain.handle(
     "git-unstage-file",
-    safeHandler((event, { workDir, filePath } = {}) =>
-      getGitHunkService().unstageFile(workDir, filePath)
+    safeHandler(async (event, { workDir, filePath } = {}) =>
+      notifyGitMutation(workDir, await getGitHunkService().unstageFile(workDir, filePath))
     )
   );
 
   ipcMain.handle(
     "git-stage-all",
-    safeHandler((event, { workDir } = {}) => getGitHunkService().stageAll(workDir))
+    safeHandler(async (event, { workDir } = {}) =>
+      notifyGitMutation(workDir, await getGitHunkService().stageAll(workDir))
+    )
   );
 
   ipcMain.handle(
@@ -204,15 +260,23 @@ function registerGitIpc() {
 
   ipcMain.handle(
     "git-worktree-create",
-    safeHandler((event, payload = {}) =>
-      getGitWorktreeService().createWorktree(payload.workDir, payload)
+    safeHandler(async (event, payload = {}) =>
+      notifyGitMutation(
+        payload.workDir,
+        await getGitWorktreeService().createWorktree(payload.workDir, payload),
+        { areas: ["git", "worktrees"] }
+      )
     )
   );
 
   ipcMain.handle(
     "git-worktree-create-multi",
-    safeHandler((event, payload = {}) =>
-      getGitWorktreeService().createMultiWorktrees(payload)
+    safeHandler(async (event, payload = {}) =>
+      notifyGitMutation(
+        payload?.folders?.[0]?.path || payload?.workDir,
+        await getGitWorktreeService().createMultiWorktrees(payload),
+        { areas: ["git", "worktrees"] }
+      )
     )
   );
 
@@ -232,15 +296,23 @@ function registerGitIpc() {
 
   ipcMain.handle(
     "git-worktree-merge",
-    safeHandler((event, payload = {}) =>
-      getGitWorktreeService().mergeWorktree(payload.workDir, payload)
+    safeHandler(async (event, payload = {}) =>
+      notifyGitMutation(
+        payload.workDir,
+        await getGitWorktreeService().mergeWorktree(payload.workDir, payload),
+        { invalidateFiles: true, areas: ["files", "git", "worktrees"] }
+      )
     )
   );
 
   ipcMain.handle(
     "git-worktree-remove",
-    safeHandler((event, { workDir, targetPath, force } = {}) =>
-      getGitWorktreeService().removeWorktree(workDir, targetPath, { force: Boolean(force) })
+    safeHandler(async (event, { workDir, targetPath, force } = {}) =>
+      notifyGitMutation(
+        workDir,
+        await getGitWorktreeService().removeWorktree(workDir, targetPath, { force: Boolean(force) }),
+        { areas: ["git", "worktrees"] }
+      )
     )
   );
 }

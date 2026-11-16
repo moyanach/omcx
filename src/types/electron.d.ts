@@ -163,6 +163,16 @@ export interface ElectronAPI {
   onTerminalPtyData: (callback: (payload: any) => void) => () => void;
   onTerminalPtyExit: (callback: (payload: any) => void) => () => void;
   getWorkspaceFileIndex: (workDir: string) => Promise<any>;
+  watchWorkspace: (workDir?: string | null) => Promise<string[]>;
+  onWorkspaceChanged: (
+    callback: (payload: {
+      workDir?: string | null;
+      reason?: string;
+      areas?: string[];
+      paths?: string[];
+      ts?: number;
+    }) => void
+  ) => () => void;
   getRecentProjects: () => Promise<any[]>;
   addRecentProject: (proj: any) => Promise<any>;
   getWorkspaces: () => Promise<any[]>;

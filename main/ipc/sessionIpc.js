@@ -16,6 +16,7 @@ const {
   getSessionTransferService,
   getSandboxPolicyService,
   getModelErrorService,
+  getWorkspaceRefreshService,
   activeStreamSessions,
 } = require("../shared");
 
@@ -378,17 +379,48 @@ function registerSessionIpc() {
   );
   ipcMain.handle(
     "spec-save",
-    safeHandler((event, payload = {}) => getSpecService().saveSpec(payload.workDir, payload))
+    safeHandler((event, payload = {}) => {
+      const res = getSpecService().saveSpec(payload.workDir, payload);
+      if (res?.success !== false && !res?.error) {
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          workDir: payload.workDir,
+          reason: "spec_action",
+          areas: ["specs", "files"],
+          invalidate: true,
+        });
+      }
+      return res;
+    })
   );
   ipcMain.handle(
     "spec-update-status",
-    safeHandler((event, { workDir, id, status } = {}) =>
-      getSpecService().updateSpecStatus(workDir, id, status)
-    )
+    safeHandler((event, { workDir, id, status } = {}) => {
+      const res = getSpecService().updateSpecStatus(workDir, id, status);
+      if (res?.success !== false && !res?.error) {
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          workDir,
+          reason: "spec_action",
+          areas: ["specs", "files"],
+          invalidate: true,
+        });
+      }
+      return res;
+    })
   );
   ipcMain.handle(
     "spec-delete",
-    safeHandler((event, { workDir, id } = {}) => getSpecService().deleteSpec(workDir, id))
+    safeHandler((event, { workDir, id } = {}) => {
+      const res = getSpecService().deleteSpec(workDir, id);
+      if (res?.success !== false && !res?.error) {
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          workDir,
+          reason: "spec_action",
+          areas: ["specs", "files"],
+          invalidate: true,
+        });
+      }
+      return res;
+    })
   );
 
   ipcMain.handle(

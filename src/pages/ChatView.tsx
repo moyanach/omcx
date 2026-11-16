@@ -43,6 +43,7 @@ const ChatView: React.FC = () => {
     refreshMcpAndSkills,
     isWorkspaceModalOpen,
     activeEditingWorkspace,
+    workspaces,
     openWorkspaceModal,
     closeWorkspaceModal,
     saveWorkspace,
@@ -79,6 +80,7 @@ const ChatView: React.FC = () => {
       refreshMcpAndSkills: s.refreshMcpAndSkills,
       isWorkspaceModalOpen: s.isWorkspaceModalOpen,
       activeEditingWorkspace: s.activeEditingWorkspace,
+      workspaces: s.workspaces,
       openWorkspaceModal: s.openWorkspaceModal,
       closeWorkspaceModal: s.closeWorkspaceModal,
       saveWorkspace: s.saveWorkspace,
@@ -208,14 +210,23 @@ const ChatView: React.FC = () => {
     fetchModels();
   }, []);
 
-  // 当会话改变或工作区更新时刷新 Inspector 数据
+  // 当会话改变或工作区目录/挂载文件夹更新时刷新 Inspector 数据
+  const activeWorkspaceFoldersKey = React.useMemo(() => {
+    const matched = workspaces.find(
+      (ws) =>
+        ws.id === activeSession?.workspaceId ||
+        ws.folders?.some((f) => f.path === activeSession?.workDir)
+    );
+    return matched ? matched.folders.map((f) => f.path).join('|') : '';
+  }, [workspaces, activeSession?.workspaceId, activeSession?.workDir]);
+
   useEffect(() => {
     if (activeSessionId) {
       refreshOutputs(activeSessionId);
       refreshGitStatus(activeSession?.workDir);
       refreshMcpAndSkills(activeSession?.workDir);
     }
-  }, [activeSessionId, activeSession?.workDir]);
+  }, [activeSessionId, activeSession?.workDir, activeWorkspaceFoldersKey]);
 
   // 离开 chat 视图时收起抽屉
   useEffect(() => {
