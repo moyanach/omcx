@@ -78,6 +78,7 @@ export interface ElectronAPI {
   getRepoMap: (workDir: string, maxChars?: number, refresh?: boolean) => Promise<any>;
   searchRepoSymbols: (workDir: string, query: string, limit?: number) => Promise<any>;
   getRepoWiki: (workDir: string) => Promise<any>;
+  getWorkspaceRepoWikis: (workDirs: string[], primaryWorkDir?: string | null) => Promise<any>;
   generateRepoWiki: (workDir: string, model?: string) => Promise<any>;
   getContextMetrics: (params: any) => Promise<any>;
   getWorkspaceGitStatus: (workDir: string | null) => Promise<any>;

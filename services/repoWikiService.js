@@ -14,9 +14,27 @@ const { isAnthropicProvider, completeAnthropicMessage } = require("./anthropicCl
 
 const KIND = projectArtifactService.KIND.WIKI;
 const MAX_INPUT_CHARS = 18000;
+const DEFAULT_WIKI_CONTEXT_MAX_CHARS = 12000;
 
 function wikiDir(workDir) {
   return projectArtifactService.resolveDir(KIND, workDir).dir;
+}
+
+function resolveWorkspaceWikiDirs(workDirs = [], primaryWorkDir = null) {
+  const seen = new Set();
+  const ordered = [];
+  const pushDir = (dir) => {
+    if (!dir || typeof dir !== "string" || !dir.trim()) return;
+    const resolved = path.resolve(dir.trim());
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    ordered.push(resolved);
+  };
+  if (primaryWorkDir) pushDir(primaryWorkDir);
+  if (Array.isArray(workDirs)) {
+    for (const dir of workDirs) pushDir(dir);
+  }
+  return ordered;
 }
 
 function readFirstExisting(workDir, names, maxChars) {
@@ -196,10 +214,168 @@ function getRepoWiki(workDir) {
   }
 }
 
+function getWorkspaceRepoWikis(workDirs = [], primaryWorkDir = null) {
+  const dirs = resolveWorkspaceWikiDirs(workDirs, primaryWorkDir);
+  const resolvedPrimary = primaryWorkDir ? path.resolve(primaryWorkDir) : dirs[0] || null;
+  const items = dirs.map((dir) => {
+    const res = getRepoWiki(dir);
+    return {
+      workDir: dir,
+      name: path.basename(dir) || dir,
+      isPrimary: Boolean(resolvedPrimary && dir === resolvedPrimary),
+      success: Boolean(res?.success),
+      exists: Boolean(res?.exists),
+      content: res?.content || "",
+      meta: res?.meta || null,
+      path: res?.path || "",
+      error: res?.error || undefined,
+    };
+  });
+  return {
+    success: true,
+    primaryWorkDir: resolvedPrimary,
+    totalCount: items.length,
+    existingCount: items.filter((item) => item.exists).length,
+    items,
+  };
+}
+
+/**
+ * 汇总多目录工作空间的 Repo Wiki，总预算默认控制在 12000 字符内，
+ * 且优先保证主目录获得更多摘要篇幅，未用完的额度自动回拨给其他已生成目录。
+ */
+function buildWorkspaceRepoWikiContext({
+  workDirs = [],
+  primaryWorkDir = null,
+  maxTotalChars = DEFAULT_WIKI_CONTEXT_MAX_CHARS,
+} = {}) {
+  const totalBudget = Math.max(500, Number(maxTotalChars) || DEFAULT_WIKI_CONTEXT_MAX_CHARS);
+  const workspaceData = getWorkspaceRepoWikis(workDirs, primaryWorkDir);
+  const available = workspaceData.items.filter(
+    (item) => item.exists && typeof item.content === "string" && item.content.trim().length > 0
+  );
+
+  if (available.length === 0) {
+    return {
+      text: "",
+      primaryPath: "",
+      isMulti: workspaceData.totalCount > 1,
+      generatedCount: 0,
+      totalCount: workspaceData.totalCount,
+      items: workspaceData.items,
+    };
+  }
+
+  // 单目录或当前工作空间仅挂载 1 个目录时，沿用简洁单目录模式并给足预算
+  if (workspaceData.totalCount <= 1 && available.length === 1) {
+    const only = available[0];
+    const trimmed = only.content.trim();
+    const truncationNotice = `\n\n…(已按 ${totalBudget} 字符预算截断，完整内容请使用 read_file 读取 ${only.path || "wiki.md"})`;
+    const body =
+      trimmed.length > totalBudget
+        ? `${trimmed.slice(0, Math.max(200, totalBudget - truncationNotice.length))}${truncationNotice}`
+        : trimmed;
+    return {
+      text: body,
+      primaryPath: only.path || "",
+      isMulti: false,
+      generatedCount: 1,
+      totalCount: workspaceData.totalCount,
+      items: workspaceData.items,
+    };
+  }
+
+  // 多目录预算分配：先预留每个目录小标题与路径元信息开销，剩余全部按权重分给正文
+  const buildHeader = (item) =>
+    [
+      `### ${item.name}${item.isPrimary ? "（主目录）" : "（次级目录）"}`,
+      `- 仓库目录: ${item.workDir}`,
+      item.path ? `- 完整文档路径: ${item.path}（需要细节时可用 read_file 查看）` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+  const headers = available.map(buildHeader);
+  const separatorOverhead = Math.max(0, available.length - 1) * 2;
+  const headerTotalChars = headers.reduce((sum, h) => sum + h.length + 2, 0) + separatorOverhead;
+  const contentBudget = Math.max(available.length * 160, totalBudget - headerTotalChars);
+
+  const weights = available.map((item) => {
+    if (item.isPrimary) {
+      return available.length === 1 ? 1 : 0.55;
+    }
+    const hasPrimary = available.some((entry) => entry.isPrimary);
+    const secondaryCount = available.length - (hasPrimary ? 1 : 0);
+    return (hasPrimary ? 0.45 : 1) / Math.max(1, secondaryCount);
+  });
+
+  const allocations = new Array(available.length).fill(0);
+  const fullLengths = available.map((item) => item.content.trim().length);
+  let remainingBudget = contentBudget;
+  let activeIndices = available.map((_, idx) => idx);
+
+  // 迭代将短目录未耗尽的配额回拨给仍需篇幅的目录（主目录维持更高权重）
+  while (remainingBudget > 0 && activeIndices.length > 0) {
+    const activeWeightSum = activeIndices.reduce((sum, idx) => sum + weights[idx], 0) || 1;
+    let consumedThisRound = 0;
+    const nextActive = [];
+
+    for (const idx of activeIndices) {
+      const share = Math.max(1, Math.floor((remainingBudget * weights[idx]) / activeWeightSum));
+      const needed = fullLengths[idx] - allocations[idx];
+      const grant = Math.min(needed, share);
+      allocations[idx] += grant;
+      consumedThisRound += grant;
+      if (allocations[idx] < fullLengths[idx]) {
+        nextActive.push(idx);
+      }
+    }
+
+    if (consumedThisRound <= 0) {
+      // 剩余零头依次补给权重最高且仍未完整的目录（主目录优先）
+      for (const idx of nextActive) {
+        if (remainingBudget <= 0) break;
+        allocations[idx] += 1;
+        remainingBudget -= 1;
+      }
+      break;
+    }
+    remainingBudget -= consumedThisRound;
+    activeIndices = nextActive;
+  }
+
+  const blocks = available.map((item, idx) => {
+    const trimmed = item.content.trim();
+    const limit = Math.max(80, allocations[idx]);
+    let body = trimmed;
+    if (trimmed.length > limit) {
+      const suffix = `\n…(已按总预算截断，完整内容请 read_file ${item.path || "wiki.md"})`;
+      const cut = Math.max(60, limit - suffix.length);
+      body = `${trimmed.slice(0, cut)}${suffix}`;
+    }
+    return `${headers[idx]}\n\n${body}`;
+  });
+
+  const joined = blocks.join("\n\n");
+  const primaryItem = available.find((item) => item.isPrimary) || available[0];
+  return {
+    text: joined.length > totalBudget ? joined.slice(0, totalBudget) : joined,
+    primaryPath: primaryItem?.path || "",
+    isMulti: true,
+    generatedCount: available.length,
+    totalCount: workspaceData.totalCount,
+    items: workspaceData.items,
+  };
+}
+
 module.exports = {
   generateRepoWiki,
   getRepoWiki,
+  getWorkspaceRepoWikis,
+  buildWorkspaceRepoWikiContext,
+  resolveWorkspaceWikiDirs,
   buildWikiPrompt,
   wikiDir,
+  DEFAULT_WIKI_CONTEXT_MAX_CHARS,
   WIKI_ROOT: projectArtifactService.globalDir(KIND),
 };

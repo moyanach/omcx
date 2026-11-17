@@ -184,6 +184,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   searchRepoSymbols: (workDir, query, limit = 40) =>
     ipcRenderer.invoke("search-repo-symbols", { workDir, query, limit }),
   getRepoWiki: (workDir) => ipcRenderer.invoke("get-repo-wiki", workDir),
+  getWorkspaceRepoWikis: (workDirs, primaryWorkDir = null) =>
+    ipcRenderer.invoke("get-workspace-repo-wikis", { workDirs, primaryWorkDir }),
   generateRepoWiki: (workDir, model) => ipcRenderer.invoke("generate-repo-wiki", { workDir, model }),
   getContextMetrics: (params) => ipcRenderer.invoke("get-context-metrics", params),
   getWorkspaceGitStatus: (workDir) => ipcRenderer.invoke("get-workspace-git-status", workDir),

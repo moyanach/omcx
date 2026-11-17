@@ -446,8 +446,15 @@ function buildRepoMapSection(repoMap) {
   ].join("\n");
 }
 
-function buildRepoWikiSection(repoWiki, repoWikiPath = "") {
+function buildRepoWikiSection(repoWiki, repoWikiPath = "", repoWikiIsMulti = false) {
   if (!repoWiki || !String(repoWiki).trim()) return "";
+  if (repoWikiIsMulti) {
+    return [
+      "【Repo Wiki（多目录工作空间架构文档摘要）】",
+      "以下内容按工作空间各仓库自动汇总（主目录优先分配摘要篇幅），如需某个仓库更细节的实现请按路径用 read_file 查看完整 wiki.md；如与代码事实冲突，以代码为准。",
+      String(repoWiki).trim(),
+    ].join("\n");
+  }
   return [
     "【Repo Wiki（仓库级架构文档摘要）】",
     repoWikiPath ? `完整文档路径：${repoWikiPath}（需要细节时可用 read_file 查看）` : "",
@@ -518,6 +525,7 @@ function buildSystemContext({
   repoMap = "",
   repoWiki = "",
   repoWikiPath = "",
+  repoWikiIsMulti = false,
   todos = [],
   toolDocs = [],
   model = "",
@@ -550,7 +558,7 @@ function buildSystemContext({
   push("rules", buildRulesSection(projectRules));
   if (normalizedMode !== "work") {
     push("repo_map", buildRepoMapSection(repoMap));
-    push("repo_wiki", buildRepoWikiSection(repoWiki, repoWikiPath));
+    push("repo_wiki", buildRepoWikiSection(repoWiki, repoWikiPath, repoWikiIsMulti));
   }
   push("skills", buildSkillsSection(skills));
   push("memory", buildMemorySection(memories, memoryIndex));

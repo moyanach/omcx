@@ -1,4 +1,5 @@
 const path = require("path");
+const { resolveToolResultMaxChars } = require("../../services/contextCompactor");
 
 /**
  * Turn 上下文初始化器：
@@ -14,6 +15,7 @@ async function initializeTurnContext({
   provider,
   apiModelId,
   modelBaseUrl,
+  contextLimit,
   enableTools,
   supportsVision,
   agentMode = "code",
@@ -173,11 +175,19 @@ async function initializeTurnContext({
     console.warn("[slash-command] 展开失败，回退原文:", slashErr.message);
   }
 
+  const rawToolMaxChars = Number(storageService.getConfig("context_tool_result_max_chars"));
+  const configuredToolResultMaxChars =
+    Number.isFinite(rawToolMaxChars) && rawToolMaxChars > 0 ? rawToolMaxChars : null;
+
   const compactCfg = {
     enabled: storageService.getConfig("context_auto_compact") !== "false",
     thresholdPercent: Number(storageService.getConfig("context_compact_threshold_percent")) || 85,
     keepTokens: Number(storageService.getConfig("context_compact_keep_tokens")) || 20000,
-    toolResultMaxChars: Number(storageService.getConfig("context_tool_result_max_chars")) || 8000,
+    configuredToolResultMaxChars,
+    toolResultMaxChars: resolveToolResultMaxChars({
+      contextLimit,
+      configuredMaxChars: configuredToolResultMaxChars,
+    }),
     keepRecentToolResults: Number(storageService.getConfig("context_microcompact_keep_results")) || 5,
     outputReserve: 4096,
     maxConsecutiveFailures: 3,
@@ -321,10 +331,30 @@ async function initializeTurnContext({
     }
   }
 
-  let wikiInfo = null;
-  if (!isWorkMode && sessionWorkDir) {
+  const workspaceRepoDirs =
+    Array.isArray(matchedWorkspace?.folders) && matchedWorkspace.folders.length > 0
+      ? matchedWorkspace.folders.map((f) => f?.path).filter(Boolean)
+      : sessionWorkDir
+      ? [sessionWorkDir]
+      : [];
+
+  let wikiContext = { text: "", primaryPath: "", isMulti: false };
+  if (!isWorkMode && workspaceRepoDirs.length > 0) {
     try {
-      wikiInfo = repoWikiService.getRepoWiki(sessionWorkDir);
+      if (typeof repoWikiService.buildWorkspaceRepoWikiContext === "function") {
+        wikiContext = repoWikiService.buildWorkspaceRepoWikiContext({
+          workDirs: workspaceRepoDirs,
+          primaryWorkDir: sessionWorkDir,
+          maxTotalChars: 12000,
+        });
+      } else if (sessionWorkDir && typeof repoWikiService.getRepoWiki === "function") {
+        const single = repoWikiService.getRepoWiki(sessionWorkDir);
+        wikiContext = {
+          text: single?.exists ? String(single.content || "").slice(0, 12000) : "",
+          primaryPath: single?.path || "",
+          isMulti: false,
+        };
+      }
     } catch (wikiErr) {
       console.warn(`[repo-wiki] 读取失败: ${wikiErr.message}`);
     }
@@ -339,8 +369,9 @@ async function initializeTurnContext({
       memoryIndex,
       projectRules,
       repoMap: repoMapText,
-      repoWiki: wikiInfo?.exists ? String(wikiInfo.content || "").slice(0, 3500) : "",
-      repoWikiPath: wikiInfo?.path || "",
+      repoWiki: wikiContext?.text || "",
+      repoWikiPath: wikiContext?.primaryPath || "",
+      repoWikiIsMulti: Boolean(wikiContext?.isMulti),
       todos: includeTodos ? initialTodos : [],
       toolDocs: getActiveToolPromptDocs(),
       model: `${provider}/${apiModelId}`,

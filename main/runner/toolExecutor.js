@@ -45,6 +45,8 @@ async function executeToolBatch({
   apiMessages,
   buildAssistantReplayMessage,
   truncateToolResult,
+  contextLimit,
+  configuredToolResultMaxChars,
   toolResultMaxChars,
   supportsVision,
 }) {
@@ -292,7 +294,7 @@ async function executeToolBatch({
     );
 
     const pendingVisionShots = [];
-    for (const { callId, execResult } of completedCalls) {
+    for (const { tc, callId, execResult } of completedCalls) {
       let sanitizedResult = execResult;
       if (sanitizedResult && typeof sanitizedResult === "object") {
         if ("__visionImageDataUrl" in sanitizedResult) {
@@ -316,7 +318,12 @@ async function executeToolBatch({
       apiMessages.push({
         role: "tool",
         tool_call_id: callId,
-        content: truncateToolResult(JSON.stringify(sanitizedResult), toolResultMaxChars),
+        content: truncateToolResult(JSON.stringify(sanitizedResult), {
+          contextLimit,
+          configuredMaxChars: configuredToolResultMaxChars,
+          maxChars: contextLimit ? undefined : toolResultMaxChars,
+          toolName: tc.function.name,
+        }),
       });
     }
     if (supportsVision && pendingVisionShots.length > 0) {

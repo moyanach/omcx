@@ -15,8 +15,6 @@ const {
   getWorkspaceFolders,
   getModelConfig,
   normalizeUsage,
-  mergeUsage,
-  computeUsageCost,
   buildAttachmentMessagesAsync,
   isImageFile,
   extractTextContent,
@@ -235,10 +233,6 @@ async function runAgentTurn(payload = {}, options = {}) {
     contextLimit,
     maxOutputTokens,
     supportsVision,
-    inputPrice,
-    outputPrice,
-    cacheReadPrice,
-    cacheWritePrice,
   } = getModelConfig(model, "gpt-4o");
 
   if (!modelApiKey && provider !== "ollama") {
@@ -367,8 +361,6 @@ async function runAgentTurn(payload = {}, options = {}) {
     assistantMsgId || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const runStartedAt = Date.now();
 
-  let turnUsage = null;
-  let turnCostUsd = 0;
   const PARTIAL_PERSIST_INTERVAL_MS = 4000;
   const PARTIAL_PERSIST_MIN_GROWTH = 2500;
   let lastPartialPersistAt = 0;
@@ -484,19 +476,8 @@ async function runAgentTurn(payload = {}, options = {}) {
       apiKey: modelApiKey,
       provider,
       modelName: apiModelId,
+      contextLimit,
       maxOutputTokens,
-      inputPrice,
-      outputPrice,
-      cacheReadPrice,
-      cacheWritePrice,
-    },
-    onSubagentUsage: (usage, costUsd) => {
-      if (usage) {
-        turnUsage = mergeUsage(turnUsage, usage);
-      }
-      if (Number.isFinite(Number(costUsd)) && Number(costUsd) > 0) {
-        turnCostUsd += Number(costUsd);
-      }
     },
     mcpTools: [],
     onFileOutput: (filePath) => {
@@ -531,6 +512,7 @@ async function runAgentTurn(payload = {}, options = {}) {
       provider,
       apiModelId,
       modelBaseUrl,
+      contextLimit,
       enableTools,
       supportsVision,
       agentMode: resolvedAgentMode,
@@ -578,27 +560,13 @@ async function runAgentTurn(payload = {}, options = {}) {
     let compactionSummary = "";
     const compactionStats = { count: 0, beforeTokens: 0, afterTokens: 0 };
     let lastProviderUsage = null;
-    const modelPricing = {
-      inputPrice,
-      outputPrice,
-      cacheReadPrice,
-      cacheWritePrice,
-    };
 
-    const recordUsage = (usage) => {
+    const recordProviderUsageForCompact = (usage) => {
       if (!usage) return;
       const normalized = usage.raw ? usage : normalizeUsage(usage, provider);
       if (!normalized) return;
       lastProviderUsage = normalized;
-      turnUsage = mergeUsage(turnUsage, normalized);
-      turnCostUsd += computeUsageCost(normalized, modelPricing);
     };
-
-    const withUsageMetrics = (metrics) => ({
-      ...metrics,
-      usage: turnUsage,
-      costUsd: Math.round(turnCostUsd * 100_000_000) / 100_000_000,
-    });
     let consecutiveCompactFailures = 0;
     let turnCompactionCount = 0;
 
@@ -719,7 +687,7 @@ async function runAgentTurn(payload = {}, options = {}) {
       });
 
     const initMetrics = computeContextMetrics();
-    replyStream("metrics", withUsageMetrics(initMetrics));
+    replyStream("metrics", initMetrics);
 
     const MAX_TOOL_ROUNDS = Number(storageService.getConfig("max_tool_rounds")) || 5000;
     const STREAM_IDLE_TIMEOUT_SEC = Math.max(
@@ -796,7 +764,7 @@ async function runAgentTurn(payload = {}, options = {}) {
         }
       })();
 
-      recordUsage(result.usage);
+      recordProviderUsageForCompact(result.usage);
       lastTurnResult = result;
 
       if (sessionAbort.cancelled) break;
@@ -861,12 +829,14 @@ async function runAgentTurn(payload = {}, options = {}) {
         apiMessages,
         buildAssistantReplayMessage,
         truncateToolResult,
+        contextLimit,
+        configuredToolResultMaxChars: compactCfg.configuredToolResultMaxChars,
         toolResultMaxChars: compactCfg.toolResultMaxChars,
         supportsVision,
       });
 
       const updatedMetrics = computeContextMetrics();
-      replyStream("metrics", withUsageMetrics(updatedMetrics));
+      replyStream("metrics", updatedMetrics);
     }
 
     const visibleGeneratedText = fullGeneratedText
@@ -900,7 +870,7 @@ async function runAgentTurn(payload = {}, options = {}) {
           finalResult = await doStreamRequest(apiMessages, summaryRequestBody);
         }
         if (!finalResult) break;
-        recordUsage(finalResult.usage);
+        recordProviderUsageForCompact(finalResult.usage);
         lastTurnResult = finalResult;
         if (sessionAbort.cancelled) break;
 
@@ -976,7 +946,7 @@ async function runAgentTurn(payload = {}, options = {}) {
     }
 
     const finalMetrics = computeContextMetrics();
-    replyStream("metrics", withUsageMetrics(finalMetrics));
+    replyStream("metrics", finalMetrics);
 
     const finalVisibleForCheck = fullGeneratedText;
     const outputTruncated = Boolean(
@@ -999,8 +969,6 @@ async function runAgentTurn(payload = {}, options = {}) {
           beforeTokens: compactionStats.beforeTokens,
           afterTokens: compactionStats.afterTokens,
         },
-        usage: turnUsage,
-        costUsd: Math.round(turnCostUsd * 100_000_000) / 100_000_000,
         model: apiModelId,
         provider,
       },
@@ -1042,8 +1010,6 @@ async function runAgentTurn(payload = {}, options = {}) {
             toolSteps: executedToolSteps,
             todos: initialTodos,
             pendingSteers: Array.isArray(sessionAbort.steerQueue) ? sessionAbort.steerQueue.slice() : [],
-            usage: turnUsage,
-            costUsd: Math.round(turnCostUsd * 100_000_000) / 100_000_000,
           },
         });
       } catch {}
@@ -1109,8 +1075,6 @@ async function runAgentTurn(payload = {}, options = {}) {
       toolRounds: toolRound,
       toolSteps: executedToolSteps,
       todos: initialTodos,
-      usage: turnUsage,
-      costUsd: Math.round(turnCostUsd * 100_000_000) / 100_000_000,
       model: apiModelId,
       provider,
     },

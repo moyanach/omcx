@@ -152,7 +152,7 @@ export const EditableModelCombobox: React.FC<{
             }
           }}
           placeholder={placeholder}
-          className={`w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 transition-all ${
+          className={`w-full bg-[var(--ui-input-bg)] border border-[color:var(--ui-border-subtle)] rounded-xl px-3 py-2 text-xs text-[var(--ui-text-primary)] outline-none focus:border-[color:var(--ui-accent-blue-border)] transition-all ${
             hasOptions ? "pr-8" : ""
           } ${monoFont ? "font-mono" : "font-sans"}`}
         />
@@ -164,19 +164,25 @@ export const EditableModelCombobox: React.FC<{
               setFilterByTyping(false);
               setOpen((v) => !v);
             }}
-            className="absolute right-2 p-1 rounded-md text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.06] transition-colors cursor-pointer"
+            className="absolute right-2 p-1 rounded-md text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)] transition-colors cursor-pointer"
             title="展开已获取的模型列表"
           >
             <ChevronDown
               size={13}
-              className={`transition-transform duration-150 ${open ? "rotate-180 text-blue-400" : ""}`}
+              className={`transition-transform duration-150 ${open ? "rotate-180 text-[var(--ui-accent-blue)]" : ""}`}
             />
           </button>
         )}
       </div>
 
       {open && hasOptions && (
-        <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-40 max-h-52 overflow-y-auto custom-scrollbar rounded-xl bg-[#1b1b1b] border border-[#343434] shadow-2xl py-1">
+        <div
+          style={{
+            backgroundColor: "var(--ui-dropdown-solid-bg)",
+            borderColor: "var(--ui-dropdown-solid-border)",
+          }}
+          className="absolute left-0 right-0 top-[calc(100%+4px)] z-[60] max-h-52 overflow-y-auto custom-scrollbar rounded-xl border shadow-[var(--ui-popover-shadow)] py-1"
+        >
           {finalList.map((opt, idx) => {
             const isSelected = opt === value;
             return (
@@ -190,12 +196,12 @@ export const EditableModelCombobox: React.FC<{
                 }}
                 className={`w-full px-3 py-1.5 text-left text-xs font-mono flex items-center justify-between gap-2 transition-colors cursor-pointer ${
                   isSelected
-                    ? "bg-blue-600/20 text-blue-300 font-semibold"
-                    : "text-neutral-200 hover:bg-white/[0.06]"
+                    ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] font-semibold"
+                    : "text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)]"
                 }`}
               >
                 <span className="truncate">{opt}</span>
-                {isSelected && <Check size={12} className="text-blue-400 flex-shrink-0" />}
+                {isSelected && <Check size={12} className="text-[var(--ui-accent-blue)] flex-shrink-0" />}
               </button>
             );
           })}

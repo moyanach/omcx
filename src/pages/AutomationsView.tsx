@@ -636,9 +636,6 @@ export const AutomationsView: React.FC = () => {
                       {selectedRun.duration_ms > 0 && (
                         <span>耗时 {formatDurationMs(selectedRun.duration_ms)}</span>
                       )}
-                      {selectedRun.cost_usd > 0 && (
-                        <span>估算费用 ${selectedRun.cost_usd.toFixed(4)}</span>
-                      )}
                     </div>
                   </div>
 

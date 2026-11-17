@@ -116,8 +116,14 @@ test("agentRunner 端到端 Mock SSE：多轮工具调用 + 上下文初始化 +
     assert.match(res.content, /hello world from test/);
     assert.equal(res.metadata.toolRounds, 1);
     assert.equal(res.metadata.truncated, false);
-    assert.equal(res.metadata.usage.prompt_tokens, 2600);
-    assert.equal(res.metadata.usage.cached_tokens, 1800);
+    assert.equal(res.metadata.usage, undefined);
+    assert.equal(res.metadata.costUsd, undefined);
+    const metricEvents = events.filter((e) => e.type === "metrics");
+    assert.ok(metricEvents.length >= 1);
+    for (const m of metricEvents) {
+      assert.equal(m.data.usage, undefined);
+      assert.equal(m.data.costUsd, undefined);
+    }
 
     // 验证两轮 System Prompt 完全一致（不破环 Prompt Cache 前缀）
     assert.equal(capturedBodies[0].messages[0].role, "system");

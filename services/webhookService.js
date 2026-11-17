@@ -166,7 +166,6 @@ function buildGenericPayload(run, secret) {
       error: run.error || null,
       outputs: Array.isArray(run.outputs) ? run.outputs : [],
       durationMs: run.duration_ms || 0,
-      costUsd: run.cost_usd || 0,
       startedAt: run.started_at,
       finishedAt: run.finished_at,
     },
@@ -254,7 +253,6 @@ async function sendTestWebhook(target, opts = {}) {
     error: null,
     outputs: [],
     duration_ms: 1200,
-    cost_usd: 0,
     started_at: Date.now() - 1200,
     finished_at: Date.now(),
   };

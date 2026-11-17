@@ -79,6 +79,8 @@ html[data-theme="dark"],
   --ui-chip-bg: rgba(255, 255, 255, 0.07);
   --ui-chip-hover-bg: rgba(255, 255, 255, 0.12);
   --ui-popover-bg: rgba(24, 24, 28, 0.88);
+  --ui-dropdown-solid-bg: #1c1c21;
+  --ui-dropdown-solid-border: rgba(255, 255, 255, 0.14);
   --ui-livebar-bg: rgba(22, 22, 22, 0.94);
   --ui-code-bg: rgba(0, 0, 0, 0.22);
   --ui-code-header-bg: rgba(255, 255, 255, 0.04);
@@ -203,6 +205,8 @@ html[data-theme="light"] {
   --ui-chip-bg: rgba(15, 23, 42, 0.055);
   --ui-chip-hover-bg: rgba(15, 23, 42, 0.10);
   --ui-popover-bg: rgba(255, 255, 255, 0.88);
+  --ui-dropdown-solid-bg: #ffffff;
+  --ui-dropdown-solid-border: rgba(15, 23, 42, 0.14);
   --ui-livebar-bg: rgba(255, 255, 255, 0.95);
   --ui-code-bg: rgba(15, 23, 42, 0.028);
   --ui-code-header-bg: rgba(15, 23, 42, 0.052);

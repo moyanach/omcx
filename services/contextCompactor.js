@@ -8,7 +8,7 @@ const DEFAULTS = {
   keepRecentToolResults: 5,
   microBatchMinCount: 4,
   microBatchMinSavedChars: 12000,
-  toolResultMaxChars: 8000,
+  toolResultMaxChars: 20000,
   summaryMaxTokens: 4096,
   maxConsecutiveFailures: 3,
 };
@@ -156,16 +156,76 @@ function microCompact(messages, cfg = {}) {
   return { messages: next, saved: potentialSaved, cleared: candidates.length, skippedForCache: false };
 }
 
-function truncateToolResult(content, maxChars = DEFAULTS.toolResultMaxChars) {
+function resolveToolResultMaxChars(options = {}) {
+  if (typeof options === "number" && Number.isFinite(options) && options > 0) {
+    return Math.floor(options);
+  }
+  const opts = options && typeof options === "object" ? options : {};
+  const configured = Number(opts.configuredMaxChars);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.max(1000, Math.floor(configured));
+  }
+
+  const explicitMax = Number(opts.maxChars);
+  const contextLimit = Number(opts.contextLimit) || 0;
+  let limit;
+  if (Number.isFinite(explicitMax) && explicitMax > 0) {
+    limit = Math.floor(explicitMax);
+  } else if (contextLimit >= 500000) {
+    limit = 40000;
+  } else if (contextLimit >= 180000) {
+    limit = 28000;
+  } else if (contextLimit >= 100000) {
+    limit = 20000;
+  } else if (contextLimit > 0) {
+    limit = 12000;
+  } else {
+    limit = DEFAULTS.toolResultMaxChars;
+  }
+
+  // 文档类工具单页/单段预算默认 24k，除非用户显式设限或小窗口模型，避免外层通道反砍内部预算
+  if (opts.toolName === "read_document" && (!contextLimit || contextLimit >= 100000)) {
+    limit = Math.max(limit, 24000);
+  }
+  return limit;
+}
+
+function buildToolTruncationHint(toolName, omittedChars, headChars, tailChars) {
+  const base = `共省略中间 ${omittedChars} 字符（已保留前 ${headChars} + 后 ${tailChars} 字符）`;
+  switch (toolName) {
+    case "read_file":
+      return `${base}；请使用 offset 与 maxLines 分段读取目标行区间。`;
+    case "read_document":
+      return `${base}；表格请使用 startRow/maxRows 或 mode="aggregate" 聚合分析，PDF/PPT 请用 startPage/endPage 分页读取。`;
+    case "run_command":
+      return `${base}；已优先保留尾部 65% 的退出状态与报错堆栈，如需查看中间输出请配合 grep/tail 过滤重试。`;
+    case "search_code":
+    case "find_references":
+    case "search_symbols":
+      return `${base}；请缩小目录/include 过滤或减小 maxResults 重新检索。`;
+    default:
+      return `${base}；如需完整细节请缩小查询范围或分页读取。`;
+  }
+}
+
+function truncateToolResult(content, maxCharsOrOptions = DEFAULTS.toolResultMaxChars) {
   const text = typeof content === "string" ? content : JSON.stringify(content ?? "");
+  const opts =
+    maxCharsOrOptions && typeof maxCharsOrOptions === "object" ? maxCharsOrOptions : {};
+  const maxChars = resolveToolResultMaxChars(maxCharsOrOptions);
   if (text.length <= maxChars) return text;
 
-  const head = 5000;
-  const tail = 2000;
-  if (maxChars < head + tail) {
+  const toolName = opts.toolName || "";
+  if (maxChars < 400) {
     return `${text.slice(0, maxChars)}\n…[已截断，原始 ${text.length} 字符]`;
   }
-  return `${text.slice(0, head)}\n…[已截断，原始 ${text.length} 字符]…\n${text.slice(-tail)}`;
+
+  // 头部保留 35%（路径/表头/参数），尾部保留 65%（编译测试报错堆栈与执行结果）
+  const headChars = Math.max(100, Math.floor(maxChars * 0.35));
+  const tailChars = Math.max(100, maxChars - headChars);
+  const omittedChars = Math.max(0, text.length - headChars - tailChars);
+  const hint = buildToolTruncationHint(toolName, omittedChars, headChars, tailChars);
+  return `${text.slice(0, headChars)}\n…[已截断，原始 ${text.length} 字符；${hint}]…\n${text.slice(-tailChars)}`;
 }
 
 function truncateMiddle(text, maxChars) {
@@ -434,6 +494,7 @@ module.exports = {
   getThresholds,
   shouldMicroCompact,
   microCompact,
+  resolveToolResultMaxChars,
   truncateToolResult,
   selectKeepWindow,
   buildSummaryPrompt,

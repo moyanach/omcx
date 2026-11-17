@@ -738,49 +738,6 @@ function normalizeUsage(usage, provider) {
   };
 }
 
-function mergeUsage(total, usage) {
-  if (!usage) return total;
-  const base = total || {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
-    cached_tokens: 0,
-    cache_creation_tokens: 0,
-  };
-  return {
-    prompt_tokens: base.prompt_tokens + (Number(usage.prompt_tokens) || 0),
-    completion_tokens: base.completion_tokens + (Number(usage.completion_tokens) || 0),
-    total_tokens: base.total_tokens + (Number(usage.total_tokens) || 0),
-    cached_tokens: base.cached_tokens + (Number(usage.cached_tokens) || 0),
-    cache_creation_tokens:
-      base.cache_creation_tokens + (Number(usage.cache_creation_tokens) || 0),
-  };
-}
-
-function computeUsageCost(usage, pricing = {}) {
-  if (!usage) return 0;
-  const inputPrice = Number(pricing.inputPrice) || 0;
-  const outputPrice = Number(pricing.outputPrice) || 0;
-  const cacheReadPrice =
-    Number(pricing.cacheReadPrice) || (inputPrice > 0 ? inputPrice * 0.1 : 0);
-  const cacheWritePrice =
-    Number(pricing.cacheWritePrice) || (inputPrice > 0 ? inputPrice * 1.25 : 0);
-
-  const prompt = Number(usage.prompt_tokens) || 0;
-  const cached = Math.min(Number(usage.cached_tokens) || 0, prompt);
-  const cacheCreation = Number(usage.cache_creation_tokens) || 0;
-  const normalPrompt = Math.max(0, prompt - cached - cacheCreation);
-  const completion = Number(usage.completion_tokens) || 0;
-
-  const cost =
-    (normalPrompt * inputPrice +
-      cached * cacheReadPrice +
-      cacheCreation * cacheWritePrice +
-      completion * outputPrice) /
-    1_000_000;
-  return Math.round(cost * 100_000_000) / 100_000_000;
-}
-
 function pickLiteModel(currentModelId) {
   const storageService = getStorageService();
   const allModels = storageService.getModels();
@@ -982,8 +939,6 @@ module.exports = {
   buildAttachmentMessagesAsync,
   getModelConfig,
   normalizeUsage,
-  mergeUsage,
-  computeUsageCost,
   pickLiteModel,
   buildReasoningPayload,
   sendStreamEvent,

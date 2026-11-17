@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Cpu,
   Trash2,
@@ -9,6 +9,8 @@ import {
   Plus,
   Sliders,
   Save,
+  Layers,
+  ArrowLeft,
 } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import {
@@ -28,6 +30,8 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
   // 模型管理配置状态
   const [models, setModels] = useState<any[]>([]);
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<"list" | "form">("list");
+  const hasInitializedSectionRef = useRef(false);
 
   // 表单状态
   const [newModelProvider, setNewModelProvider] = useState("deepseek");
@@ -119,7 +123,23 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
     if (window.electronAPI && window.electronAPI.dbGetModels) {
       const list = await window.electronAPI.dbGetModels();
       setModels(list);
+      if (!hasInitializedSectionRef.current) {
+        hasInitializedSectionRef.current = true;
+        if (!Array.isArray(list) || list.length === 0) {
+          setActiveSection("form");
+        }
+      }
     }
+  };
+
+  const resetFormState = () => {
+    setEditingModelId(null);
+    setNewModelProvider("deepseek");
+    setNewModelBaseUrl(PROVIDER_PRESETS.deepseek.baseUrl);
+    setNewModelApiKey("");
+    setShowApiKey(false);
+    setFetchedRemoteModels([]);
+    setModelRows([createEmptyRow(PROVIDER_PRESETS.deepseek.defaultContext)]);
   };
 
   // 编辑已有模型 (支持在编辑当前模型的同时，继续基于该 Provider 追加新模型)
@@ -145,16 +165,15 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
         outputPrice: model.output_price || 0,
       },
     ]);
+    setActiveSection("form");
   };
 
   // 取消编辑
   const handleCancelEdit = () => {
-    setEditingModelId(null);
-    setNewModelProvider("deepseek");
-    setNewModelBaseUrl(PROVIDER_PRESETS.deepseek.baseUrl);
-    setNewModelApiKey("");
-    setFetchedRemoteModels([]);
-    setModelRows([createEmptyRow(PROVIDER_PRESETS.deepseek.defaultContext)]);
+    resetFormState();
+    if (models.length > 0) {
+      setActiveSection("list");
+    }
   };
 
   // 切换服务商厂商
@@ -278,7 +297,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
       await window.electronAPI.dbAddModel(modelPayload as any);
     }
 
-    handleCancelEdit();
+    resetFormState();
     if (updatedCount > 0 && addedCount > 0) {
       showToast(`已更新 ${updatedCount} 个模型，并新增 ${addedCount} 个同服务商模型！`);
     } else if (updatedCount > 0) {
@@ -288,6 +307,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
     }
 
     await loadModels();
+    setActiveSection("list");
     // 全局即时广播通知 Agent 会话界面
     await useChatStore.getState().fetchModels();
   };
@@ -325,18 +345,183 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
   }, []);
 
   return (
-              <div className="space-y-6">
-                {/* 模型添加/编辑卡片 */}
-                <div className="bg-[var(--ui-card-bg)] backdrop-blur-md border border-[color:var(--ui-border-subtle)] rounded-2xl p-5 shadow-sm space-y-4">
+              <div className="space-y-4">
+                {/* 顶部同排二级分 Tab：已配置模型 / 添加编辑模型 */}
+                <div className="flex items-center justify-between gap-3 flex-wrap bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] rounded-2xl px-3.5 py-2.5">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setActiveSection("list")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition-colors cursor-pointer ${
+                        activeSection === "list"
+                          ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border-[color:var(--ui-accent-blue-border)]"
+                          : "bg-transparent text-[var(--ui-text-muted)] border-transparent hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)]"
+                      }`}
+                    >
+                      <Layers size={13} />
+                      <span>已配置模型 ({models.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSection("form")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition-colors cursor-pointer ${
+                        activeSection === "form"
+                          ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border-[color:var(--ui-accent-blue-border)]"
+                          : "bg-transparent text-[var(--ui-text-muted)] border-transparent hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)]"
+                      }`}
+                    >
+                      {editingModelId ? <Pencil size={13} /> : <Plus size={13} />}
+                      <span>{editingModelId ? "正在编辑模型" : "添加模型"}</span>
+                    </button>
+                  </div>
+
+                  {activeSection === "list" ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        resetFormState();
+                        setActiveSection("form");
+                      }}
+                      className="px-3 py-1.5 rounded-xl ui-btn-primary text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+                    >
+                      <Plus size={13} />
+                      <span>添加新模型</span>
+                    </button>
+                  ) : (
+                    models.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveSection("list")}
+                        className="px-3 py-1.5 rounded-xl text-xs font-medium text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-block-hover-bg)] flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <ArrowLeft size={13} />
+                        <span>返回模型列表</span>
+                      </button>
+                    )
+                  )}
+                </div>
+
+                {/* Tab 1: 已配置模型列表 */}
+                {activeSection === "list" && (
+                  <div className="bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] rounded-2xl p-5 shadow-sm space-y-3">
+                    <div className="flex items-center justify-between border-b border-[color:var(--ui-divider-hairline)] pb-3 gap-2 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <Layers size={15} className="text-[var(--ui-accent-blue)]" />
+                        <h3 className="text-xs font-bold text-[var(--ui-text-primary)] tracking-wide">
+                          已配置生效的模型列表 ({models.length})
+                        </h3>
+                      </div>
+                      <span className="text-[11px] text-[var(--ui-text-muted)]">
+                        此处模型与会话输入框底部下拉菜单实时同步，可快捷切换 Lite 标记
+                      </span>
+                    </div>
+
+                    {models.length === 0 ? (
+                      <div className="py-12 flex flex-col items-center justify-center text-center gap-3">
+                        <div className="w-10 h-10 rounded-2xl bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] flex items-center justify-center text-[var(--ui-text-muted)]">
+                          <Cpu size={18} />
+                        </div>
+                        <div className="space-y-1">
+                          <p className="text-xs font-semibold text-[var(--ui-text-primary)]">
+                            尚未配置任何模型
+                          </p>
+                          <p className="text-[11px] text-[var(--ui-text-muted)]">
+                            请切换到「添加模型」填写服务商 Base URL 与 API Key
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            resetFormState();
+                            setActiveSection("form");
+                          }}
+                          className="px-4 py-2 rounded-xl ui-btn-primary text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Plus size={13} />
+                          <span>立即添加模型</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-[color:var(--ui-divider-hairline)] max-h-[540px] overflow-y-auto custom-scrollbar">
+                        {models.map((m) => (
+                          <div
+                            key={m.id}
+                            className="py-3 px-2.5 flex items-center justify-between hover:bg-[var(--ui-block-hover-bg)] rounded-xl transition-colors"
+                          >
+                            <div className="flex flex-col gap-1 min-w-0 pr-4">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-bold text-xs text-[var(--ui-text-primary)]">
+                                  {m.name || m.model_id}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-full text-[10px] bg-[var(--ui-chip-bg)] text-[var(--ui-text-secondary)] border border-[color:var(--ui-border-hairline)] font-mono">
+                                  {m.provider}
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded text-[10px] bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border border-[color:var(--ui-accent-blue-border)] font-mono">
+                                  {m.context_limit ? `${m.context_limit / 1000}k` : "128k"}
+                                </span>
+                                {m.supports_vision && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border border-[color:var(--ui-accent-emerald-border)] font-mono">
+                                    视觉
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleModelLite(m)}
+                                  title={
+                                    m.is_lite || m.isLite
+                                      ? "点击取消轻量模型 (Lite) 标记"
+                                      : "点击设为轻量模型 (Lite)，供 @explore 等子代理优先选用"
+                                  }
+                                  className={`px-1.5 py-0.5 rounded text-[10px] border font-mono transition-colors cursor-pointer ${
+                                    m.is_lite || m.isLite
+                                      ? "bg-[var(--ui-accent-sky-soft)] text-[var(--ui-accent-sky)] border-[color:var(--ui-accent-sky-border)]"
+                                      : "bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border-[color:var(--ui-border-hairline)] hover:text-[var(--ui-text-primary)]"
+                                  }`}
+                                >
+                                  {m.is_lite || m.isLite ? "Lite ✓" : "设为 Lite"}
+                                </button>
+                              </div>
+                              <div className="flex items-center gap-3 text-[11px] font-mono text-[var(--ui-text-muted)] truncate">
+                                <span>ID: {m.model_id}</span>
+                                <span className="truncate">URL: {m.base_url}</span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 flex-shrink-0">
+                              <button
+                                onClick={() => handleEditModel(m)}
+                                className="p-1.5 rounded-lg text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-hover-bg)] transition-colors cursor-pointer"
+                                title="编辑"
+                              >
+                                <Pencil size={13} />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteModel(m.id)}
+                                className="p-1.5 rounded-lg text-[var(--ui-text-muted)] hover:text-[var(--ui-accent-rose)] hover:bg-[var(--ui-accent-rose-soft)] transition-colors cursor-pointer"
+                                title="删除"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Tab 2: 模型添加/编辑卡片 */}
+                {activeSection === "form" && (
+                <div className="bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] rounded-2xl p-5 shadow-sm space-y-4">
                   <div className="flex items-center justify-between border-b border-[color:var(--ui-divider-hairline)] pb-3">
                     <div className="flex items-center gap-2">
-                      <Cpu size={16} className="text-blue-400" />
-                      <h3 className="text-xs font-bold text-neutral-100 tracking-wide">
-                        {editingModelId ? "编辑模型配置" : "添加并配置新模型 (OpenAI 兼容协议)"}
+                      <Cpu size={16} className="text-[var(--ui-accent-blue)]" />
+                      <h3 className="text-xs font-bold text-[var(--ui-text-primary)] tracking-wide">
+                        {editingModelId ? "编辑模型配置" : "添加并配置新模型 (OpenAI / Anthropic 协议)"}
                       </h3>
                     </div>
                     {editingModelId && (
-                      <span className="px-2 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono">
+                      <span className="px-2 py-0.5 rounded text-[10px] bg-[var(--ui-accent-amber-soft)] text-[var(--ui-accent-amber)] border border-[color:var(--ui-accent-amber-border)] font-mono">
                         正在修改现有模型
                       </span>
                     )}
@@ -344,16 +529,27 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
 
                   {/* 第一步：选择厂商 (Provider) */}
                   <div className="space-y-1.5">
-                    <label className="block text-xs font-medium text-neutral-300">
+                    <label className="block text-xs font-medium text-[var(--ui-text-secondary)]">
                       1. 选择模型服务商 (Provider)
                     </label>
                     <select
                       value={newModelProvider}
                       onChange={(e) => handleProviderChange(e.target.value)}
-                      className="w-full bg-[#171717] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 transition-all cursor-pointer font-medium"
+                      style={{
+                        backgroundColor: "var(--ui-dropdown-solid-bg)",
+                        color: "var(--ui-text-primary)",
+                      }}
+                      className="w-full border border-[color:var(--ui-border-subtle)] rounded-xl px-3 py-2 text-xs outline-none focus:border-[color:var(--ui-accent-blue-border)] transition-all cursor-pointer font-medium"
                     >
                       {Object.entries(PROVIDER_PRESETS).map(([key, item]) => (
-                        <option key={key} value={key} className="bg-[#1a1a1a] text-neutral-200">
+                        <option
+                          key={key}
+                          value={key}
+                          style={{
+                            backgroundColor: "var(--ui-dropdown-solid-bg)",
+                            color: "var(--ui-text-primary)",
+                          }}
+                        >
                           {item.name}
                         </option>
                       ))}
@@ -596,10 +792,21 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
                                 <select
                                   value={row.contextLimit}
                                   onChange={(e) => updateRow(row.rowId, { contextLimit: Number(e.target.value) })}
-                                  className="w-full bg-[#141414] border border-[#2e2e2e] rounded-xl px-3 py-2 text-xs text-neutral-200 outline-none focus:border-blue-500 cursor-pointer font-sans"
+                                  style={{
+                                    backgroundColor: "var(--ui-dropdown-solid-bg)",
+                                    color: "var(--ui-text-primary)",
+                                  }}
+                                  className="w-full border border-[color:var(--ui-border-subtle)] rounded-xl px-3 py-2 text-xs outline-none focus:border-[color:var(--ui-accent-blue-border)] cursor-pointer font-sans"
                                 >
                                   {CONTEXT_LIMIT_OPTIONS.map((opt) => (
-                                    <option key={opt.value} value={opt.value} className="bg-[#1c1c1c]">
+                                    <option
+                                      key={opt.value}
+                                      value={opt.value}
+                                      style={{
+                                        backgroundColor: "var(--ui-dropdown-solid-bg)",
+                                        color: "var(--ui-text-primary)",
+                                      }}
+                                    >
                                       {opt.label}
                                     </option>
                                   ))}
@@ -743,83 +950,7 @@ export const ModelsSettingsTab: React.FC<ModelsSettingsTabProps> = ({ showToast 
                     </button>
                   </div>
                 </div>
-
-                {/* 2. 已配置模型列表 */}
-                <div className="bg-[var(--ui-card-bg)] backdrop-blur-md border border-[color:var(--ui-border-subtle)] rounded-2xl p-5 shadow-sm space-y-3">
-                  <div className="flex items-center justify-between border-b border-[#282828] pb-3">
-                    <h3 className="text-xs font-bold text-neutral-100 uppercase tracking-wide">
-                      已配置生效的模型列表 ({models.length})
-                    </h3>
-                    <span className="text-[11px] text-neutral-500">
-                      所有此处配置的模型，已在 Agent 会话输入框底部下拉菜单中实时同步
-                    </span>
-                  </div>
-
-                  <div className="divide-y divide-[#262626] max-h-[300px] overflow-y-auto custom-scrollbar">
-                    {models.map((m) => (
-                      <div
-                        key={m.id}
-                        className="py-3 px-2 flex items-center justify-between hover:bg-white/[0.02] rounded-xl transition-colors"
-                      >
-                        <div className="flex flex-col gap-1 min-w-0 pr-4">
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-xs text-neutral-100">
-                              {m.name || m.model_id}
-                            </span>
-                            <span className="px-2 py-0.2 rounded-full text-[10px] bg-[#272727] text-neutral-400 border border-[#353535] font-mono">
-                              {m.provider}
-                            </span>
-                            <span className="px-1.5 py-0.2 rounded text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 font-mono">
-                              {m.context_limit ? `${m.context_limit / 1000}k` : "128k"}
-                            </span>
-                            {m.supports_vision && (
-                              <span className="px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                                视觉
-                              </span>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => handleToggleModelLite(m)}
-                              title={
-                                m.is_lite || m.isLite
-                                  ? "点击取消轻量模型 (Lite) 标记"
-                                  : "点击设为轻量模型 (Lite)，供 @explore 等子代理优先选用"
-                              }
-                              className={`px-1.5 py-0.2 rounded text-[10px] border font-mono transition-colors cursor-pointer ${
-                                m.is_lite || m.isLite
-                                  ? "bg-sky-500/15 text-sky-300 border-sky-500/35 hover:bg-sky-500/25"
-                                  : "bg-[#222222] text-neutral-500 border-[#333333] hover:text-neutral-300 hover:border-[#444444]"
-                              }`}
-                            >
-                              {m.is_lite || m.isLite ? "Lite ✓" : "设为 Lite"}
-                            </button>
-                          </div>
-                          <div className="flex items-center gap-3 text-[11px] font-mono text-neutral-500 truncate">
-                            <span>ID: {m.model_id}</span>
-                            <span className="truncate">URL: {m.base_url}</span>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-1.5 flex-shrink-0">
-                          <button
-                            onClick={() => handleEditModel(m)}
-                            className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-white/[0.06] transition-colors"
-                            title="编辑"
-                          >
-                            <Pencil size={13} />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteModel(m.id)}
-                            className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                            title="删除"
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                )}
               </div>
   );
 };

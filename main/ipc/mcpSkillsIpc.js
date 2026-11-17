@@ -381,6 +381,19 @@ function registerMcpSkillsIpc() {
   );
 
   ipcMain.handle(
+    "get-workspace-repo-wikis",
+    safeHandler((event, payload = {}) => {
+      const workDirs = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.workDirs)
+        ? payload.workDirs
+        : [];
+      const primaryWorkDir = Array.isArray(payload) ? null : payload?.primaryWorkDir || null;
+      return getRepoWikiService().getWorkspaceRepoWikis(workDirs, primaryWorkDir);
+    })
+  );
+
+  ipcMain.handle(
     "generate-repo-wiki",
     safeHandler(async (event, { workDir, model } = {}) => {
       const storageService = getStorageService();
@@ -467,7 +480,20 @@ function registerMcpSkillsIpc() {
         const customSystemPrompt = storageService.getConfig("custom_system_prompt") || "";
         const gitInfo = isWorkMode ? null : await getGitSnapshotAsync(targetWorkDir);
         const initialTodos = session?.todos || [];
-        const wikiInfo = !isWorkMode && targetWorkDir ? getRepoWikiService().getRepoWiki(targetWorkDir) : null;
+        const workspaceWikiDirs =
+          Array.isArray(matchedWorkspace?.folders) && matchedWorkspace.folders.length > 0
+            ? matchedWorkspace.folders.map((f) => f?.path).filter(Boolean)
+            : targetWorkDir
+            ? [targetWorkDir]
+            : [];
+        const wikiContext =
+          !isWorkMode && workspaceWikiDirs.length > 0
+            ? getRepoWikiService().buildWorkspaceRepoWikiContext({
+                workDirs: workspaceWikiDirs,
+                primaryWorkDir: targetWorkDir,
+                maxTotalChars: 12000,
+              })
+            : { text: "", primaryPath: "", isMulti: false };
         let repoMapText = "";
         if (!isWorkMode && targetWorkDir && storageService.getConfig("repo_map_enabled") !== "false") {
           try {
@@ -499,8 +525,9 @@ function registerMcpSkillsIpc() {
           memoryIndex,
           projectRules,
           repoMap: repoMapText,
-          repoWiki: wikiInfo?.exists ? String(wikiInfo.content || "").slice(0, 3500) : "",
-          repoWikiPath: wikiInfo?.path || "",
+          repoWiki: wikiContext?.text || "",
+          repoWikiPath: wikiContext?.primaryPath || "",
+          repoWikiIsMulti: Boolean(wikiContext?.isMulti),
           todos: initialTodos,
           toolDocs,
           model: modelId,

@@ -3,6 +3,7 @@ const path = require("path");
 const os = require("os");
 const { isAnthropicProvider, streamAnthropicMessage } = require("./anthropicClient");
 const reasoningPolicy = require("./reasoningPolicy");
+const { truncateToolResult } = require("./contextCompactor");
 const {
   isRetriableModelError,
   attachModelErrorContext,
@@ -500,11 +501,8 @@ function selectSubagentModel(parentModel, modelTier, storageService) {
           apiKey: lite.api_key || lite.apiKey || "",
           provider: lite.provider || parentModel.provider || "openai",
           modelName: lite.model_id || lite.modelName || lite.id || parentModel.modelName,
+          contextLimit: Number(lite.context_limit || lite.contextLimit) || parentModel?.contextLimit || 128000,
           maxOutputTokens: Number(lite.max_output_tokens) || parentModel.maxOutputTokens || 8192,
-          inputPrice: Number(lite.input_price) || 0,
-          outputPrice: Number(lite.output_price) || 0,
-          cacheReadPrice: Number(lite.cache_read_price) || 0,
-          cacheWritePrice: Number(lite.cache_write_price) || 0,
         };
       }
     }
@@ -586,34 +584,6 @@ async function runSubagentLoop({
       .trim();
   };
 
-  const normalizeSubagentUsage = (rawUsage) => {
-    if (!rawUsage || typeof rawUsage !== "object") return null;
-    if (isAnthropic && rawUsage.raw && typeof rawUsage.prompt_tokens === "number") {
-      return rawUsage;
-    }
-    if (isAnthropic && typeof rawUsage.input_tokens === "number") {
-      const { normalizeAnthropicUsage } = require("./anthropicClient");
-      return normalizeAnthropicUsage(rawUsage);
-    }
-    const prompt = Number(rawUsage.prompt_tokens ?? rawUsage.input_tokens) || 0;
-    const completion = Number(rawUsage.completion_tokens ?? rawUsage.output_tokens) || 0;
-    const cached =
-      Number(rawUsage.prompt_tokens_details?.cached_tokens) ||
-      Number(rawUsage.cached_tokens) ||
-      Number(rawUsage.cache_read_input_tokens) ||
-      0;
-    const cacheCreation = Number(rawUsage.cache_creation_input_tokens) || 0;
-    if (!prompt && !completion && !rawUsage.total_tokens) return null;
-    return {
-      prompt_tokens: prompt,
-      completion_tokens: completion,
-      total_tokens: Number(rawUsage.total_tokens) || prompt + completion,
-      cached_tokens: cached,
-      cache_creation_tokens: cacheCreation,
-      raw: rawUsage,
-    };
-  };
-
   const sysContent = buildSubagentSystemPrompt(agentDef, workDir);
 
   const userContent = contextHint
@@ -629,45 +599,8 @@ async function runSubagentLoop({
   let round = 0;
   const subSteps = [];
   let lastAssistantText = "";
-  let totalUsage = null;
-  let totalCostUsd = 0;
   const READ_ONLY_SET = PARALLEL_READ_ONLY_TOOLS;
   const configuredMaxTokens = Number(targetModel.maxOutputTokens) || 8192;
-
-  const recordSubUsage = (rawUsage) => {
-    const normalized = normalizeSubagentUsage(rawUsage);
-    if (!normalized) return;
-    if (!totalUsage) {
-      totalUsage = {
-        prompt_tokens: normalized.prompt_tokens,
-        completion_tokens: normalized.completion_tokens,
-        total_tokens: normalized.total_tokens,
-        cached_tokens: normalized.cached_tokens || 0,
-        cache_creation_tokens: normalized.cache_creation_tokens || 0,
-      };
-    } else {
-      totalUsage.prompt_tokens += normalized.prompt_tokens;
-      totalUsage.completion_tokens += normalized.completion_tokens;
-      totalUsage.total_tokens += normalized.total_tokens;
-      totalUsage.cached_tokens += normalized.cached_tokens || 0;
-      totalUsage.cache_creation_tokens += normalized.cache_creation_tokens || 0;
-    }
-    const inputPrice = Number(targetModel.inputPrice) || 0;
-    const outputPrice = Number(targetModel.outputPrice) || 0;
-    const cacheReadPrice =
-      Number(targetModel.cacheReadPrice) || (inputPrice > 0 ? inputPrice * 0.1 : 0);
-    const cacheWritePrice =
-      Number(targetModel.cacheWritePrice) || (inputPrice > 0 ? inputPrice * 1.25 : 0);
-    const cached = Math.min(normalized.cached_tokens || 0, normalized.prompt_tokens);
-    const cacheCreation = normalized.cache_creation_tokens || 0;
-    const normalPrompt = Math.max(0, normalized.prompt_tokens - cached - cacheCreation);
-    totalCostUsd +=
-      (normalPrompt * inputPrice +
-        cached * cacheReadPrice +
-        cacheCreation * cacheWritePrice +
-        normalized.completion_tokens * outputPrice) /
-      1_000_000;
-  };
 
   const buildSubAssistantReplay = (turnResult, toolCalls) => {
     const msg = {
@@ -717,7 +650,6 @@ async function runSubagentLoop({
           temperature: 0.2,
           signal: abortSig,
         });
-        recordSubUsage(anthropicRes.usage);
         return {
           rawContent: anthropicRes.content || "",
           cleanContent: stripLegacyThinking(anthropicRes.content || ""),
@@ -802,7 +734,6 @@ async function runSubagentLoop({
 
       const parsed = await readSubagentOpenAIResponse(response, idleTimeoutMs, abortSig);
       if (!parsed) return null;
-      recordSubUsage(parsed.usage);
 
       return {
         rawContent: parsed.rawContent || "",
@@ -867,8 +798,6 @@ async function runSubagentLoop({
         agentName: agentDef.name,
         error: "任务已被用户取消",
         subSteps,
-        usage: totalUsage,
-        costUsd: Math.round(totalCostUsd * 100_000_000) / 100_000_000,
       };
     }
 
@@ -944,7 +873,7 @@ async function runSubagentLoop({
       if (typeof onSubStep === "function") {
         onSubStep([...subSteps]);
       }
-      return { subCallId, execResult };
+      return { subCallId, toolName, execResult };
     };
 
     const allReadOnly =
@@ -961,12 +890,19 @@ async function runSubagentLoop({
       }
     }
 
-    for (const { subCallId, execResult } of completed) {
+    const subagentMaxCharsRaw = Number(
+      storageService?.getConfig?.("context_tool_result_max_chars")
+    );
+    const subagentConfiguredMax =
+      Number.isFinite(subagentMaxCharsRaw) && subagentMaxCharsRaw > 0 ? subagentMaxCharsRaw : null;
+
+    for (const { subCallId, toolName, execResult } of completed) {
       const serialized = JSON.stringify(execResult);
-      const truncated =
-        serialized.length > 10000
-          ? `${serialized.slice(0, 10000)}\n...(子代理工具结果已截断)`
-          : serialized;
+      const truncated = truncateToolResult(serialized, {
+        contextLimit: targetModel?.contextLimit || parentModel?.contextLimit || 128000,
+        configuredMaxChars: subagentConfiguredMax,
+        toolName,
+      });
       messages.push({
         role: "tool",
         tool_call_id: subCallId,
@@ -994,8 +930,6 @@ async function runSubagentLoop({
     toolCallsCount: subSteps.length,
     report: lastAssistantText || "子代理已完成执行，但未返回额外文本摘要。",
     subSteps,
-    usage: totalUsage,
-    costUsd: Math.round(totalCostUsd * 100_000_000) / 100_000_000,
   };
 }
 
@@ -1062,33 +996,10 @@ async function runSubagentBatch({
   const workerCount = Math.min(maxConcurrency, tasks.length);
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
-  const totalCostUsd = results.reduce((sum, r) => sum + (Number(r?.costUsd) || 0), 0);
-  let aggregatedUsage = null;
-  for (const r of results) {
-    if (!r?.usage) continue;
-    if (!aggregatedUsage) {
-      aggregatedUsage = {
-        prompt_tokens: Number(r.usage.prompt_tokens) || 0,
-        completion_tokens: Number(r.usage.completion_tokens) || 0,
-        total_tokens: Number(r.usage.total_tokens) || 0,
-        cached_tokens: Number(r.usage.cached_tokens) || 0,
-        cache_creation_tokens: Number(r.usage.cache_creation_tokens) || 0,
-      };
-    } else {
-      aggregatedUsage.prompt_tokens += Number(r.usage.prompt_tokens) || 0;
-      aggregatedUsage.completion_tokens += Number(r.usage.completion_tokens) || 0;
-      aggregatedUsage.total_tokens += Number(r.usage.total_tokens) || 0;
-      aggregatedUsage.cached_tokens += Number(r.usage.cached_tokens) || 0;
-      aggregatedUsage.cache_creation_tokens += Number(r.usage.cache_creation_tokens) || 0;
-    }
-  }
-
   return {
     success: results.every((r) => r?.success),
     parallelTasksCount: tasks.length,
     totalToolCallsCount: mergedStepsByTask.flat().length,
-    usage: aggregatedUsage,
-    costUsd: Math.round(totalCostUsd * 100_000_000) / 100_000_000,
     results: results.map((r, i) => ({
       index: i + 1,
       agentName: r.agentName,

@@ -244,7 +244,6 @@ test("automationService：后台执行落库收件箱、隐藏会话上下文并
       reasoning: "",
       metadata: {
         toolRounds: 1,
-        costUsd: 0.0123,
       },
     };
   });

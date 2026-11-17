@@ -95,7 +95,6 @@ function mapAutomationRunRow(r) {
     summary: String(r.summary || ""),
     error: r.error ? String(r.error) : null,
     outputs: Array.isArray(outputs) ? outputs : [],
-    cost_usd: Number(r.cost_usd ?? r.costUsd ?? 0) || 0,
     duration_ms: Number(r.duration_ms ?? r.durationMs ?? 0) || 0,
     started_at: Number(r.started_at ?? r.startedAt) || Date.now(),
     finished_at:
@@ -306,7 +305,6 @@ function createAutomationStorage({ memoryState, getConfig, setConfig, dbEngine }
       summary: String(run.summary !== undefined ? run.summary : existing?.summary || ""),
       error: run.error !== undefined ? (run.error ? String(run.error) : null) : existing?.error || null,
       outputs_json: JSON.stringify(outputsArr),
-      cost_usd: Number(run.cost_usd ?? run.costUsd ?? existing?.cost_usd ?? 0) || 0,
       duration_ms: Number(run.duration_ms ?? run.durationMs ?? existing?.duration_ms ?? 0) || 0,
       started_at: Number(run.started_at ?? run.startedAt ?? existing?.started_at) || Date.now(),
       finished_at:

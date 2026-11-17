@@ -12,10 +12,11 @@
 
 const { isAnthropicProvider, streamAnthropicMessage } = require("./anthropicClient");
 const { attachModelErrorContext, createHttpModelError } = require("./modelErrorService");
+const { truncateToolResult } = require("./contextCompactor");
 
 const MAX_TOOL_ROUNDS = 20;
-const MAX_TOOL_RESULT_CHARS = 16000;
-const MAX_TOTAL_TOOL_RESULT_CHARS = 60000;
+const MAX_TOOL_RESULT_CHARS = 24000;
+const MAX_TOTAL_TOOL_RESULT_CHARS = 80000;
 const MAX_DIGEST_CHARS = 6000;
 const MAX_QUESTION_CHARS = 12000;
 const MAX_QUOTED_CHARS = 8000;
@@ -485,7 +486,10 @@ async function runBtw({
               success: false,
               error: "旁路工具结果预算已用尽，请基于已获取的信息直接回答。",
             })
-          : clampText(toolText, Math.min(MAX_TOOL_RESULT_CHARS, remainingBudget));
+          : truncateToolResult(toolText, {
+              maxChars: Math.min(MAX_TOOL_RESULT_CHARS, remainingBudget),
+              toolName,
+            });
       toolResultChars += cappedText.length;
 
       messages.push({

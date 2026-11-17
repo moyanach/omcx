@@ -152,55 +152,6 @@ export const ContextCard: React.FC = () => {
               </div>
             ))}
           </div>
-
-          {/* 本轮模型用量与成本 (原生 Anthropic/兼容端点 usage 归一化后) */}
-          {metrics.usage && (() => {
-            const promptTokens = metrics.usage.prompt_tokens || 0;
-            const cachedTokens = metrics.usage.cached_tokens || 0;
-            const showCacheRow = promptTokens > 0 || cachedTokens > 0;
-            const cacheHitRate =
-              promptTokens > 0 ? Math.min(100, (cachedTokens / promptTokens) * 100) : 0;
-            const cacheHitRateLabel =
-              cachedTokens === 0
-                ? '0%'
-                : cacheHitRate >= 100
-                  ? '100%'
-                  : `${cacheHitRate.toFixed(1)}%`;
-
-            return (
-              <div className='flex flex-col gap-1 pt-2.5 border-t border-[color:var(--ui-divider-hairline)] text-[10.5px] font-mono text-[var(--ui-text-muted)]'>
-                <div className='flex items-center justify-between gap-2'>
-                  <span className='flex-shrink-0'>本轮 Tokens</span>
-                  <span className='text-[var(--ui-text-secondary)] text-right'>
-                    ↑{promptTokens.toLocaleString()} / ↓
-                    {(metrics.usage.completion_tokens || 0).toLocaleString()}
-                  </span>
-                </div>
-                {showCacheRow && (
-                  <div className='flex items-center justify-between gap-2'>
-                    <span className='flex-shrink-0'>Prompt Cache 命中</span>
-                    <span
-                      className={
-                        cachedTokens > 0
-                          ? 'text-[var(--ui-accent-emerald)] text-right'
-                          : 'text-[var(--ui-text-secondary)] text-right'
-                      }
-                    >
-                      {cachedTokens.toLocaleString()} tokens ({cacheHitRateLabel})
-                    </span>
-                  </div>
-                )}
-                {typeof metrics.costUsd === 'number' && metrics.costUsd > 0 && (
-                  <div className='flex items-center justify-between gap-2'>
-                    <span className='flex-shrink-0'>本轮成本</span>
-                    <span className='text-[var(--ui-accent-amber)] text-right'>
-                      ${metrics.costUsd.toFixed(4)}
-                    </span>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
         </div>
       )}
     </div>

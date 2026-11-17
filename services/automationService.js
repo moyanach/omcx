@@ -131,7 +131,6 @@ async function executeRunJob(job) {
     summary: "",
     error: null,
     outputs: [],
-    cost_usd: 0,
     duration_ms: 0,
     started_at: startedAt,
     finished_at: null,
@@ -197,7 +196,6 @@ async function executeRunJob(job) {
       : wasCancelled
       ? "定时任务已被手动取消"
       : String(turnResult?.error || streamErrorMsg || "执行未返回成功结果");
-    const costUsd = Number(turnResult?.metadata?.costUsd || 0) || 0;
 
     const dbOutputs = storageService.getSessionOutputs(sessionId);
     const finalOutputs = dbOutputs.length > 0 ? dbOutputs : collectedOutputs;
@@ -225,7 +223,6 @@ async function executeRunJob(job) {
       summary: summaryText || (wasCancelled ? "任务已取消。" : "执行完成，无文本输出。"),
       error: errorText,
       outputs: finalOutputs,
-      cost_usd: costUsd,
       duration_ms: durationMs,
       finished_at: finishedAt,
     });

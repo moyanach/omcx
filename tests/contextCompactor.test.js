@@ -5,6 +5,7 @@ const {
   getThresholds,
   shouldMicroCompact,
   microCompact,
+  resolveToolResultMaxChars,
   truncateToolResult,
   hardTruncate,
   isContextOverflowError,
@@ -103,4 +104,39 @@ test("microCompact 启用 batchWatermark 后按批量水位线清理以保护前
   });
   assert.equal(urgent.cleared, 1);
   assert.equal(urgent.skippedForCache, false);
+});
+
+test("resolveToolResultMaxChars 与 truncateToolResult 动态窗口分档及头尾保留正确", () => {
+  assert.equal(resolveToolResultMaxChars({ contextLimit: 1000000 }), 40000);
+  assert.equal(resolveToolResultMaxChars({ contextLimit: 200000 }), 28000);
+  assert.equal(resolveToolResultMaxChars({ contextLimit: 128000 }), 20000);
+  assert.equal(resolveToolResultMaxChars({ contextLimit: 32000 }), 12000);
+  // read_document 对 >=100k 模型至少保留 24000 字符内部预算
+  assert.equal(
+    resolveToolResultMaxChars({ contextLimit: 128000, toolName: "read_document" }),
+    24000
+  );
+  // 显式用户配置优先
+  assert.equal(
+    resolveToolResultMaxChars({ contextLimit: 1000000, configuredMaxChars: 15000, toolName: "read_document" }),
+    15000
+  );
+
+  // 1M 模型下 25000 字符的完整工具输出不再被写死 8000 拦腰截断
+  const mediumOutput = "HEAD_INFO\n" + "M".repeat(25000) + "\nTAIL_OK";
+  assert.equal(
+    truncateToolResult(mediumOutput, { contextLimit: 1000000, toolName: "read_file" }),
+    mediumOutput
+  );
+
+  // 超长命令报错时保留 35% 头部与 65% 尾部报错堆栈
+  const cmdLog =
+    "BUILD_START_CMD\n" +
+    "compiling normal module...\n".repeat(2200) +
+    "\nFATAL_ERROR_STACK: TypeError at src/main.ts:99\n";
+  const clippedCmd = truncateToolResult(cmdLog, { contextLimit: 128000, toolName: "run_command" });
+  assert.ok(clippedCmd.startsWith("BUILD_START_CMD"));
+  assert.ok(clippedCmd.includes("FATAL_ERROR_STACK: TypeError at src/main.ts:99"));
+  assert.match(clippedCmd, /已截断，原始 \d+ 字符/);
+  assert.match(clippedCmd, /尾部 65%/);
 });

@@ -150,7 +150,6 @@ function createDbEngine({
           summary TEXT,
           error TEXT,
           outputs_json TEXT,
-          cost_usd REAL DEFAULT 0,
           duration_ms INTEGER DEFAULT 0,
           started_at INTEGER NOT NULL,
           finished_at INTEGER
@@ -420,11 +419,11 @@ function createDbEngine({
         d.prepare(`
           INSERT INTO automation_runs (
             id, automation_id, automation_name, trigger_source, status, triage_state,
-            session_id, summary, error, outputs_json, cost_usd, duration_ms, started_at, finished_at
+            session_id, summary, error, outputs_json, duration_ms, started_at, finished_at
           )
           VALUES (
             @id, @automation_id, @automation_name, @trigger_source, @status, @triage_state,
-            @session_id, @summary, @error, @outputs_json, @cost_usd, @duration_ms, @started_at, @finished_at
+            @session_id, @summary, @error, @outputs_json, @duration_ms, @started_at, @finished_at
           )
           ON CONFLICT(id) DO UPDATE SET
             automation_name = excluded.automation_name,
@@ -434,7 +433,6 @@ function createDbEngine({
             summary = excluded.summary,
             error = excluded.error,
             outputs_json = excluded.outputs_json,
-            cost_usd = excluded.cost_usd,
             duration_ms = excluded.duration_ms,
             finished_at = excluded.finished_at
         `).run(payload);

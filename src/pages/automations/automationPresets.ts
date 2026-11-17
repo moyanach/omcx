@@ -39,7 +39,6 @@ export interface AutomationRun {
   summary: string;
   error: string | null;
   outputs: AutomationRunOutput[];
-  cost_usd: number;
   duration_ms: number;
   started_at: number;
   finished_at: number | null;

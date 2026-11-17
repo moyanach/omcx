@@ -86,28 +86,28 @@ export const SessionInspectorColumn: React.FC<SessionInspectorColumnProps> = ({ 
         {/* 2. Context 容量卡片 (五彩分段条) */}
         <ContextCard />
 
-        {/* 3. Outputs 会话产物与交付物卡片 */}
-        <OutputsCard />
-
-        {/* 4. Connectors 连接器卡片 (MCP 服务清单) */}
+        {/* 3. Connectors 连接器卡片 (MCP 服务清单) */}
         <ConnectorsCard />
 
         {/* 仅编程模式 (code) 展示工程研发向监控卡片，work 模式隐藏以降低噪音 */}
         {!isWorkMode && (
           <>
-            {/* 5. Repo Wiki 仓库级文档 (基于符号索引生成并缓存) */}
+            {/* 4. Repo Wiki 仓库级文档 (支持单/多目录工作空间) */}
             <RepoWikiCard />
 
-            {/* 6. 隔离工作树 (高风险任务在独立 Git worktree 中执行) */}
+            {/* 5. 隔离工作树 (高风险任务在独立 Git worktree 中执行) */}
             <WorktreeCard />
 
-            {/* 7. Quest 规格文档 (需求/方案/验收/实施步骤) */}
+            {/* 6. Quest 规格文档 (需求/方案/验收/实施步骤) */}
             <SpecCard />
 
-            {/* 8. Changes 代码变更卡片 (实时 Git 增删行 + 文件列表) */}
+            {/* 7. Changes 代码变更卡片 (实时 Git 增删行 + 文件列表) */}
             <ChangesCard />
           </>
         )}
+
+        {/* 8. Outputs 会话产物与交付物卡片 (置于 Changes 下方) */}
+        <OutputsCard />
       </div>
     </aside>
   );

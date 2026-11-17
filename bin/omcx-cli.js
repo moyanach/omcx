@@ -25,7 +25,7 @@ function printHelp() {
       --permission-mode <m>   权限模式（默认: full-access，可选 plan/auto-sandbox/ask/full-access）
       --reasoning-effort <e>  推理深度（默认: medium，可选 off/low/medium/high/max）
       --max-rounds <n>        最大工具调用轮次上限
-      --json-output <path>    将最终结构化结果（含 usage、costUsd）写入指定 JSON 文件
+      --json-output <path>    将最终结构化结果写入指定 JSON 文件
       --persist               关闭纯内存存储模式，使用本地 SQLite 持久化
   -h, --help                  显示帮助信息并退出
 
@@ -302,8 +302,6 @@ async function main() {
     reasoning: result?.reasoning || "",
     durationMs,
     toolRounds: result?.metadata?.toolRounds || 0,
-    usage: result?.metadata?.usage || null,
-    costUsd: result?.metadata?.costUsd || 0,
     model: result?.metadata?.model || apiModelId,
     provider: result?.metadata?.provider || provider,
   };
@@ -314,12 +312,8 @@ async function main() {
     fs.writeFileSync(outPath, JSON.stringify(summary, null, 2), "utf-8");
   }
 
-  const promptTokens = summary.usage?.prompt_tokens || 0;
-  const completionTokens = summary.usage?.completion_tokens || 0;
-  const cachedTokens = summary.usage?.cached_tokens || 0;
   process.stderr.write(
-    `[omcx-cli] ok=${summary.ok} rounds=${summary.toolRounds} durationMs=${durationMs} ` +
-      `tokens(in=${promptTokens},cached=${cachedTokens},out=${completionTokens}) costUsd=${summary.costUsd}\n`
+    `[omcx-cli] ok=${summary.ok} rounds=${summary.toolRounds} durationMs=${durationMs}\n`
   );
 
   try {

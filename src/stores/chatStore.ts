@@ -117,14 +117,6 @@ export interface ContextMetrics {
   usedTokens: number;
   usedTokensFormatted: string;
   usedPercent: number;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-    cached_tokens: number;
-    cache_creation_tokens: number;
-  } | null;
-  costUsd?: number;
   breakdown: {
     messages: ContextBreakdownItem;
     systemTools: ContextBreakdownItem;
