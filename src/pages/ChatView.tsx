@@ -113,6 +113,10 @@ const ChatView: React.FC = () => {
   const { askBtw } = useBtwChat();
 
   const [input, setInput] = useState('');
+  const [inputFocusRequest, setInputFocusRequest] = useState<{
+    seq: number;
+    trigger?: '@' | '/';
+  } | null>(null);
   const [selectedModel, setSelectedModel] = useState('');
   const [attachments, setAttachments] = useState<DraftChatAttachment[]>([]);
   const [fileMentionMap, setFileMentionMap] = useState<Record<string, string>>({});
@@ -455,6 +459,27 @@ const ChatView: React.FC = () => {
     }
   };
 
+  const handlePrefillPrompt = React.useCallback(
+    (text: string, options?: { trigger?: '@' | '/' }) => {
+      if (options?.trigger === '@') {
+        setInput((prev) => {
+          if (prev.endsWith('@')) return prev;
+          if (!prev) return '@';
+          return /\s$/.test(prev) ? `${prev}@` : `${prev} @`;
+        });
+      } else if (options?.trigger === '/') {
+        setInput('/');
+      } else if (text) {
+        setInput(text);
+      }
+      setInputFocusRequest((prev) => ({
+        seq: (prev?.seq || 0) + 1,
+        trigger: options?.trigger,
+      }));
+    },
+    []
+  );
+
   return (
     <div className='flex h-full w-full overflow-hidden relative'>
       <div
@@ -495,6 +520,8 @@ const ChatView: React.FC = () => {
                   onCopy={handleCopy}
                   onRetry={handleRetry}
                   onSideChatSelection={handleSideChatSelection}
+                  onPrefillPrompt={handlePrefillPrompt}
+                  onOpenInspector={() => setInspectorOpen(true)}
                 />
 
                 {/* 多场景沙箱与人机协同权限审批卡片 */}
@@ -643,6 +670,7 @@ const ChatView: React.FC = () => {
                   mentionMap={fileMentionMap}
                   onChangeMentionMap={setFileMentionMap}
                   onFileIndexChange={setWorkspaceFiles}
+                  focusRequest={inputFocusRequest}
                 />
               </div>
             </div>

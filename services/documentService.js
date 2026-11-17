@@ -315,15 +315,21 @@ function sliceWithBudget(text, maxChars) {
 }
 
 /**
- * 统一读取办公文档：支持 outline（大纲/结构）、read（按页/按表分段读取）、search（关键词定位）
+ * 统一读取办公文档：支持 outline（大纲/结构）、read（按页/按表分段读取）、search（关键词定位）、aggregate（表格全表聚合统计）
  */
 async function readDocument(filePath, options = {}) {
   const ext = getDocExtension(filePath);
   if (!SUPPORTED_READ_EXTS.has(ext)) {
     throw new Error(`不支持的文档格式: .${ext || "unknown"}（支持 pdf/docx/doc/xlsx/xlsm/csv/tsv/pptx）`);
   }
-  const mode = ["outline", "read", "search"].includes(options.mode) ? options.mode : "read";
+  const mode = ["outline", "read", "search", "aggregate"].includes(options.mode)
+    ? options.mode
+    : "read";
   const maxChars = options.maxChars || DEFAULT_MAX_CHARS;
+
+  if (mode === "aggregate" && !["xlsx", "xlsm", "csv", "tsv"].includes(ext)) {
+    throw new Error(`aggregate 模式仅支持 .xlsx / .xlsm / .csv / .tsv 表格文件，当前为 .${ext}`);
+  }
 
   if (ext === "pdf") {
     const pdf = await extractPdfPages(filePath);
@@ -577,6 +583,11 @@ async function readDocument(filePath, options = {}) {
   if (!sheet) {
     return { format: ext, sheetCount: 0, content: "", message: "工作簿不包含任何工作表" };
   }
+
+  if (mode === "aggregate") {
+    return aggregateSpreadsheetSheet(sheet, sheets, ext, options, maxChars);
+  }
+
   const startRow = Math.max(0, Math.floor(Number(options.startRow) || 0));
   const maxRows = Math.min(500, Math.max(1, Math.floor(Number(options.maxRows) || 120)));
   const sliceRows = sheet.rows.slice(startRow, startRow + maxRows);
@@ -594,6 +605,378 @@ async function readDocument(filePath, options = {}) {
     headers: sheet.headers,
     content: sliced.text,
     truncated: sliced.truncated || startRow + maxRows < sheet.totalRows,
+  };
+}
+
+function parseNumericCell(raw) {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) ? raw : null;
+  }
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  // 去掉常见货币符号，保留数字与正负号、千分位逗号、小数点与末尾百分号
+  const cleaned = text.replace(/^[¥$€£]/, "").trim();
+  if (!/^[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?$/.test(cleaned)) {
+    return null;
+  }
+  const isPercent = cleaned.endsWith("%");
+  const numStr = (isPercent ? cleaned.slice(0, -1) : cleaned).replace(/,/g, "");
+  const num = Number(numStr);
+  if (!Number.isFinite(num)) return null;
+  return num;
+}
+
+function computeMedian(sortedNums) {
+  if (!sortedNums || sortedNums.length === 0) return null;
+  const mid = Math.floor(sortedNums.length / 2);
+  if (sortedNums.length % 2 === 1) {
+    return sortedNums[mid];
+  }
+  return (sortedNums[mid - 1] + sortedNums[mid]) / 2;
+}
+
+function roundMetricValue(val) {
+  if (typeof val !== "number" || !Number.isFinite(val)) return val;
+  return Math.round(val * 10000) / 10000;
+}
+
+function buildHeaderIndexMap(headersRow) {
+  const indexMap = new Map();
+  const normalizedHeaders = [];
+  const seen = new Map();
+  (headersRow || []).forEach((h, idx) => {
+    let name = String(h ?? "").trim();
+    if (!name) name = `Col${idx + 1}`;
+    const dupCount = seen.get(name) || 0;
+    seen.set(name, dupCount + 1);
+    const uniqueName = dupCount > 0 ? `${name}_${dupCount + 1}` : name;
+    normalizedHeaders.push(uniqueName);
+    if (!indexMap.has(uniqueName)) indexMap.set(uniqueName, idx);
+    const lower = uniqueName.toLowerCase();
+    if (!indexMap.has(lower)) indexMap.set(lower, idx);
+  });
+  return { indexMap, normalizedHeaders };
+}
+
+function resolveColumnIndex(indexMap, normalizedHeaders, colName) {
+  const target = String(colName ?? "").trim();
+  if (!target) {
+    throw new Error("aggregate 参数中包含空列名");
+  }
+  if (indexMap.has(target)) return indexMap.get(target);
+  const lower = target.toLowerCase();
+  if (indexMap.has(lower)) return indexMap.get(lower);
+  const preview = normalizedHeaders.slice(0, 30).join(", ");
+  throw new Error(`未找到列名 "${colName}"（可用列名: ${preview}）`);
+}
+
+function matchWhereCondition(cellRaw, cond) {
+  const op = cond.op || "eq";
+  const text = String(cellRaw ?? "").trim();
+  if (op === "is_empty") return text.length === 0;
+  if (op === "not_empty") return text.length > 0;
+
+  const targetVal = cond.value;
+  if (op === "in") {
+    const arr = Array.isArray(targetVal) ? targetVal : [targetVal];
+    const set = new Set(arr.map((v) => String(v ?? "").trim().toLowerCase()));
+    return set.has(text.toLowerCase());
+  }
+
+  const targetStr = String(targetVal ?? "").trim();
+  if (op === "eq") {
+    const n1 = parseNumericCell(text);
+    const n2 = parseNumericCell(targetStr);
+    if (n1 !== null && n2 !== null) return n1 === n2;
+    return text.toLowerCase() === targetStr.toLowerCase();
+  }
+  if (op === "neq") {
+    const n1 = parseNumericCell(text);
+    const n2 = parseNumericCell(targetStr);
+    if (n1 !== null && n2 !== null) return n1 !== n2;
+    return text.toLowerCase() !== targetStr.toLowerCase();
+  }
+  if (op === "contains") {
+    return text.toLowerCase().includes(targetStr.toLowerCase());
+  }
+  if (op === "not_contains") {
+    return !text.toLowerCase().includes(targetStr.toLowerCase());
+  }
+
+  const nCell = parseNumericCell(text);
+  const nTarget = parseNumericCell(targetStr);
+  if (nCell !== null && nTarget !== null) {
+    if (op === "gt") return nCell > nTarget;
+    if (op === "gte") return nCell >= nTarget;
+    if (op === "lt") return nCell < nTarget;
+    if (op === "lte") return nCell <= nTarget;
+  } else if (text.length > 0 && targetStr.length > 0) {
+    if (op === "gt") return text > targetStr;
+    if (op === "gte") return text >= targetStr;
+    if (op === "lt") return text < targetStr;
+    if (op === "lte") return text <= targetStr;
+  }
+  return false;
+}
+
+function buildColumnProfile(dataRows, normalizedHeaders) {
+  return normalizedHeaders.map((colName, colIdx) => {
+    let nonEmptyCount = 0;
+    const freqMap = new Map();
+    const numericVals = [];
+
+    for (const row of dataRows) {
+      const val = String(row[colIdx] ?? "").trim();
+      if (!val) continue;
+      nonEmptyCount += 1;
+      freqMap.set(val, (freqMap.get(val) || 0) + 1);
+      const num = parseNumericCell(val);
+      if (num !== null) numericVals.push(num);
+    }
+
+    const topValues = Array.from(freqMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([value, count]) => ({
+        value: value.length > 80 ? `${value.slice(0, 80)}...` : value,
+        count,
+        ratio: nonEmptyCount > 0 ? `${((count / nonEmptyCount) * 100).toFixed(1)}%` : "0%",
+      }));
+
+    const item = {
+      column: colName,
+      nonEmptyCount,
+      emptyCount: dataRows.length - nonEmptyCount,
+      uniqueCount: freqMap.size,
+      topValues,
+    };
+
+    if (numericVals.length > 0 && numericVals.length >= Math.min(3, nonEmptyCount)) {
+      numericVals.sort((a, b) => a - b);
+      const sum = numericVals.reduce((acc, v) => acc + v, 0);
+      item.numericStats = {
+        count: numericVals.length,
+        sum: roundMetricValue(sum),
+        avg: roundMetricValue(sum / numericVals.length),
+        min: numericVals[0],
+        max: numericVals[numericVals.length - 1],
+        median: roundMetricValue(computeMedian(numericVals)),
+      };
+    }
+
+    return item;
+  });
+}
+
+function aggregateSpreadsheetSheet(sheet, sheets, ext, options, maxChars) {
+  const rawRows = Array.isArray(sheet.rows) ? sheet.rows : [];
+  if (rawRows.length === 0) {
+    return {
+      format: ext,
+      mode: "aggregate",
+      sheet: sheet.name,
+      totalDataRows: 0,
+      matchedRows: 0,
+      groups: [],
+      message: "工作表为空",
+    };
+  }
+
+  const headerIdx = Math.max(0, Math.min(rawRows.length - 1, (Math.floor(Number(options.headerRow) || 1)) - 1));
+  const { indexMap, normalizedHeaders } = buildHeaderIndexMap(rawRows[headerIdx]);
+  const dataRows = rawRows.slice(headerIdx + 1);
+
+  const whereList = Array.isArray(options.where) ? options.where : [];
+  const compiledWhere = whereList.map((cond) => ({
+    colIdx: resolveColumnIndex(indexMap, normalizedHeaders, cond.column),
+    cond,
+  }));
+
+  const filteredRows =
+    compiledWhere.length === 0
+      ? dataRows
+      : dataRows.filter((row) =>
+          compiledWhere.every(({ colIdx, cond }) => matchWhereCondition(row[colIdx], cond))
+        );
+
+  const groupCols = Array.isArray(options.groupBy)
+    ? options.groupBy.map((c) => String(c || "").trim()).filter(Boolean)
+    : [];
+  const rawMetrics = Array.isArray(options.metrics) ? options.metrics : [];
+
+  // 未传 groupBy 且未传 metrics 时，输出全表/过滤后全列分布与数值画像
+  if (groupCols.length === 0 && rawMetrics.length === 0) {
+    const profile = buildColumnProfile(filteredRows, normalizedHeaders);
+    const budgetCap = Math.min(120000, Math.max(4000, Number(maxChars) || DEFAULT_MAX_CHARS));
+    const trimmedProfile = [];
+    let usedChars = 0;
+    let truncated = false;
+    for (const colProfile of profile) {
+      const pieceLen = JSON.stringify(colProfile).length;
+      if (trimmedProfile.length > 0 && usedChars + pieceLen > budgetCap - 1000) {
+        truncated = true;
+        break;
+      }
+      trimmedProfile.push(colProfile);
+      usedChars += pieceLen;
+    }
+    return {
+      format: ext,
+      mode: "aggregate",
+      kind: "column_profile",
+      sheet: sheet.name,
+      availableSheets: sheets.map((s) => s.name),
+      headerRow: headerIdx + 1,
+      headers: normalizedHeaders,
+      totalDataRows: dataRows.length,
+      matchedRows: filteredRows.length,
+      columnCount: normalizedHeaders.length,
+      columnsProfiled: trimmedProfile.length,
+      truncated,
+      columnProfiles: trimmedProfile,
+    };
+  }
+
+  const groupIndices = groupCols.map((name) => ({
+    name,
+    idx: resolveColumnIndex(indexMap, normalizedHeaders, name),
+  }));
+
+  const effectiveMetrics =
+    rawMetrics.length > 0
+      ? rawMetrics.map((m, i) => {
+          const op = m.op || "count";
+          const colName = m.column ? String(m.column).trim() : "";
+          const colIdx = op === "count" && !colName
+            ? -1
+            : resolveColumnIndex(indexMap, normalizedHeaders, colName);
+          const as =
+            (m.as && String(m.as).trim()) ||
+            (op === "count" && !colName ? "count" : `${op}_${colName || i}`);
+          return { op, colName, colIdx, as };
+        })
+      : [{ op: "count", colName: "", colIdx: -1, as: "count" }];
+
+  const groupBuckets = new Map();
+  for (const row of filteredRows) {
+    const keyParts = groupIndices.map(({ idx }) => {
+      const v = String(row[idx] ?? "").trim();
+      return v === "" ? "(空)" : v;
+    });
+    const bucketKey = JSON.stringify(keyParts);
+    let bucket = groupBuckets.get(bucketKey);
+    if (!bucket) {
+      bucket = {
+        keyValues: keyParts,
+        rows: [],
+      };
+      groupBuckets.set(bucketKey, bucket);
+    }
+    bucket.rows.push(row);
+  }
+
+  const aggregated = [];
+  for (const bucket of groupBuckets.values()) {
+    const record = {};
+    groupIndices.forEach(({ name }, idx) => {
+      record[name] = bucket.keyValues[idx];
+    });
+
+    for (const metric of effectiveMetrics) {
+      if (metric.op === "count") {
+        if (metric.colIdx === -1) {
+          record[metric.as] = bucket.rows.length;
+        } else {
+          let cnt = 0;
+          for (const r of bucket.rows) {
+            if (String(r[metric.colIdx] ?? "").trim() !== "") cnt += 1;
+          }
+          record[metric.as] = cnt;
+        }
+        continue;
+      }
+      if (metric.op === "count_distinct") {
+        const distinct = new Set();
+        for (const r of bucket.rows) {
+          const v = String(r[metric.colIdx] ?? "").trim();
+          if (v !== "") distinct.add(v);
+        }
+        record[metric.as] = distinct.size;
+        continue;
+      }
+
+      const nums = [];
+      for (const r of bucket.rows) {
+        const n = parseNumericCell(r[metric.colIdx]);
+        if (n !== null) nums.push(n);
+      }
+      if (nums.length === 0) {
+        record[metric.as] = metric.op === "sum" ? 0 : null;
+        continue;
+      }
+      if (metric.op === "sum") {
+        record[metric.as] = roundMetricValue(nums.reduce((a, b) => a + b, 0));
+      } else if (metric.op === "avg") {
+        record[metric.as] = roundMetricValue(nums.reduce((a, b) => a + b, 0) / nums.length);
+      } else if (metric.op === "min") {
+        record[metric.as] = Math.min(...nums);
+      } else if (metric.op === "max") {
+        record[metric.as] = Math.max(...nums);
+      } else if (metric.op === "median") {
+        nums.sort((a, b) => a - b);
+        record[metric.as] = roundMetricValue(computeMedian(nums));
+      }
+    }
+    aggregated.push(record);
+  }
+
+  const defaultSortField = effectiveMetrics[0]?.as || "count";
+  const sortField = (options.sortBy && String(options.sortBy).trim()) || defaultSortField;
+  const sortOrder = options.sortOrder === "asc" ? 1 : -1;
+
+  aggregated.sort((a, b) => {
+    const va = a[sortField];
+    const vb = b[sortField];
+    if (va === vb) return 0;
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (typeof va === "number" && typeof vb === "number") {
+      return (va - vb) * sortOrder;
+    }
+    return String(va).localeCompare(String(vb), "zh-CN") * sortOrder;
+  });
+
+  const limit = Math.min(500, Math.max(1, Math.floor(Number(options.limit) || 50)));
+  const limited = aggregated.slice(0, limit);
+
+  const budgetCap = Math.min(120000, Math.max(2000, Number(maxChars) || DEFAULT_MAX_CHARS));
+  const finalGroups = [];
+  let usedChars = 0;
+  let budgetTruncated = false;
+  for (const row of limited) {
+    const len = JSON.stringify(row).length;
+    if (finalGroups.length > 0 && usedChars + len > budgetCap - 800) {
+      budgetTruncated = true;
+      break;
+    }
+    finalGroups.push(row);
+    usedChars += len;
+  }
+
+  return {
+    format: ext,
+    mode: "aggregate",
+    kind: "grouped_summary",
+    sheet: sheet.name,
+    availableSheets: sheets.map((s) => s.name),
+    headerRow: headerIdx + 1,
+    headers: normalizedHeaders,
+    totalDataRows: dataRows.length,
+    matchedRows: filteredRows.length,
+    totalGroups: aggregated.length,
+    returnedGroups: finalGroups.length,
+    truncated: budgetTruncated || aggregated.length > finalGroups.length,
+    groups: finalGroups,
   };
 }
 

@@ -28,4 +28,8 @@ export interface MessageListProps {
   onRetry: (msg: Message) => void;
   /** 选中主会话文本后右键「旁路会话」：把选中内容作为只读引用带入旁路问答 */
   onSideChatSelection?: (payload: BtwSelectionPayload) => void;
+  /** 空会话欢迎台：点击起手卡/上下文条预填输入框并聚焦 */
+  onPrefillPrompt?: (text: string, options?: { trigger?: '@' | '/' }) => void;
+  /** 空会话欢迎台：打开右侧检查器/产物栏 */
+  onOpenInspector?: () => void;
 }

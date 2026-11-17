@@ -67,6 +67,8 @@ export function getToolStepSummary(tool: string, args: any) {
             ? `${args.path || ''} (查看大纲结构)`
             : args.mode === 'search'
               ? `${args.path || ''} · 检索 "${args.query || ''}"`
+              : args.mode === 'aggregate'
+                ? `${args.path || ''} · ${Array.isArray(args.groupBy) && args.groupBy.length > 0 ? `分组统计 [${args.groupBy.join(', ')}]` : '全表聚合画像'}${args.sheet ? ` (${args.sheet})` : ''}`
               : args.sheet
                 ? `${args.path || ''} · Sheet [${args.sheet}]`
                 : args.startPage
@@ -167,14 +169,49 @@ export function getToolStepSummary(tool: string, args: any) {
   }
 }
 
+export function getToolStepError(result: any): string | null {
+  if (!result || typeof result !== 'object') return null;
+  if (typeof result.error === 'string' && result.error.trim()) {
+    return result.error.trim();
+  }
+  const d = result.data;
+  if (d && typeof d === 'object') {
+    if ((d.success === false || d.ok === false) && typeof d.error === 'string' && d.error.trim()) {
+      return d.error.trim();
+    }
+    if ((d.success === false || d.ok === false) && typeof d.message === 'string' && d.message.trim()) {
+      return d.message.trim();
+    }
+    if (d.success === false || d.ok === false) {
+      return '工具返回执行失败';
+    }
+  }
+  if (result.success === false || result.ok === false) {
+    return '工具执行失败';
+  }
+  return null;
+}
+
+export function isToolStepSuccess(result: any): boolean {
+  if (!result) return true;
+  return getToolStepError(result) === null;
+}
+
 /**
  * 提取工具返回的单行极简摘要
  */
 export function getToolOutputSummary(result: any) {
   if (!result) return '';
-  if (result.error) return `失败: ${String(result.error).slice(0, 48)}`;
+  const stepError = getToolStepError(result);
+  if (stepError) return `失败: ${stepError.slice(0, 48)}`;
   const d = result.data;
   if (d) {
+    if (d.mode === 'aggregate') {
+      if (d.kind === 'column_profile') {
+        return `统计 ${d.matchedRows ?? d.totalDataRows ?? 0} 行 · ${d.columnsProfiled ?? 0} 列画像`;
+      }
+      return `统计 ${d.matchedRows ?? d.totalDataRows ?? 0} 行 · ${d.totalGroups ?? d.returnedGroups ?? 0} 个分组`;
+    }
     if (d.parallelTasksCount !== undefined) {
       return `${d.parallelTasksCount} 个子代理完成 · 共 ${d.totalToolCallsCount || 0} 步`;
     }
@@ -184,7 +221,7 @@ export function getToolOutputSummary(result: any) {
     if (d.replacedOccurrences) return `替换 ${d.replacedOccurrences} 处 (${d.lineDelta || '0'})`;
     if (d.totalLines) return `${d.startLine || 1}-${d.endLine || d.totalLines} / 共 ${d.totalLines} 行`;
     if (d.matchesCount !== undefined) return `${d.matchesCount} 处匹配`;
-    if (Array.isArray(d. matches)) return `${d.matches.length} 处匹配`;
+    if (Array.isArray(d.matches)) return `${d.matches.length} 处匹配`;
     if (Array.isArray(d.entries)) return `${d.entries.length} 项`;
     if (Array.isArray(d.files)) return `${d.files.length} 项`;
     if (d.stdout) {
@@ -278,7 +315,7 @@ const AnsiTerminalOutput: React.FC<{
 export const ToolKeyDetailView: React.FC<{ ev: ToolStatusEvent }> = ({ ev }) => {
   const args = ev.args || {};
   const data = ev.result?.data || {};
-  const errorMsg = ev.result?.error;
+  const errorMsg = getToolStepError(ev.result);
 
   if (errorMsg) {
     return (
@@ -635,9 +672,13 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
     let edit = 0;
     let command = 0;
     let subagent = 0;
+    let failed = 0;
     const editedFiles = new Set<string>();
 
     for (const ev of filteredEvents) {
+      if (ev.status !== 'running' && !isToolStepSuccess(ev.result)) {
+        failed++;
+      }
       const { category } = getToolStepSummary(ev.tool, ev.args);
       if (category === 'read') read++;
       else if (category === 'search') search++;
@@ -654,6 +695,7 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
       edit,
       command,
       subagent,
+      failed,
       editedFiles: Array.from(editedFiles),
     };
   }, [filteredEvents]);
@@ -683,6 +725,8 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
         <div className='flex items-center gap-2 min-w-0 flex-wrap'>
           {isAnyRunning ? (
             <Loader2 size={12} className='text-[var(--ui-accent-blue)] animate-spin flex-shrink-0' />
+          ) : stats.failed > 0 ? (
+            <XCircle size={12} className='text-[var(--ui-accent-rose)] flex-shrink-0' />
           ) : (
             <CheckCircle2 size={12} className='text-[var(--ui-accent-emerald)] flex-shrink-0' />
           )}
@@ -690,11 +734,18 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
           <span className='text-xs font-semibold text-[var(--ui-text-secondary)] flex-shrink-0'>
             {isAnyRunning
               ? `正在执行工具 (${filteredEvents.length} 步)`
-              : `已执行 ${filteredEvents.length} 个步骤`}
+              : stats.failed > 0
+                ? `已执行 ${filteredEvents.length} 个步骤 (${stats.failed} 项失败)`
+                : `已执行 ${filteredEvents.length} 个步骤`}
           </span>
 
           {/* 分类统计胶囊 */}
           <div className="flex items-center gap-1.5 flex-wrap [&>*+*]:before:content-['·'] [&>*+*]:before:mr-1.5 [&>*+*]:before:text-[var(--ui-text-faint)]">
+            {stats.failed > 0 && (
+              <span className='text-[10px] font-mono text-[var(--ui-accent-rose)]'>
+                失败 {stats.failed}
+              </span>
+            )}
             {stats.read > 0 && (
               <span className='text-[10px] font-mono text-[var(--ui-text-muted)]'>
                 读取 {stats.read}
@@ -735,6 +786,7 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
           {liveWindowEvents.map((ev, i) => {
             const { title, subtitle } = getToolStepSummary(ev.tool, ev.args);
             const isRunning = ev.status === 'running';
+            const isSuccess = isRunning || isToolStepSuccess(ev.result);
             const recentSubSteps = Array.isArray(ev.subSteps) ? ev.subSteps.slice(-3) : [];
             return (
               <div key={ev.callId || i} className='flex flex-col gap-0.5 py-0.5'>
@@ -742,8 +794,10 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
                   <div className='flex items-center gap-2 min-w-0'>
                     {isRunning ? (
                       <Loader2 size={11} className='text-[var(--ui-accent-blue)] animate-spin flex-shrink-0' />
-                    ) : (
+                    ) : isSuccess ? (
                       <CheckCircle2 size={11} className='text-[var(--ui-accent-emerald)] flex-shrink-0' />
+                    ) : (
+                      <XCircle size={11} className='text-[var(--ui-accent-rose)] flex-shrink-0' />
                     )}
                     <span className='text-[var(--ui-text-secondary)] font-medium truncate'>{title}</span>
                     {subtitle && (
@@ -752,7 +806,11 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
                       </span>
                     )}
                   </div>
-                  <span className='text-[10px] font-mono text-[var(--ui-text-faint)] flex-shrink-0'>
+                  <span
+                    className={`text-[10px] font-mono flex-shrink-0 ${
+                      isSuccess ? 'text-[var(--ui-text-faint)]' : 'text-[var(--ui-accent-rose)]'
+                    }`}
+                  >
                     {isRunning
                       ? ev.subSteps?.length
                         ? `已运行 ${ev.subSteps.length} 步...`
@@ -803,6 +861,7 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
                         event.args?.path ||
                         (event.tool === 'list_directory' ? '目录' : '文件');
                       const isSelected = selectedStepIdx === originalIndex;
+                      const isItemFailed = event.status !== 'running' && !isToolStepSuccess(event.result);
                       return (
                         <button
                           key={event.callId || originalIndex}
@@ -810,9 +869,12 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
                           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-mono text-[10.5px] border transition-colors ${
                             isSelected
                               ? 'bg-[var(--ui-accent-blue-soft)] border-[color:var(--ui-accent-blue-border)] text-[var(--ui-accent-blue)]'
-                              : 'bg-[var(--ui-chip-bg)] border-[color:var(--ui-border-hairline)] text-[var(--ui-text-secondary)] hover:bg-[var(--ui-chip-hover-bg)] hover:border-[color:var(--ui-border-subtle)]'
+                              : isItemFailed
+                                ? 'bg-[var(--ui-accent-rose-soft)] border-[color:var(--ui-accent-rose-border)] text-[var(--ui-accent-rose)]'
+                                : 'bg-[var(--ui-chip-bg)] border-[color:var(--ui-border-hairline)] text-[var(--ui-text-secondary)] hover:bg-[var(--ui-chip-hover-bg)] hover:border-[color:var(--ui-border-subtle)]'
                           }`}
                         >
+                          {isItemFailed && <XCircle size={10} className='flex-shrink-0' />}
                           <span>{label}</span>
                         </button>
                       );
@@ -830,7 +892,7 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
             const ev = group.event;
             const idx = group.originalIndex;
             const isRunning = ev.status === 'running';
-            const isSuccess = ev.result?.success !== false;
+            const isSuccess = isRunning || isToolStepSuccess(ev.result);
             const { title, subtitle } = getToolStepSummary(ev.tool, ev.args);
             const outputSummary = getToolOutputSummary(ev.result);
             const isStepOpen = selectedStepIdx === idx;
@@ -859,7 +921,11 @@ export const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }
 
                   <div className='flex items-center gap-2 flex-shrink-0'>
                     {outputSummary && !isStepOpen && (
-                      <span className='text-[10px] font-mono text-[var(--ui-text-muted)] truncate max-w-[160px]'>
+                      <span
+                        className={`text-[10px] font-mono truncate max-w-[160px] ${
+                          isSuccess ? 'text-[var(--ui-text-muted)]' : 'text-[var(--ui-accent-rose)]'
+                        }`}
+                      >
                         {outputSummary}
                       </span>
                     )}

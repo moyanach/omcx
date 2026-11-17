@@ -637,9 +637,10 @@ async function buildAttachmentMessagesAsync(messages) {
         if (SPREADSHEET_EXTS.has(ext)) {
           guide = [
             "该文件为结构化表格数据，已完整保存在上述本地绝对路径（已加入当前会话只读信任目录）。",
-            "请优先使用内置 read_document 工具解析读取（无需临时 Python 脚本）：",
-            "1. 先调用 read_document(path, mode='outline') 查看所有工作表名称、总行数/列数、列名及前 5 行样本；",
-            "2. 再调用 read_document(path, mode='read', sheet=..., startRow=..., maxRows=...) 分页读取或用 mode='search' 关键词定位；如需复杂多表聚合计算，可辅以 run_command。",
+            "请优先使用内置 read_document 工具完成读取与统计分析（禁止先入为主改用 python3 / run_command）：",
+            "1. 先调用 read_document(path, mode='outline') 查看所有工作表名称、总行数/列数、列名及样本；",
+            "2. 如需分片看原始明细行，调用 read_document(path, mode='read', sheet=..., startRow=..., maxRows=...) 或 mode='search'；",
+            "3. 如需做全表过滤、分布统计、多维交叉分组计数、去重计数、求和、均值或中位数，直接调用 read_document(path, mode='aggregate', sheet=..., where=..., groupBy=..., metrics=...)。",
           ].join("\n");
         } else if (DOCUMENT_EXTS.has(ext)) {
           guide = [

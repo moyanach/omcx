@@ -185,6 +185,15 @@ class ToolRegistry {
     try {
       const resolvedContext = { ...this.getContext(), ...context };
       const result = await tool.execute(args, resolvedContext);
+      if (result && typeof result === "object" && (result.success === false || result.ok === false)) {
+        const innerError =
+          typeof result.error === "string" && result.error.trim()
+            ? result.error
+            : typeof result.message === "string" && result.message.trim()
+            ? result.message
+            : `工具 ${name} 执行失败`;
+        return { success: false, error: innerError, data: result };
+      }
       return { success: true, data: result };
     } catch (err) {
       return { success: false, error: err.message || String(err) };

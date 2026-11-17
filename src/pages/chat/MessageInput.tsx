@@ -90,6 +90,9 @@ interface Props {
   mentionMap?: Record<string, string>;
   onChangeMentionMap?: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   onFileIndexChange?: (files: FileIndexEntry[]) => void;
+
+  // 外部聚焦与快捷触发请求（例如空会话欢迎台点击起手卡）
+  focusRequest?: { seq: number; trigger?: "@" | "/" } | null;
 }
 
 const MessageInput: React.FC<Props> = ({
@@ -121,6 +124,7 @@ const MessageInput: React.FC<Props> = ({
   mentionMap,
   onChangeMentionMap,
   onFileIndexChange,
+  focusRequest,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -736,6 +740,39 @@ const MessageInput: React.FC<Props> = ({
       setMention(null);
     }
   }, [value]);
+
+  // 响应外部聚焦与快捷触发请求（如欢迎台点击卡片预填）
+  useEffect(() => {
+    if (!focusRequest?.seq) return;
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const caret = el.value.length;
+      el.setSelectionRange(caret, caret);
+      resizeTextarea(el);
+
+      if (focusRequest.trigger === "/") {
+        const slashMatch = el.value.slice(0, caret).match(/^\/([a-zA-Z0-9_-]*)$/);
+        if (slashMatch) {
+          setSlash({ start: 0, query: slashMatch[1] });
+          setSlashIndex(0);
+          setMention(null);
+          updateMentionPosition(el, caret);
+        }
+      } else if (focusRequest.trigger === "@") {
+        const match = el.value.slice(0, caret).match(MENTION_TRIGGER);
+        if (match) {
+          const query = match[1];
+          const nextStart = caret - query.length - 1;
+          setMention({ start: nextStart, query });
+          setMentionIndex(0);
+          setSlash(null);
+          updateMentionPosition(el, caret);
+        }
+      }
+    });
+  }, [focusRequest]);
 
   return (
     <div className="w-full px-3 pb-1.5 pt-0.5 bg-transparent flex-shrink-0">

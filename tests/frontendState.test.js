@@ -223,4 +223,91 @@ test("chatStore setAgentMode 全局与当前会话联动，新会话继承 defau
   assert.equal(useChatStore.getState().questionBySession[createdId], null);
 });
 
+test("ToolSteps 状态判定正确识别内层失败并输出失败摘要（杜绝假绿色完成）", async () => {
+  const entryPath = path.resolve(__dirname, "../src/pages/chat/messageList/ToolSteps.tsx");
+  const built = await esbuild.build({
+    entryPoints: [entryPath],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    write: false,
+    alias: {
+      "@": path.resolve(__dirname, "../src"),
+    },
+    plugins: [
+      {
+        name: "stub-codeblock",
+        setup(build) {
+          build.onResolve({ filter: /CodeBlock$/ }, (args) => ({
+            path: args.path,
+            namespace: "stub-codeblock",
+          }));
+          build.onLoad({ filter: /.*/, namespace: "stub-codeblock" }, () => ({
+            contents: "module.exports = { default: () => null, DiffViewer: () => null };",
+            loader: "js",
+          }));
+        },
+      },
+    ],
+    external: ["react", "react/*", "lucide-react", "anser"],
+  });
+  const code = built.outputFiles[0].text;
+  const mod = new Module(entryPath);
+  mod.filename = entryPath;
+  mod.paths = Module._nodeModulePaths(path.dirname(entryPath));
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (request === "react") {
+      return {
+        default: { createElement: () => null, Fragment: "Fragment", memo: (c) => c },
+        createElement: () => null,
+        Fragment: "Fragment",
+        memo: (c) => c,
+      };
+    }
+    if (request === "react/jsx-runtime" || request === "react/jsx-dev-runtime") {
+      return { jsx: () => null, jsxs: () => null, jsxDEV: () => null, Fragment: "Fragment" };
+    }
+    if (request === "lucide-react") {
+      return new Proxy({}, { get: () => () => null });
+    }
+    if (request === "anser") {
+      return { default: { ansiToJson: () => [] }, ansiToJson: () => [] };
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    mod._compile(code, entryPath);
+  } finally {
+    Module._load = origLoad;
+  }
+
+  const { isToolStepSuccess, getToolStepError, getToolOutputSummary } = mod.exports;
+  // 历史双层结构：外层 success:true 但内层 data.success:false 时必须判为失败
+  const legacyWrappedFail = {
+    success: true,
+    data: { success: false, error: "fileLockService.withFileLock is not a function" },
+  };
+  assert.equal(isToolStepSuccess(legacyWrappedFail), false);
+  assert.equal(getToolStepError(legacyWrappedFail), "fileLockService.withFileLock is not a function");
+  assert.ok(getToolOutputSummary(legacyWrappedFail).startsWith("失败:"));
+
+  // 新外层穿透失败结构
+  const outerFail = {
+    success: false,
+    error: "generate_document 失败",
+    data: { success: false, error: "generate_document 失败" },
+  };
+  assert.equal(isToolStepSuccess(outerFail), false);
+  assert.equal(getToolStepError(outerFail), "generate_document 失败");
+
+  // 聚合成功摘要
+  const aggSuccess = {
+    success: true,
+    data: { mode: "aggregate", kind: "grouped_summary", matchedRows: 3181, totalGroups: 12 },
+  };
+  assert.equal(isToolStepSuccess(aggSuccess), true);
+  assert.equal(getToolOutputSummary(aggSuccess), "统计 3181 行 · 12 个分组");
+});
+
 

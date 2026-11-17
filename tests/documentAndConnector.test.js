@@ -222,3 +222,100 @@ test("mcpStorage.upsertGlobalMcpServer 增量新增连接器并保留既有服�
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("toolRegistry.execute('generate_document') 走真实文件锁生成 PPTX 且失败正确透传 success=false", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-gen-tool-"));
+  try {
+    const pptxRes = await toolRegistry.execute(
+      "generate_document",
+      {
+        path: "summary.pptx",
+        title: "告警治理总结",
+        slides: [
+          { title: "核心结论", bullets: ["已修复 fileLockService.withLock 报错", "支持直接聚合统计"] },
+        ],
+      },
+      { workDir: tmpDir, allowedFolders: [tmpDir], permissionMode: "auto-sandbox" }
+    );
+    assert.equal(pptxRes.success, true);
+    assert.equal(pptxRes.data.success, true);
+    assert.equal(pptxRes.data.format, "pptx");
+    assert.ok(fs.existsSync(path.join(tmpDir, "summary.pptx")));
+
+    const failRes = await toolRegistry.execute(
+      "generate_document",
+      { path: "bad.txt", title: "无效格式" },
+      { workDir: tmpDir, allowedFolders: [tmpDir], permissionMode: "auto-sandbox" }
+    );
+    assert.equal(failRes.success, false);
+    assert.ok(failRes.error && failRes.error.includes("不受支持"));
+    assert.equal(failRes.data.success, false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("read_document aggregate 模式支持大表精确过滤、多维分组汇总、中位数与全列画像", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-doc-agg-"));
+  try {
+    const xlsxPath = path.join(tmpDir, "alarms.xlsx");
+    const rows = [];
+    for (let i = 0; i < 600; i += 1) {
+      const biz = i % 3 === 0 ? "支付中心" : i % 3 === 1 ? "订单平台" : "基础架构";
+      const level = i % 5 === 0 ? "P0" : i % 2 === 0 ? "P1" : "P2";
+      const sends = (i % 10) + 1;
+      const rule = `rule_${i % 4}`;
+      rows.push([`ev_${i}`, biz, level, rule, sends, i % 4 === 0 ? "是" : "否"]);
+    }
+    await documentService.generateDocument(xlsxPath, {
+      sheets: [
+        {
+          name: "未去重原始事件",
+          headers: ["事件ID", "业务线", "级别", "规则", "发送轮次", "是否静默"],
+          rows,
+        },
+      ],
+    });
+
+    const profileRes = await toolRegistry.execute(
+      "read_document",
+      { path: "alarms.xlsx", mode: "aggregate", sheet: "未去重原始事件" },
+      { workDir: tmpDir, allowedFolders: [tmpDir], permissionMode: "auto-sandbox" }
+    );
+    assert.equal(profileRes.success, true);
+    assert.equal(profileRes.data.kind, "column_profile");
+    assert.equal(profileRes.data.totalDataRows, 600);
+    assert.equal(profileRes.data.matchedRows, 600);
+    const sendProfile = profileRes.data.columnProfiles.find((c) => c.column === "发送轮次");
+    assert.equal(sendProfile.numericStats.sum, 3300);
+    assert.equal(sendProfile.numericStats.median, 5.5);
+
+    const groupedRes = await toolRegistry.execute(
+      "read_document",
+      {
+        path: "alarms.xlsx",
+        mode: "aggregate",
+        sheet: "未去重原始事件",
+        where: [{ column: "是否静默", op: "eq", value: "否" }],
+        groupBy: ["业务线", "级别"],
+        metrics: [
+          { op: "count", as: "事件数" },
+          { op: "count_distinct", column: "规则", as: "命中规则数" },
+          { op: "sum", column: "发送轮次", as: "总发送轮次" },
+          { op: "median", column: "发送轮次", as: "中位轮次" },
+        ],
+        sortBy: "总发送轮次",
+        sortOrder: "desc",
+      },
+      { workDir: tmpDir, allowedFolders: [tmpDir], permissionMode: "auto-sandbox" }
+    );
+    assert.equal(groupedRes.success, true);
+    assert.equal(groupedRes.data.kind, "grouped_summary");
+    assert.equal(groupedRes.data.matchedRows, 450);
+    assert.ok(groupedRes.data.groups.length > 0);
+    const totalEvents = groupedRes.data.groups.reduce((s, g) => s + g["事件数"], 0);
+    assert.equal(totalEvents, 450);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

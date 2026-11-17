@@ -1,7 +1,7 @@
 /**
  * documentTools — 办公文档原生解析与结构化生成工具
  *
- * 1. read_document: 支持 PDF / DOCX / DOC / XLSX / XLSM / CSV / TSV / PPTX 的大纲、分页、按表与关键词检索
+ * 1. read_document: 支持 PDF / DOCX / DOC / XLSX / XLSM / CSV / TSV / PPTX 的大纲、分页、按表、关键词检索及全表聚合统计
  * 2. generate_document: 支持生成专业排版的 DOCX / XLSX / PPTX 交付物
  */
 
@@ -13,25 +13,84 @@ const { checkSafePath } = require("./fileTools");
 const { fileLockService } = require("../../services/fileLockService");
 const documentService = require("../../services/documentService");
 
+const WhereConditionSchema = z.object({
+  column: z.string().describe("要过滤的列名"),
+  op: z
+    .enum([
+      "eq",
+      "neq",
+      "contains",
+      "not_contains",
+      "gt",
+      "gte",
+      "lt",
+      "lte",
+      "in",
+      "is_empty",
+      "not_empty",
+    ])
+    .optional()
+    .default("eq")
+    .describe("过滤操作符"),
+  value: z
+    .union([
+      z.string(),
+      z.number(),
+      z.boolean(),
+      z.array(z.union([z.string(), z.number(), z.boolean()])),
+    ])
+    .optional()
+    .describe("比较值（in 操作符传数组，is_empty/not_empty 可省略）"),
+});
+
+const AggregateMetricSchema = z.object({
+  column: z.string().optional().describe("要聚合的列名（op 为 count 时可省略）"),
+  op: z
+    .enum(["count", "count_distinct", "sum", "avg", "min", "max", "median"])
+    .describe("聚合函数：count / count_distinct / sum / avg / min / max / median"),
+  as: z.string().optional().describe("输出指标字段名（省略时自动生成）"),
+});
+
 class ReadDocumentTool extends StructuredTool {
   constructor() {
     super();
     this.name = "read_document";
     this.description =
-      "原生读取和检索办公文档内容，支持 .pdf / .docx / .doc / .xlsx / .xlsm / .csv / .tsv / .pptx。支持三种模式：outline（查看页数/工作表/标题大纲）、read（按页码范围或工作表行范围分页读取）、search（跨页/跨表关键词搜索）。遇到办公文档时应优先使用本工具而非 run_command 写临时脚本。";
+      "原生读取、检索与统计办公文档内容，支持 .pdf / .docx / .doc / .xlsx / .xlsm / .csv / .tsv / .pptx。支持四种模式：outline（查看页数/工作表/列名）、read（按页码或工作表行范围分页读取）、search（跨页/跨表关键词搜索）、aggregate（针对 XLSX/XLSM/CSV/TSV 的全表精确过滤、多维分组交叉汇总、计数/去重计数/求和/均值/中位数及列分布画像）。分析大表格统计数据时应直接调用 aggregate 模式，无需用 run_command 写 Python 脚本。";
     this.schema = z.object({
       path: z.string().describe("文档路径，相对于工作目录或绝对路径"),
       mode: z
-        .enum(["outline", "read", "search"])
+        .enum(["outline", "read", "search", "aggregate"])
         .optional()
         .default("read")
-        .describe("读取模式：outline（查目录/页数/工作表）、read（分页读取内容）、search（全文检索）"),
+        .describe(
+          "读取模式：outline（查目录/页数/工作表）、read（分页读取）、search（全文检索）、aggregate（表格全量过滤与分组聚合统计）"
+        ),
       sheet: z.string().optional().describe("XLSX/XLSM 指定工作表名称（省略时读取首个工作表）"),
       startPage: z.number().optional().describe("PDF / PPTX 起始页码（从 1 开始，默认 1）"),
       endPage: z.number().optional().describe("PDF / PPTX 结束页码（默认每次最多读取 10~20 页）"),
       startRow: z.number().optional().describe("表格或 DOCX 起始行号（从 0 开始，默认 0）"),
       maxRows: z.number().optional().describe("表格或 DOCX 最多读取行数（默认表格 120 行、DOCX 400 行）"),
       query: z.string().optional().describe("search 模式下的搜索关键词"),
+      headerRow: z
+        .number()
+        .optional()
+        .describe("aggregate 模式下表头所在行号（从 1 开始，默认第 1 行；若前几行为说明文字可指定实际表头行）"),
+      where: z
+        .array(WhereConditionSchema)
+        .optional()
+        .describe("aggregate 模式下的行过滤条件列表（AND 关系）"),
+      groupBy: z
+        .array(z.string())
+        .optional()
+        .describe("aggregate 模式下的分组列名数组（可单维或多维交叉分组；省略且无 metrics 时返回全表列画像）"),
+      metrics: z
+        .array(AggregateMetricSchema)
+        .optional()
+        .describe("aggregate 模式下要计算的聚合指标列表"),
+      sortBy: z.string().optional().describe("aggregate 结果排序字段名（如 count 或指标别名 as，默认按第一指标或 count 降序）"),
+      sortOrder: z.enum(["asc", "desc"]).optional().default("desc").describe("排序方向"),
+      limit: z.number().optional().default(50).describe("aggregate 返回分组行数上限（默认 50，最大 500）"),
       maxChars: z.number().optional().default(24000).describe("返回文本最大字符数上限（默认 24000）"),
     });
   }
@@ -46,6 +105,13 @@ class ReadDocumentTool extends StructuredTool {
       startRow,
       maxRows,
       query,
+      headerRow,
+      where,
+      groupBy,
+      metrics,
+      sortBy,
+      sortOrder,
+      limit,
       maxChars = 24000,
       __workDir,
       __allowedFolders,
@@ -89,6 +155,13 @@ class ReadDocumentTool extends StructuredTool {
         startRow,
         maxRows,
         query,
+        headerRow,
+        where,
+        groupBy,
+        metrics,
+        sortBy,
+        sortOrder,
+        limit,
         maxChars,
       });
       return JSON.stringify({
@@ -225,7 +298,7 @@ class GenerateDocumentTool extends StructuredTool {
 
     const action = fs.existsSync(targetPath) ? "modified" : "created";
     try {
-      const result = await fileLockService.withFileLock(targetPath, () =>
+      const result = await fileLockService.withLock(targetPath, () =>
         documentService.generateDocument(targetPath, {
           title,
           subtitle,

@@ -8,6 +8,7 @@ import {
   MessageBubble,
   MessageNavigator,
 } from './messageList/MessageBubble';
+import EmptySessionWelcome from './EmptySessionWelcome';
 
 type Props = MessageListProps;
 
@@ -19,6 +20,8 @@ export const MessageList: React.FC<Props> = ({
   onCopy,
   onRetry,
   onSideChatSelection,
+  onPrefillPrompt,
+  onOpenInspector,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -361,15 +364,18 @@ export const MessageList: React.FC<Props> = ({
   const hasStreamingText = Boolean(
     isGenerating && activeAssistantMessage?.content?.trim()
   );
+  const showEmptyWelcome = messages.length === 0 && !isGenerating;
 
   return (
     <div className='flex-1 min-h-0 relative flex flex-col overflow-hidden'>
       {/* 1. 左侧垂直消息定位轨 (对标截图快速点位) */}
-      <MessageNavigator
-        messages={messages}
-        activeId={activeNavMsgId}
-        onNavigate={handleNavigateToMessage}
-      />
+      {!showEmptyWelcome && (
+        <MessageNavigator
+          messages={messages}
+          activeId={activeNavMsgId}
+          onNavigate={handleNavigateToMessage}
+        />
+      )}
 
       {/* 2. 聊天正文主滚动容器 (边距收紧优化，左侧留出 24px 供超窄胶囊悬浮) */}
       <div
@@ -380,7 +386,12 @@ export const MessageList: React.FC<Props> = ({
         onContextMenu={handleContextMenu}
         className='flex-1 overflow-y-auto pl-8 pr-7 pt-3 pb-3.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
       >
-        {(() => {
+        {showEmptyWelcome ? (
+          <EmptySessionWelcome
+            onPrefillPrompt={(text, options) => onPrefillPrompt?.(text, options)}
+            onOpenInspector={onOpenInspector}
+          />
+        ) : (() => {
           const virtualActive = messages.length > VIRTUAL_THRESHOLD;
           const clampedStart = virtualActive
             ? Math.max(0, Math.min(visibleIndices.start, messages.length - 1))
