@@ -16,6 +16,9 @@ import {
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
+  Briefcase,
+  Code2,
+  CalendarClock,
 } from "lucide-react";
 import { useChatStore, type Session } from "@/stores/chatStore";
 import { useAppStore } from "@/stores/appStore";
@@ -42,9 +45,11 @@ const LeftSidebar: React.FC = () => {
     activeWorkspaceId,
     generatingBySession,
     workspaces,
+    defaultAgentMode,
     setActiveSession,
     updateSessionTitle,
     reorderWorkspaces,
+    setAgentMode,
   } = useChatStore(
     useShallow((s) => ({
       sessions: s.sessions,
@@ -52,11 +57,15 @@ const LeftSidebar: React.FC = () => {
       activeWorkspaceId: s.activeWorkspaceId,
       generatingBySession: s.generatingBySession,
       workspaces: s.workspaces,
+      defaultAgentMode: s.defaultAgentMode,
       setActiveSession: s.setActiveSession,
       updateSessionTitle: s.updateSessionTitle,
       reorderWorkspaces: s.reorderWorkspaces,
+      setAgentMode: s.setAgentMode,
     }))
   );
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const currentAgentMode = activeSession?.agentMode || defaultAgentMode || "code";
   const { requestDeleteSession, deleteSessionModal } = useDeleteSessionWithWorktree();
   const { requestNewSession, newSessionModal } = useNewSessionModal();
   const {
@@ -68,6 +77,7 @@ const LeftSidebar: React.FC = () => {
     setLeftSidebarWidth,
     leftSidebarCollapsed,
     toggleLeftSidebarCollapsed,
+    unreadAutomationRuns,
   } = useAppStore(
     useShallow((s) => ({
       activeNavTab: s.activeNavTab,
@@ -78,6 +88,7 @@ const LeftSidebar: React.FC = () => {
       setLeftSidebarWidth: s.setLeftSidebarWidth,
       leftSidebarCollapsed: s.leftSidebarCollapsed,
       toggleLeftSidebarCollapsed: s.toggleLeftSidebarCollapsed,
+      unreadAutomationRuns: s.unreadAutomationRuns,
     }))
   );
 
@@ -192,6 +203,7 @@ const LeftSidebar: React.FC = () => {
   const visibleSessions = useMemo(
     () =>
       sessions
+        .filter((session) => session.sessionType !== "automation")
         .filter((session) => (filter === "archived" ? !!session.archived : !session.archived))
         .filter(matchesQuery),
     [sessions, filter, normalizedQuery, searchHitMap]
@@ -540,7 +552,7 @@ const LeftSidebar: React.FC = () => {
     );
   };
 
-  const navClass = (tab: "workspaces" | "tools") =>
+  const navClass = (tab: "workspaces" | "tools" | "automations") =>
     `w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-colors ${
       activeNavTab === tab
         ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)]"
@@ -572,6 +584,22 @@ const LeftSidebar: React.FC = () => {
             <PanelLeftOpen size={16} />
           </button>
 
+          <button
+            onClick={() => setAgentMode(currentAgentMode === "work" ? "code" : "work")}
+            className={`w-9 h-9 flex items-center justify-center rounded-lg transition-colors ${
+              currentAgentMode === "work"
+                ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)]"
+                : "text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)]"
+            }`}
+            title={
+              currentAgentMode === "work"
+                ? "当前：通用工作模式 (点击切换为编程模式)"
+                : "当前：编程模式 (点击切换为通用工作模式)"
+            }
+          >
+            {currentAgentMode === "work" ? <Briefcase size={15} /> : <Code2 size={15} />}
+          </button>
+
           <div className="w-6 h-px bg-[var(--ui-divider-hairline)] my-0.5" />
 
           <button
@@ -580,6 +608,17 @@ const LeftSidebar: React.FC = () => {
             title="新建任务 (⌘N)"
           >
             <Plus size={16} className="text-[var(--ui-text-muted)]" />
+          </button>
+
+          <button
+            onClick={() => setActiveNavTab("automations")}
+            className={`relative ${railBtnClass(activeNavTab === "automations")}`}
+            title="定时任务"
+          >
+            <CalendarClock size={16} />
+            {unreadAutomationRuns > 0 && (
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-blue-500 ring-2 ring-[var(--ui-panel-bg)]" />
+            )}
           </button>
 
           <button
@@ -630,10 +669,41 @@ const LeftSidebar: React.FC = () => {
       className="relative h-full bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150 border-r border-[color:var(--ui-divider-hairline)] flex flex-col flex-shrink-0 select-none"
     >
       {/* 顶部留出 macOS 原生红绿灯安全间距与窗口拖拽区 */}
-      <div className="h-9 w-full titlebar-drag flex-shrink-0 flex items-center justify-end px-2">
+      <div className="h-9 w-full titlebar-drag flex-shrink-0 flex items-center justify-end gap-1.5 pl-[78px] pr-2">
+        <div
+          className="flex items-center p-0.5 rounded-full bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] titlebar-no-drag"
+          role="group"
+          aria-label="Agent 模式切换"
+        >
+          <button
+            type="button"
+            onClick={() => setAgentMode("work")}
+            className={`w-6 h-5 flex items-center justify-center rounded-full transition-all cursor-pointer ${
+              currentAgentMode === "work"
+                ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border border-[color:var(--ui-accent-blue-border)] shadow-sm"
+                : "text-[var(--ui-text-faint)] hover:text-[var(--ui-text-secondary)] border border-transparent"
+            }`}
+            title="通用工作模式 (Work)：文档整理、分析、汇报与办公协作"
+          >
+            <Briefcase size={11.5} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setAgentMode("code")}
+            className={`w-6 h-5 flex items-center justify-center rounded-full transition-all cursor-pointer ${
+              currentAgentMode === "code"
+                ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border border-[color:var(--ui-accent-blue-border)] shadow-sm"
+                : "text-[var(--ui-text-faint)] hover:text-[var(--ui-text-secondary)] border border-transparent"
+            }`}
+            title="编程模式 (Code)：代码开发、符号检索、Git 与工程闭环"
+          >
+            <Code2 size={12} />
+          </button>
+        </div>
+
         <button
           onClick={toggleLeftSidebarCollapsed}
-          className="w-6 h-6 flex items-center justify-center rounded-md text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)] transition-colors titlebar-no-drag"
+          className="w-6 h-6 flex items-center justify-center rounded-md text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] hover:bg-[var(--ui-chip-bg)] transition-colors titlebar-no-drag cursor-pointer"
           title="收起为图标列"
         >
           <PanelLeftClose size={14} />
@@ -658,6 +728,16 @@ const LeftSidebar: React.FC = () => {
           <Search size={14} className="text-[var(--ui-text-muted)]" />
           <span className="flex-1 text-left text-xs font-medium">快速检索</span>
           <span className="text-[10px] text-[var(--ui-text-faint)] font-mono">⌘K</span>
+        </button>
+
+        <button onClick={() => setActiveNavTab("automations")} className={navClass("automations")}>
+          <CalendarClock size={15} />
+          <span className="flex-1 text-left text-xs font-medium">定时任务</span>
+          {unreadAutomationRuns > 0 && (
+            <span className="min-w-[18px] h-[18px] px-1.5 rounded-full bg-blue-500/20 text-[var(--ui-accent-blue)] border border-blue-500/30 text-[10px] font-semibold flex items-center justify-center">
+              {unreadAutomationRuns > 99 ? "99+" : unreadAutomationRuns}
+            </span>
+          )}
         </button>
 
         <button onClick={() => setActiveNavTab("workspaces")} className={navClass("workspaces")}>

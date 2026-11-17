@@ -219,6 +219,7 @@ async function readSubagentOpenAIResponse(response, idleTimeoutMs, abortSig) {
 
 const READ_ONLY_TOOL_LIST = [
   "read_file",
+  "read_document",
   "list_directory",
   "search_code",
   "repo_map",
@@ -234,6 +235,7 @@ const FULL_CODING_TOOL_LIST = [
   ...READ_ONLY_TOOL_LIST,
   "write_file",
   "edit_file",
+  "generate_document",
   "run_command",
   "run_skill_script",
 ];
@@ -246,6 +248,7 @@ const PARALLEL_READ_ONLY_TOOLS = new Set([
 const WRITE_CAPABLE_TOOL_SET = new Set([
   "write_file",
   "edit_file",
+  "generate_document",
   "run_command",
   "run_skill_script",
   "browser_interact",

@@ -16,6 +16,7 @@ async function initializeTurnContext({
   modelBaseUrl,
   enableTools,
   supportsVision,
+  agentMode = "code",
   matchedWorkspace,
   allowedFolders,
   initialTodos,
@@ -248,6 +249,7 @@ async function initializeTurnContext({
         ...mentionContext.allowedTools,
         "todo_write",
         "run_skill_script",
+        "ask_user_question",
       ]);
       console.log(
         `[skill-permission] 本轮工具白名单: ${[...sessionToolContext.allowedToolNames].join(", ")}`
@@ -289,8 +291,11 @@ async function initializeTurnContext({
     }
   }
 
+  const resolvedAgentMode = agentMode === "work" ? "work" : "code";
+  const isWorkMode = resolvedAgentMode === "work";
+
   const [gitInfo, mcpTools] = await Promise.all([
-    getGitSnapshotAsync(sessionWorkDir),
+    isWorkMode ? Promise.resolve(null) : getGitSnapshotAsync(sessionWorkDir),
     enableTools ? mcpClientService.getActiveMcpTools(sessionWorkDir) : Promise.resolve([]),
   ]);
   sessionToolContext.mcpTools = mcpTools;
@@ -299,13 +304,14 @@ async function initializeTurnContext({
     enableTools && (toolRegistry.size > 0 || mcpTools.length > 0)
       ? toolRegistry.getToolPromptDocs(mcpTools, {
           permissionMode: sessionToolContext.permissionMode,
+          agentMode: sessionToolContext.agentMode || resolvedAgentMode,
         })
       : [];
 
   const globalCustomSystemPrompt = storageService.getConfig("custom_system_prompt") || "";
 
   let repoMapText = "";
-  if (sessionWorkDir && storageService.getConfig("repo_map_enabled") !== "false") {
+  if (!isWorkMode && sessionWorkDir && storageService.getConfig("repo_map_enabled") !== "false") {
     try {
       repoMapText = await repoIndexService.buildRepoMapAsync(sessionWorkDir, {
         maxChars: Number(storageService.getConfig("repo_map_max_chars")) || 6000,
@@ -316,7 +322,7 @@ async function initializeTurnContext({
   }
 
   let wikiInfo = null;
-  if (sessionWorkDir) {
+  if (!isWorkMode && sessionWorkDir) {
     try {
       wikiInfo = repoWikiService.getRepoWiki(sessionWorkDir);
     } catch (wikiErr) {
@@ -340,6 +346,7 @@ async function initializeTurnContext({
       model: `${provider}/${apiModelId}`,
       enableTools,
       permissionMode: sessionToolContext.permissionMode,
+      agentMode: sessionToolContext.agentMode || resolvedAgentMode,
       customSystemPrompt: globalCustomSystemPrompt,
       gitInfo,
       includeTodosInSystem: includeTodos,
@@ -408,6 +415,7 @@ async function initializeTurnContext({
           sessionToolContext.allowedToolNames || null,
           {
             permissionMode: sessionToolContext.permissionMode,
+            agentMode: sessionToolContext.agentMode || resolvedAgentMode,
           }
         )
       : [];

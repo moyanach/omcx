@@ -40,6 +40,7 @@ export interface ElectronAPI {
   dbUpdateSessionWorkDir: (id: string, workDir: string | null) => Promise<any>;
   dbUpdateSessionWorkspace: (id: string, workspaceId: string | null, workDir?: string | null) => Promise<any>;
   dbUpdateSessionPermissionMode: (id: string, permissionMode: string) => Promise<any>;
+  dbUpdateSessionAgentMode: (id: string, agentMode: "code" | "work") => Promise<any>;
   dbUpdateSessionReasoningEffort: (id: string, reasoningEffort: string) => Promise<any>;
   dbGetMessages: (sessionId: string) => Promise<any[]>;
   dbGetMessageReasoning: (messageId: string) => Promise<any>;
@@ -51,6 +52,7 @@ export interface ElectronAPI {
   // ─── Agent 扩展与 Inspector 监控 ────────────────────
   getMcpServers: (workDir?: string | null) => Promise<any[]>;
   saveMcpServers: (servers: any) => Promise<any>;
+  upsertMcpServer: (id: string, config: any) => Promise<{ success: boolean; id?: string; error?: string }>;
   trustProjectMcp: (workDir: string, trusted: boolean) => Promise<any>;
   toggleMcpServer: (id: string, enabled: boolean) => Promise<any>;
   deleteMcpServer: (id: string) => Promise<any>;
@@ -142,6 +144,7 @@ export interface ElectronAPI {
   browserAutoClose: () => Promise<any>;
   listWorkspaceDir: (workDir: string, dirPath?: string) => Promise<any>;
   readWorkspaceFile: (workDir: string, filePath: string, maxChars?: number) => Promise<any>;
+  previewWorkspaceDocument: (workDir: string, filePath: string) => Promise<any>;
   revertFileModification: (payload: {
     workDir?: string | null;
     filePath: string;
@@ -184,8 +187,55 @@ export interface ElectronAPI {
   getTools: () => Promise<any[]>;
   executeTool: (name: string, args: any, workDir?: string) => Promise<any>;
 
+  // ─── 定时任务与 Webhook ────────────────────────────
+  listAutomations: () => Promise<{ rules: any[]; runtime: any; unreadCount: number }>;
+  saveAutomation: (payload: any) => Promise<{ success: boolean; rule: any }>;
+  deleteAutomation: (id: string) => Promise<{ success: boolean }>;
+  toggleAutomation: (id: string, enabled: boolean) => Promise<{ success: boolean; rule: any }>;
+  runAutomationNow: (
+    id: string,
+    extraInput?: string
+  ) => Promise<{ ok: boolean; runId?: string; queued?: boolean; error?: string }>;
+  cancelAutomationRun: (runId: string) => Promise<{ success: boolean }>;
+  previewCronExpression: (
+    expr: string
+  ) => Promise<{ valid: boolean; error?: string; summary?: string; nextRuns: number[] }>;
+  listAutomationRuns: (filters?: {
+    automationId?: string | null;
+    triageState?: string | null;
+    status?: string | null;
+    limit?: number;
+  }) => Promise<{ runs: any[]; unreadCount: number }>;
+  updateAutomationRunTriage: (
+    runId: string,
+    triageState: "unread" | "read" | "archived"
+  ) => Promise<{ success: boolean; unreadCount: number }>;
+  markAllAutomationRunsRead: () => Promise<{ success: boolean; unreadCount: number }>;
+  deleteAutomationRun: (runId: string) => Promise<{ success: boolean; unreadCount: number }>;
+  openAutomationRunSession: (payload: {
+    runId?: string;
+    sessionId?: string;
+  }) => Promise<{ success: boolean; session: any; unreadCount: number }>;
+  listWebhookTargets: () => Promise<any[]>;
+  saveWebhookTarget: (payload: any) => Promise<{ success: boolean; target: any }>;
+  deleteWebhookTarget: (id: string) => Promise<{ success: boolean }>;
+  testWebhookTarget: (id: string) => Promise<{ ok: boolean; status?: number }>;
+  getInboundWebhookConfig: () => Promise<{ config: any; status: any }>;
+  saveInboundWebhookConfig: (payload: any) => Promise<{ success: boolean; config: any; status: any }>;
+  rotateInboundWebhookToken: () => Promise<{ success: boolean; config: any; status: any }>;
+  onAutomationUpdated: (callback: (payload: any) => void) => () => void;
+
   // ─── 流式 Agent 调用与控制 ─────────────────────────
   respondPermission: (id: string, allow: boolean, decision?: string) => void;
+  respondQuestion: (
+    id: string,
+    payload: { submitted?: boolean; skipped?: boolean; answers?: Record<string, any> }
+  ) => void;
+  exportFileOutput: (payload: {
+    workDir?: string | null;
+    filePath: string;
+    format?: "original" | "html" | "pdf";
+  }) => Promise<{ success: boolean; canceled?: boolean; savedPath?: string; error?: string }>;
   cancelChat: (sessionId: string) => void;
   steerChat: (sessionId: string, content: string, id?: string) => void;
   streamChat: (...args: any[]) => void;

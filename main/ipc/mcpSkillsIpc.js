@@ -38,6 +38,21 @@ function registerMcpSkillsIpc() {
   );
 
   ipcMain.handle(
+    "upsert-mcp-server",
+    safeHandler((event, { id, config } = {}) => {
+      const result = getStorageService().upsertGlobalMcpServer(id, config);
+      if (result?.success) {
+        getMcpClientService().reloadClients();
+        getWorkspaceRefreshService().emitWorkspaceChanged({
+          reason: "tools_config",
+          areas: ["mcp"],
+        });
+      }
+      return result;
+    })
+  );
+
+  ipcMain.handle(
     "trust-project-mcp",
     safeHandler((event, { workDir, trusted } = {}) => {
       const result = getStorageService().setProjectMcpTrust(workDir, Boolean(trusted));
@@ -419,6 +434,11 @@ function registerMcpSkillsIpc() {
           null;
         const sessionPermissionMode =
           params.permissionMode || session?.permissionMode || "auto-sandbox";
+        const sessionAgentMode =
+          (params.agentMode || session?.agent_mode || session?.agentMode) === "work"
+            ? "work"
+            : "code";
+        const isWorkMode = sessionAgentMode === "work";
 
         const rawMessages =
           Array.isArray(params.messages) && params.messages.length > 0
@@ -433,21 +453,23 @@ function registerMcpSkillsIpc() {
 
         const tools = toolRegistry.getToolDefinitions(mcpTools, null, {
           permissionMode: sessionPermissionMode,
+          agentMode: sessionAgentMode,
         });
 
         const toolDocs = toolRegistry.getToolPromptDocs(mcpTools, {
           permissionMode: sessionPermissionMode,
+          agentMode: sessionAgentMode,
         });
 
         const memories = storageService.getMemories(targetWorkDir);
         const memoryIndex = storageService.getMemoryIndex(targetWorkDir);
         const projectRules = storageService.getProjectInstructions(targetWorkDir);
         const customSystemPrompt = storageService.getConfig("custom_system_prompt") || "";
-        const gitInfo = await getGitSnapshotAsync(targetWorkDir);
+        const gitInfo = isWorkMode ? null : await getGitSnapshotAsync(targetWorkDir);
         const initialTodos = session?.todos || [];
-        const wikiInfo = targetWorkDir ? getRepoWikiService().getRepoWiki(targetWorkDir) : null;
+        const wikiInfo = !isWorkMode && targetWorkDir ? getRepoWikiService().getRepoWiki(targetWorkDir) : null;
         let repoMapText = "";
-        if (targetWorkDir && storageService.getConfig("repo_map_enabled") !== "false") {
+        if (!isWorkMode && targetWorkDir && storageService.getConfig("repo_map_enabled") !== "false") {
           try {
             repoMapText = await repoIndexService.buildRepoMapAsync(targetWorkDir, {
               maxChars: Number(storageService.getConfig("repo_map_max_chars")) || 6000,
@@ -484,6 +506,7 @@ function registerMcpSkillsIpc() {
           model: modelId,
           enableTools: true,
           permissionMode: sessionPermissionMode,
+          agentMode: sessionAgentMode,
           customSystemPrompt,
           gitInfo,
           includeTodosInSystem: false,

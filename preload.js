@@ -39,6 +39,12 @@ ipcRenderer.on("chat-stream-event", (event, envelope) => {
     case "permission_resolved":
       callbacks.onPermissionResolved?.(data);
       break;
+    case "user_question":
+      callbacks.onUserQuestion?.(data);
+      break;
+    case "user_question_resolved":
+      callbacks.onUserQuestionResolved?.(data);
+      break;
     case "outputs":
       callbacks.onOutputsUpdated?.(data);
       break;
@@ -127,6 +133,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("db-update-session-workspace", { id, workspaceId, workDir }),
   dbUpdateSessionPermissionMode: (id, permissionMode) =>
     ipcRenderer.invoke("db-update-session-permission-mode", { id, permissionMode }),
+  dbUpdateSessionAgentMode: (id, agentMode) =>
+    ipcRenderer.invoke("db-update-session-agent-mode", { id, agentMode }),
   dbUpdateSessionReasoningEffort: (id, reasoningEffort) =>
     ipcRenderer.invoke("db-update-session-reasoning-effort", { id, reasoningEffort }),
   dbGetMessages: (sessionId) => ipcRenderer.invoke("db-get-messages", sessionId),
@@ -140,6 +148,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // ─── Agent 扩展与 Inspector 监控 ────────────────────
   getMcpServers: (workDir) => ipcRenderer.invoke("get-mcp-servers", workDir),
   saveMcpServers: (servers) => ipcRenderer.invoke("save-mcp-servers", servers),
+  upsertMcpServer: (id, config) => ipcRenderer.invoke("upsert-mcp-server", { id, config }),
   trustProjectMcp: (workDir, trusted) =>
     ipcRenderer.invoke("trust-project-mcp", { workDir, trusted }),
   toggleMcpServer: (id, enabled) => ipcRenderer.invoke("toggle-mcp-server", { id, enabled }),
@@ -277,8 +286,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("workspace-list-dir", { workDir, dirPath }),
   readWorkspaceFile: (workDir, filePath, maxChars) =>
     ipcRenderer.invoke("workspace-read-file", { workDir, filePath, maxChars }),
+  previewWorkspaceDocument: (workDir, filePath) =>
+    ipcRenderer.invoke("preview-workspace-document", { workDir, filePath }),
   revertFileModification: (payload) =>
     ipcRenderer.invoke("revert-file-modification", payload),
+  exportFileOutput: (payload) =>
+    ipcRenderer.invoke("export-file-output", payload),
   runTerminalCommand: (params, onStream) => {
     const cmdId = params?.cmdId || `term_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const channel = `terminal-stream-${cmdId}`;
@@ -333,8 +346,38 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getTools: () => ipcRenderer.invoke("get-tools"),
   executeTool: (name, args, workDir) => ipcRenderer.invoke("execute-tool", { name, args, workDir }),
 
+  // ─── 定时任务与 Webhook ────────────────────────────
+  listAutomations: () => ipcRenderer.invoke("automation-list"),
+  saveAutomation: (payload) => ipcRenderer.invoke("automation-save", payload),
+  deleteAutomation: (id) => ipcRenderer.invoke("automation-delete", id),
+  toggleAutomation: (id, enabled) => ipcRenderer.invoke("automation-toggle", { id, enabled }),
+  runAutomationNow: (id, extraInput = "") =>
+    ipcRenderer.invoke("automation-run-now", { id, extraInput }),
+  cancelAutomationRun: (runId) => ipcRenderer.invoke("automation-cancel-run", runId),
+  previewCronExpression: (expr) => ipcRenderer.invoke("automation-preview-cron", expr),
+  listAutomationRuns: (filters = {}) => ipcRenderer.invoke("automation-list-runs", filters),
+  updateAutomationRunTriage: (runId, triageState) =>
+    ipcRenderer.invoke("automation-update-run-triage", { runId, triageState }),
+  markAllAutomationRunsRead: () => ipcRenderer.invoke("automation-mark-all-read"),
+  deleteAutomationRun: (runId) => ipcRenderer.invoke("automation-delete-run", runId),
+  openAutomationRunSession: (payload) => ipcRenderer.invoke("automation-open-run-session", payload),
+  listWebhookTargets: () => ipcRenderer.invoke("webhook-list-targets"),
+  saveWebhookTarget: (payload) => ipcRenderer.invoke("webhook-save-target", payload),
+  deleteWebhookTarget: (id) => ipcRenderer.invoke("webhook-delete-target", id),
+  testWebhookTarget: (id) => ipcRenderer.invoke("webhook-test-target", id),
+  getInboundWebhookConfig: () => ipcRenderer.invoke("webhook-get-inbound"),
+  saveInboundWebhookConfig: (payload) => ipcRenderer.invoke("webhook-save-inbound", payload),
+  rotateInboundWebhookToken: () => ipcRenderer.invoke("webhook-rotate-inbound-token"),
+  onAutomationUpdated: (callback) => {
+    const handler = (event, payload) => callback(payload);
+    ipcRenderer.on("automation-updated", handler);
+    return () => ipcRenderer.removeListener("automation-updated", handler);
+  },
+
   respondPermission: (id, allow, decision) =>
     ipcRenderer.send("chat-permission-response", { id, allow, decision }),
+  respondQuestion: (id, payload = {}) =>
+    ipcRenderer.send("chat-question-response", { id, ...payload }),
   cancelChat: (sessionId) => {
     // 仅向主进程派发取消信号，保留回调等待主进程携带已产出结果与 cancelled 标记统一收尾，保障最终元数据与持久化完整
     ipcRenderer.send("chat-cancel", sessionId);
@@ -365,7 +408,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     onSteered,
     onWaiting,
     onReasoning,
-    onPermissionResolved
+    onPermissionResolved,
+    agentMode,
+    onUserQuestion,
+    onUserQuestionResolved
   ) => {
     // 每次请求生成独立 runId：同一会话重发时，旧 run 的迟到事件会被总线丢弃
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -385,10 +431,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
         onWaiting,
         onReasoning,
         onPermissionResolved,
+        onUserQuestion,
+        onUserQuestionResolved,
       },
     });
 
-    // 触发主进程的流式 Agent 请求 (显式透传当前绑定的工作空间目录、权限模式与推理强度)
+    // 触发主进程的流式 Agent 请求 (显式透传当前绑定的工作空间目录、权限模式、工作模式与推理强度)
     ipcRenderer.send("chat-request", {
       sessionId,
       runId,
@@ -399,6 +447,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       assistantMsgId,
       permissionMode,
       reasoningEffort,
+      agentMode,
     });
   },
 

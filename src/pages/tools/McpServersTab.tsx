@@ -10,18 +10,25 @@ import {
   KeyRound,
   Trash2,
   Copy,
+  Plus,
+  Pencil,
 } from 'lucide-react';
+import { ConnectorWizardModal } from './ConnectorWizardModal';
 
 interface McpServersTabProps {
   mcpServers: any[];
   workDir?: string;
   refreshMcpAndSkills: (workDir?: string) => Promise<void>;
+  autoOpenWizard?: boolean;
+  onWizardOpened?: () => void;
 }
 
 export const McpServersTab: React.FC<McpServersTabProps> = ({
   mcpServers,
   workDir,
   refreshMcpAndSkills,
+  autoOpenWizard,
+  onWizardOpened,
 }) => {
   const [expandedMcpServer, setExpandedMcpServer] = useState<string | null>(null);
   const [mcpToolState, setMcpToolState] = useState<
@@ -35,6 +42,16 @@ export const McpServersTab: React.FC<McpServersTabProps> = ({
   const [oauthState, setOauthState] = useState<Record<string, any>>({});
   const [oauthBusy, setOauthBusy] = useState('');
   const [oauthNotices, setOauthNotices] = useState<Record<string, string>>({});
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [editingServer, setEditingServer] = useState<any | null>(null);
+
+  useEffect(() => {
+    if (autoOpenWizard) {
+      setEditingServer(null);
+      setWizardOpen(true);
+      onWizardOpened?.();
+    }
+  }, [autoOpenWizard, onWizardOpened]);
 
   const handleDeleteMcpServer = async (server: any) => {
     if (!window.electronAPI?.deleteMcpServer) return;
@@ -269,12 +286,34 @@ export const McpServersTab: React.FC<McpServersTabProps> = ({
           <span className='px-2 py-0.5 rounded-lg bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)]'>
             已启用 {enabledCount} / {mcpServers.length}
           </span>
+          <button
+            onClick={() => {
+              setEditingServer(null);
+              setWizardOpen(true);
+            }}
+            className='px-3 py-1.5 rounded-xl bg-[var(--ui-accent-blue)] hover:opacity-90 text-white text-xs font-sans font-medium flex items-center gap-1.5 shadow-sm cursor-pointer transition-opacity'
+          >
+            <Plus size={13} />
+            <span>添加连接器</span>
+          </button>
         </div>
       </div>
 
       {mcpServers.length === 0 ? (
-        <div className='py-16 text-center rounded-2xl bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] text-xs text-[var(--ui-text-muted)]'>
-          暂无配置的 MCP 服务器
+        <div className='py-14 px-6 text-center rounded-2xl bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] flex flex-col items-center gap-3'>
+          <div className='text-xs text-[var(--ui-text-muted)]'>
+            暂无配置的 MCP 连接器，可一键接入飞书、钉钉、企业微信、Jira、Notion 等主流办公与研发服务
+          </div>
+          <button
+            onClick={() => {
+              setEditingServer(null);
+              setWizardOpen(true);
+            }}
+            className='px-4 py-2 rounded-xl bg-[var(--ui-accent-blue)] hover:opacity-90 text-white text-xs font-medium flex items-center gap-1.5 cursor-pointer'
+          >
+            <Plus size={14} />
+            <span>从预置模板添加连接器</span>
+          </button>
         </div>
       ) : (
         <div className='grid grid-cols-1 md:grid-cols-2 gap-3.5'>
@@ -331,6 +370,16 @@ export const McpServersTab: React.FC<McpServersTabProps> = ({
                     </span>
                   ) : (
                     <div className='flex items-center gap-1.5 flex-shrink-0'>
+                      <button
+                        onClick={() => {
+                          setEditingServer(server);
+                          setWizardOpen(true);
+                        }}
+                        className='p-1.5 rounded-lg bg-[var(--ui-chip-bg)] text-[var(--ui-text-muted)] border border-[color:var(--ui-border-hairline)] hover:text-[var(--ui-accent-blue)] hover:bg-[var(--ui-accent-blue-soft)] hover:border-[color:var(--ui-accent-blue-border)] transition-colors cursor-pointer'
+                        title='编辑连接器配置'
+                      >
+                        <Pencil size={13} />
+                      </button>
                       <button
                         onClick={() => handleToggleMcpServer(server.id, server.enabled)}
                         className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
@@ -618,6 +667,19 @@ export const McpServersTab: React.FC<McpServersTabProps> = ({
                 ))}
               </div>
             )}
+
+            <ConnectorWizardModal
+              isOpen={wizardOpen}
+              editingServer={editingServer}
+              onClose={() => {
+                setWizardOpen(false);
+                setEditingServer(null);
+              }}
+              onSaved={async () => {
+                setMcpToolState({});
+                await refreshMcpAndSkills(workDir);
+              }}
+            />
           </div>
   );
 };

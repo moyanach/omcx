@@ -3,6 +3,7 @@ const workspaceRefreshService = require("../../services/workspaceRefreshService"
 
 const READ_ONLY_TOOLS = new Set([
   "read_file",
+  "read_document",
   "list_directory",
   "search_code",
   "search_symbols",
@@ -185,7 +186,9 @@ async function executeToolBatch({
     }
 
     if (
-      (tc.function.name === "write_file" || tc.function.name === "edit_file") &&
+      (tc.function.name === "write_file" ||
+        tc.function.name === "edit_file" ||
+        tc.function.name === "generate_document") &&
       execResult?.success &&
       execResult?.data?.success !== false
     ) {

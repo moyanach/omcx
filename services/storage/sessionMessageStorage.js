@@ -175,6 +175,14 @@ function createSessionMessageStorage({
       work_dir: session.work_dir !== undefined ? session.work_dir : existing?.work_dir || null,
       permission_mode: session.permission_mode || existing?.permission_mode || "auto-sandbox",
       reasoning_effort: session.reasoning_effort || existing?.reasoning_effort || "medium",
+      agent_mode:
+        (session.agent_mode || session.agentMode || existing?.agent_mode || existing?.agentMode) === "work"
+          ? "work"
+          : "code",
+      session_type:
+        (session.session_type || session.sessionType || existing?.session_type || existing?.sessionType) === "automation"
+          ? "automation"
+          : "chat",
       // 显式传入 false 必须能够“取消归档”，不能被 existing.archived 覆盖
       archived:
         session.archived !== undefined
@@ -603,6 +611,7 @@ function createSessionMessageStorage({
     };
     const bySession = new Map();
     for (const s of memoryState.getSessions()) {
+      if (s?.session_type === "automation" || s?.sessionType === "automation") continue;
       if (String(s?.title || "").toLowerCase().includes(q)) {
         bySession.set(s.id, {
           sessionId: s.id,
@@ -616,6 +625,7 @@ function createSessionMessageStorage({
     for (const [sid, list] of memoryState.messagesBySession.entries()) {
       const sess = memoryState.getSessions().find((s) => s.id === sid);
       if (!sess || !Array.isArray(list)) continue;
+      if (sess.session_type === "automation" || sess.sessionType === "automation") continue;
       for (let i = list.length - 1; i >= 0; i--) {
         const content = String(list[i]?.content || "");
         if (!content.toLowerCase().includes(q)) continue;
@@ -686,10 +696,21 @@ function createSessionMessageStorage({
       .slice(0, safeLimit);
   }
 
+  function promoteSessionToChat(sessionId) {
+    const session = getSession(sessionId);
+    if (!session) return null;
+    if (session.session_type !== "automation" && session.sessionType !== "automation") {
+      return session;
+    }
+    const res = saveSession({ ...session, session_type: "chat", updated_at: Date.now() });
+    return res?.session || session;
+  }
+
   return {
     getSessions,
     getSession,
     saveSession,
+    promoteSessionToChat,
     updateSessionGeneratedTitle,
     updateSessionWorkspace,
     deleteSession,

@@ -12,6 +12,7 @@ import {
   FileDiff,
   CornerDownLeft,
   X,
+  CalendarClock,
 } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useAppStore } from "@/stores/appStore";
@@ -157,6 +158,14 @@ const CommandPaletteModal: React.FC = () => {
         }),
       },
       {
+        id: "act_automations",
+        group: "动作",
+        title: "打开定时任务",
+        subtitle: "查看后台定时执行收件箱、Cron 规则与 Webhook 推送",
+        icon: <CalendarClock size={14} className="text-[var(--ui-accent-blue)]" />,
+        onSelect: closeAnd(() => setActiveNavTab("automations")),
+      },
+      {
         id: "act_workspaces",
         group: "动作",
         title: "打开工作空间管理",
@@ -224,9 +233,9 @@ const CommandPaletteModal: React.FC = () => {
     const sessionItems: PaletteItem[] = [];
     const seenIds = new Set<string>();
 
-    const sortedSessions = [...sessions].sort(
-      (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)
-    );
+    const sortedSessions = [...sessions]
+      .filter((s) => s.sessionType !== "automation")
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
     for (const sess of sortedSessions) {
       const hit = hitById.get(sess.id);

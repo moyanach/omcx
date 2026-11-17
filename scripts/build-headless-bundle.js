@@ -13,7 +13,18 @@ const { execFileSync } = require("child_process");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const DEFAULT_OUTPUT_PATH = "/tmp/omcx-harbor-cache/omcx-headless-bundle.tar.gz";
-const HEADLESS_ENTRY_DEPS = ["zod", "cheerio"];
+const HEADLESS_ENTRY_DEPS = [
+  "zod",
+  "cheerio",
+  "pdf-parse",
+  "mammoth",
+  "word-extractor",
+  "exceljs",
+  "docx",
+  "pptxgenjs",
+  "jszip",
+  "@xmldom/xmldom",
+];
 const COPY_DIRS = ["bin", "main", "services", "utils"];
 
 function collectPureJsDeps(nodeModulesDir, entryDeps) {

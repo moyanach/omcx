@@ -9,6 +9,7 @@ import {
   RefreshCw,
   FileCode,
   FileText,
+  FileSpreadsheet,
   Image as ImageIcon,
   Globe,
   Search,
@@ -22,9 +23,13 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Layers,
+  Download,
+  FileDown,
 } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import MarkdownContent from "@/components/common/MarkdownContent";
+import CsvTablePreview from "./CsvTablePreview";
+import { DocumentRichPreview } from "./DocumentRichPreview";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { getEffectiveTheme, subscribeThemeChange, type EffectiveTheme } from "@/theme";
@@ -138,11 +143,22 @@ interface FileExplorerViewProps {
   refreshKey?: number;
 }
 
+const OFFICE_PREVIEW_EXTS = new Set([
+  "xlsx",
+  "xlsm",
+  "docx",
+  "doc",
+  "pptx",
+  "pdf",
+]);
+
 const PREVIEWABLE_EXTS = new Set([
   "html",
   "htm",
   "md",
   "markdown",
+  "csv",
+  "tsv",
   "svg",
   "png",
   "jpg",
@@ -150,6 +166,7 @@ const PREVIEWABLE_EXTS = new Set([
   "gif",
   "webp",
   "ico",
+  ...OFFICE_PREVIEW_EXTS,
 ]);
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "ico", "svg"]);
@@ -172,6 +189,9 @@ function getEntryIcon(name: string, isDir: boolean, isExpanded?: boolean) {
   const ext = name.includes(".") ? name.split(".").pop()?.toLowerCase() || "" : "";
   if (ext === "html" || ext === "htm") {
     return <Globe size={13.5} className="text-[var(--ui-accent-sky)] flex-shrink-0" />;
+  }
+  if (ext === "csv" || ext === "tsv" || ext === "xlsx") {
+    return <FileSpreadsheet size={13.5} className="text-[var(--ui-accent-emerald)] flex-shrink-0" />;
   }
   if (IMAGE_EXTS.has(ext)) {
     return <ImageIcon size={13.5} className="text-[var(--ui-accent-purple)] flex-shrink-0" />;
@@ -287,6 +307,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   const [highlightLine, setHighlightLine] = useState<number | undefined>(initialLineNumber);
   const [highlightLineEnd, setHighlightLineEnd] = useState<number | undefined>(initialLineEnd);
   const [copied, setCopied] = useState(false);
+  const [exported, setExported] = useState(false);
   const [treeCollapsed, setTreeCollapsed] = useState(false);
 
   const codeContainerRef = useRef<HTMLDivElement>(null);
@@ -614,6 +635,19 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     setPendingMentionInsert(`@${mentionPath} `);
   };
 
+  const handleExportFile = async (format: "original" | "html" | "pdf") => {
+    if (!selectedFile || !window.electronAPI?.exportFileOutput) return;
+    const res = await window.electronAPI.exportFileOutput({
+      workDir: primaryWorkDir,
+      filePath: selectedFile.absPath,
+      format,
+    });
+    if (res?.success) {
+      setExported(true);
+      setTimeout(() => setExported(false), 1800);
+    }
+  };
+
   // 搜索过滤列表（仅过滤文件，排除目录）
   const filteredSearchFiles = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -913,7 +947,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
               </div>
 
               <div className="flex items-center gap-1 flex-shrink-0">
-                {isPreviewable && (
+                {isPreviewable && !OFFICE_PREVIEW_EXTS.has(selectedFile.ext) && (
                   <div className="flex items-center rounded-lg bg-[var(--ui-chip-bg)] p-0.5 border border-[color:var(--ui-border-hairline)] mr-1">
                     <button
                       onClick={() => setViewMode("preview")}
@@ -960,6 +994,40 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
                 >
                   <AtSign size={12} />
                   <span>引用</span>
+                </button>
+
+                {(selectedFile.ext === "md" || selectedFile.ext === "markdown") && (
+                  <button
+                    onClick={() => void handleExportFile("html")}
+                    className="px-2 py-1 rounded-lg hover:bg-[var(--ui-block-hover-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-accent-blue)] text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                    title="导出为独立排版 HTML"
+                  >
+                    <FileDown size={12} />
+                    <span>HTML</span>
+                  </button>
+                )}
+
+                {["md", "markdown", "html", "htm", "docx"].includes(selectedFile.ext) && (
+                  <button
+                    onClick={() => void handleExportFile("pdf")}
+                    className="px-2 py-1 rounded-lg hover:bg-[var(--ui-block-hover-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-accent-rose)] text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                    title="一键渲染导出为 A4 PDF 文档"
+                  >
+                    <FileDown size={12} />
+                    <span>PDF</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={() => void handleExportFile("original")}
+                  className="p-1.5 rounded-lg hover:bg-[var(--ui-block-hover-bg)] text-[var(--ui-text-muted)] hover:text-[var(--ui-accent-emerald)] transition-colors cursor-pointer"
+                  title="另存为..."
+                >
+                  {exported ? (
+                    <Check size={12} className="text-[var(--ui-accent-emerald)]" />
+                  ) : (
+                    <Download size={12} />
+                  )}
                 </button>
 
                 {!selectedFile.isBinary && (
@@ -1009,6 +1077,17 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
                 <div className="p-5 max-w-none bg-[var(--ui-stage-bg)] min-h-full">
                   <MarkdownContent content={selectedFile.content} />
                 </div>
+              ) : viewMode === "preview" && OFFICE_PREVIEW_EXTS.has(selectedFile.ext) ? (
+                <DocumentRichPreview
+                  workDir={primaryWorkDir}
+                  absPath={selectedFile.absPath}
+                  fileName={selectedFile.name}
+                  ext={selectedFile.ext}
+                  refreshKey={refreshKey}
+                />
+              ) : viewMode === "preview" &&
+                (selectedFile.ext === "csv" || selectedFile.ext === "tsv") ? (
+                <CsvTablePreview content={selectedFile.content} ext={selectedFile.ext} />
               ) : viewMode === "preview" && IMAGE_EXTS.has(selectedFile.ext) ? (
                 <div className="w-full h-full flex items-center justify-center p-6 bg-[var(--ui-stage-bg)]">
                   <img

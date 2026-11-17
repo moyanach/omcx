@@ -266,6 +266,24 @@ function registerSessionIpc() {
   );
 
   ipcMain.handle(
+    "db-update-session-agent-mode",
+    safeHandler((event, { id, agentMode }) => {
+      const storageService = getStorageService();
+      const normalized = agentMode === "work" ? "work" : "code";
+      const session = storageService.getSessions().find((s) => s.id === id);
+      if (session) {
+        session.agent_mode = normalized;
+        storageService.saveSession(session);
+      }
+      const active = activeStreamSessions.get(id);
+      if (active && active.toolContext) {
+        active.toolContext.agentMode = normalized;
+      }
+      return { success: true, agentMode: normalized };
+    })
+  );
+
+  ipcMain.handle(
     "db-delete-session",
     safeHandler((event, id) => {
       getGitWorktreeService().removeSessionWorktreeGroup(id);

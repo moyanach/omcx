@@ -37,6 +37,7 @@ const {
   createSessionMessageStorage,
 } = require("./storage/sessionMessageStorage");
 const { createAttachmentStorage } = require("./storage/attachmentStorage");
+const { createAutomationStorage } = require("./storage/automationStorage");
 
 function isMemoryOnlyMode() {
   return process.env.OMCX_STORAGE_MEMORY_ONLY === "1" || !Database;
@@ -93,11 +94,21 @@ const getStoragePaths = () => ({
 
 // ─── 内存级高速只读快照池 (In-Memory Cache) ───────────────────
 let memorySessions = [];
+let memoryAutomations = [];
+let memoryAutomationRuns = [];
 const memoryState = {
   configs: new Map(),
   getSessions: () => memorySessions,
   setSessions: (next) => {
     memorySessions = Array.isArray(next) ? next : [];
+  },
+  getAutomations: () => memoryAutomations,
+  setAutomations: (next) => {
+    memoryAutomations = Array.isArray(next) ? next : [];
+  },
+  getAutomationRuns: () => memoryAutomationRuns,
+  setAutomationRuns: (next) => {
+    memoryAutomationRuns = Array.isArray(next) ? next : [];
   },
   messagesBySession: new Map(),
   outputsBySession: new Map(),
@@ -149,6 +160,7 @@ const {
   getSessions,
   getSession,
   saveSession,
+  promoteSessionToChat,
   updateSessionGeneratedTitle,
   updateSessionWorkspace,
   deleteSession,
@@ -182,6 +194,7 @@ const {
   setProjectHooksTrust,
   getMcpServers,
   saveGlobalMcpServers,
+  upsertGlobalMcpServer,
   deleteGlobalMcpServer,
 } = createMcpStorage({
   getConfig,
@@ -205,6 +218,33 @@ const {
   setConfig,
   getPaths: getStoragePaths,
   ensureDir,
+});
+
+const {
+  getAutomations,
+  getAutomation,
+  saveAutomation,
+  deleteAutomation,
+  getAutomationRuns,
+  getAutomationRun,
+  getUnreadAutomationRunCount,
+  saveAutomationRun,
+  updateAutomationRunTriage,
+  markAllAutomationRunsRead,
+  deleteAutomationRun,
+  getWebhookTargets,
+  getWebhookTargetsForRenderer,
+  saveWebhookTarget,
+  deleteWebhookTarget,
+  getInboundWebhookConfig,
+  getInboundWebhookConfigForRenderer,
+  saveInboundWebhookConfig,
+  rotateInboundWebhookToken,
+} = createAutomationStorage({
+  memoryState,
+  getConfig,
+  setConfig,
+  dbEngine,
 });
 
 function initStorage() {
@@ -265,6 +305,7 @@ module.exports = {
   getSessions,
   getSession,
   saveSession,
+  promoteSessionToChat,
   updateSessionWorkspace,
   updateSessionGeneratedTitle,
   deleteSession,
@@ -292,6 +333,7 @@ module.exports = {
   selectExplicitLiteModel,
   getMcpServers,
   saveGlobalMcpServers,
+  upsertGlobalMcpServer,
   setProjectMcpTrust,
   isProjectMcpTrusted,
   isProjectHooksTrusted,
@@ -309,4 +351,23 @@ module.exports = {
   getSessionOutputs,
   getSessionOutputsAsync,
   addSessionOutput,
+  getAutomations,
+  getAutomation,
+  saveAutomation,
+  deleteAutomation,
+  getAutomationRuns,
+  getAutomationRun,
+  getUnreadAutomationRunCount,
+  saveAutomationRun,
+  updateAutomationRunTriage,
+  markAllAutomationRunsRead,
+  deleteAutomationRun,
+  getWebhookTargets,
+  getWebhookTargetsForRenderer,
+  saveWebhookTarget,
+  deleteWebhookTarget,
+  getInboundWebhookConfig,
+  getInboundWebhookConfigForRenderer,
+  saveInboundWebhookConfig,
+  rotateInboundWebhookToken,
 };

@@ -19,6 +19,8 @@ const { DispatchSubagentTool } = require("./tools/subagentTool");
 const { RepoMapTool, SearchSymbolsTool, FindReferencesTool } = require("./tools/repoIndexTools");
 const { RunSkillScriptTool } = require("./tools/skillTools");
 const { SpecWriteTool } = require("./tools/specTool");
+const { AskUserQuestionTool } = require("./tools/askUserTool");
+const { ReadDocumentTool, GenerateDocumentTool } = require("./tools/documentTools");
 const {
   BrowserOpenTool,
   BrowserInspectTool,
@@ -28,7 +30,8 @@ const {
 } = require("./tools/browserTools");
 const { getPermissionModePolicy } = require("../services/sandboxPolicyService");
 
-const WRITE_FILE_TOOL_NAMES = new Set(["write_file", "edit_file"]);
+const WRITE_FILE_TOOL_NAMES = new Set(["write_file", "edit_file", "generate_document"]);
+const CODE_ONLY_TOOL_NAMES = new Set(["repo_map", "search_symbols", "find_references"]);
 
 class ToolRegistry {
   constructor() {
@@ -84,9 +87,13 @@ class ToolRegistry {
       ? getPermissionModePolicy(options.permissionMode)
       : null;
     const blockFileWrite = policy ? !policy.allowFileWrite : false;
+    const isWorkMode = options?.agentMode === "work";
     const allTools = [...this._tools.values(), ...(Array.isArray(extraTools) ? extraTools : [])];
     for (const tool of allTools) {
       if (blockFileWrite && WRITE_FILE_TOOL_NAMES.has(tool.name)) {
+        continue;
+      }
+      if (isWorkMode && CODE_ONLY_TOOL_NAMES.has(tool.name)) {
         continue;
       }
       // 白名单对内置工具与 MCP 工具一视同仁，Subagent 权限收敛不允许出现 mcp__ 旁路
@@ -130,9 +137,13 @@ class ToolRegistry {
       ? getPermissionModePolicy(options.permissionMode)
       : null;
     const blockFileWrite = policy ? !policy.allowFileWrite : false;
+    const isWorkMode = options?.agentMode === "work";
     const allTools = [...this._tools.values(), ...(Array.isArray(extraTools) ? extraTools : [])];
     for (const tool of allTools) {
       if (blockFileWrite && WRITE_FILE_TOOL_NAMES.has(tool.name)) {
+        continue;
+      }
+      if (isWorkMode && CODE_ONLY_TOOL_NAMES.has(tool.name)) {
         continue;
       }
       const properties = tool.parameters?.properties || {};
@@ -362,6 +373,9 @@ const ALL_TOOLS = [
   registerStructuredTool(new FindReferencesTool()),
   registerStructuredTool(new SpecWriteTool()),
   registerStructuredTool(new RunSkillScriptTool()),
+  registerStructuredTool(new AskUserQuestionTool()),
+  registerStructuredTool(new ReadDocumentTool()),
+  registerStructuredTool(new GenerateDocumentTool()),
   registerStructuredTool(new BrowserOpenTool()),
   registerStructuredTool(new BrowserInspectTool()),
   registerStructuredTool(new BrowserInteractTool()),

@@ -5,6 +5,7 @@ import type {
   ContextMetrics,
   CompactionInfo,
   QueuedPrompt,
+  PendingUserQuestion,
 } from "../chatStore";
 
 export interface ConversationSlice {
@@ -15,6 +16,7 @@ export interface ConversationSlice {
   toolCallsBySession: Record<string, any[]>;
   todosBySession: Record<string, any[]>;
   permissionBySession: Record<string, any | null>;
+  questionBySession: Record<string, PendingUserQuestion | null>;
   contextMetricsBySession: Record<string, ContextMetrics | null>;
   contextMetrics: ContextMetrics | null;
   lastCompaction: CompactionInfo | null;
@@ -46,6 +48,7 @@ export interface ConversationSlice {
   clearSessionToolCalls: (sessionId: string) => void;
   setSessionTodos: (sessionId: string, todos: any[]) => void;
   setSessionPermission: (sessionId: string, perm: any | null) => void;
+  setSessionQuestion: (sessionId: string, question: PendingUserQuestion | null) => void;
   setContextMetrics: (metrics: ContextMetrics | null, sessionId?: string) => void;
   setLastCompaction: (data: CompactionInfo | null) => void;
 
@@ -70,6 +73,7 @@ export const createConversationSlice: StateCreator<
   toolCallsBySession: {},
   todosBySession: {},
   permissionBySession: {},
+  questionBySession: {},
   contextMetricsBySession: {},
   contextMetrics: null,
   lastCompaction: null,
@@ -293,6 +297,14 @@ export const createConversationSlice: StateCreator<
       permissionBySession: {
         ...state.permissionBySession,
         [sessionId]: perm,
+      },
+    })),
+
+  setSessionQuestion: (sessionId, question) =>
+    set((state) => ({
+      questionBySession: {
+        ...state.questionBySession,
+        [sessionId]: question,
       },
     })),
 

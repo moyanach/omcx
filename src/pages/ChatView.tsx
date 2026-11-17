@@ -16,6 +16,7 @@ import MessageInput from '@/pages/chat/MessageInput';
 import SessionInspectorColumn from '@/components/agent/SessionInspectorColumn';
 import WebWorkspaceDrawer from '@/components/browser/WebWorkspaceDrawer';
 import EditWorkspaceModal, { WorkspaceData } from '@/components/agent/EditWorkspaceModal';
+import UserQuestionCard from '@/pages/chat/UserQuestionCard';
 import { ShieldAlert, CheckCircle2 } from 'lucide-react';
 
 const formatTokenCount = (value: number) => {
@@ -34,6 +35,8 @@ const ChatView: React.FC = () => {
     todosBySession,
     permissionBySession,
     setSessionPermission,
+    questionBySession,
+    setSessionQuestion,
     initStore,
     updateSessionModel,
     setSessionWorkDir,
@@ -71,6 +74,8 @@ const ChatView: React.FC = () => {
       todosBySession: s.todosBySession,
       permissionBySession: s.permissionBySession,
       setSessionPermission: s.setSessionPermission,
+      questionBySession: s.questionBySession,
+      setSessionQuestion: s.setSessionQuestion,
       initStore: s.initStore,
       updateSessionModel: s.updateSessionModel,
       setSessionWorkDir: s.setSessionWorkDir,
@@ -180,6 +185,7 @@ const ChatView: React.FC = () => {
   const activeToolCalls = activeSessionId ? toolCallsBySession[activeSessionId] || [] : [];
   const activeTodos = activeSessionId ? todosBySession[activeSessionId] || [] : [];
   const pendingPermission = activeSessionId ? permissionBySession[activeSessionId] || null : null;
+  const pendingQuestion = activeSessionId ? questionBySession[activeSessionId] || null : null;
   const activePromptQueue = activeSessionId ? promptQueueBySession[activeSessionId] || [] : [];
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
@@ -245,6 +251,18 @@ const ChatView: React.FC = () => {
       window.electronAPI.respondPermission(pendingPermission.id, allow, decision);
     }
     setSessionPermission(activeSessionId, null);
+  };
+
+  const handleQuestionResponse = (payload: {
+    submitted: boolean;
+    skipped?: boolean;
+    answers: Record<string, any>;
+  }) => {
+    if (!pendingQuestion || !activeSessionId) return;
+    if (window.electronAPI?.respondQuestion) {
+      window.electronAPI.respondQuestion(pendingQuestion.id, payload);
+    }
+    setSessionQuestion(activeSessionId, null);
   };
 
   const handleSend = async () => {
@@ -571,6 +589,14 @@ const ChatView: React.FC = () => {
                       </div>
                     </div>
                   </div>
+                )}
+
+                {/* 交互式提问澄清卡片 (ask_user_question) */}
+                {pendingQuestion && (
+                  <UserQuestionCard
+                    question={pendingQuestion}
+                    onSubmit={handleQuestionResponse}
+                  />
                 )}
 
                 <MessageInput

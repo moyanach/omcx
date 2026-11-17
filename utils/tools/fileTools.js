@@ -225,6 +225,30 @@ class ReadFileTool extends StructuredTool {
       return JSON.stringify({ success: false, error: `路径不是文件: ${targetFilePath}` });
     }
 
+    const ext = path.extname(targetPath).replace(/^\./, "").toLowerCase();
+    if (["pdf", "docx", "doc", "xlsx", "xlsm", "pptx"].includes(ext)) {
+      try {
+        const documentService = require("../../services/documentService");
+        const docRes = await documentService.readDocument(targetPath, {
+          mode: "read",
+          startRow: Math.max(0, Math.floor(Number(offset) || 0)),
+          maxRows: maxLines === -1 ? 400 : Math.max(1, Math.floor(Number(maxLines) || 200)),
+        });
+        return JSON.stringify({
+          success: true,
+          path: filePath,
+          delegatedTo: "read_document",
+          tip: "提示：对于办公文档推荐使用 read_document 工具（支持 outline 查大纲/页数、search 关键词检索、sheet 指定工作表与 startPage/endPage 分页）。",
+          ...docRes,
+        });
+      } catch (docErr) {
+        return JSON.stringify({
+          success: false,
+          error: `解析办公文档失败: ${docErr.message}`,
+        });
+      }
+    }
+
     const { lines, totalLines } = readLinesRange(targetPath, offset, maxLines);
 
     if (maxLines === -1) {

@@ -242,6 +242,54 @@ function createMcpStorage({ getConfig, setConfig, getPaths, ensureDir }) {
     return { success: true };
   }
 
+  function upsertGlobalMcpServer(id, serverConfig = {}) {
+    const { MCP_FILE } = getPaths();
+    const serverId = String(id || "").trim();
+    if (!serverId) return { success: false, error: "缺少连接器名称 / ID" };
+    if (!/^[a-zA-Z0-9._-]+$/.test(serverId)) {
+      return {
+        success: false,
+        error: "连接器 ID 仅支持英文字母、数字、点(.)、下划线(_)与连字符(-)",
+      };
+    }
+
+    let globalServers = {};
+    try {
+      if (fs.existsSync(MCP_FILE)) {
+        globalServers = JSON.parse(fs.readFileSync(MCP_FILE, "utf-8"))?.mcpServers || {};
+      }
+    } catch {
+      globalServers = {};
+    }
+
+    const prev = globalServers[serverId] && typeof globalServers[serverId] === "object"
+      ? globalServers[serverId]
+      : {};
+    const nextConfig = { ...serverConfig };
+    // 编辑已有连接器时，若未重新填写已有密码型 env，保留原有 env；非空字段覆盖
+    if (nextConfig.env && typeof nextConfig.env === "object") {
+      const mergedEnv = { ...(prev.env || {}) };
+      for (const [k, v] of Object.entries(nextConfig.env)) {
+        const key = String(k || "").trim();
+        if (!key) continue;
+        if (typeof v === "string" && v.trim()) {
+          mergedEnv[key] = v.trim();
+        } else if (v === null) {
+          delete mergedEnv[key];
+        }
+      }
+      nextConfig.env = mergedEnv;
+    }
+
+    globalServers[serverId] = {
+      ...prev,
+      ...nextConfig,
+      enabled: nextConfig.enabled !== false,
+    };
+    saveGlobalMcpServers(globalServers);
+    return { success: true, id: serverId };
+  }
+
   return {
     getProjectMcpConfigPath,
     readProjectMcpConfig,
@@ -251,6 +299,7 @@ function createMcpStorage({ getConfig, setConfig, getPaths, ensureDir }) {
     setProjectHooksTrust,
     getMcpServers,
     saveGlobalMcpServers,
+    upsertGlobalMcpServer,
     deleteGlobalMcpServer,
   };
 }

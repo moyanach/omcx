@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { Sparkles, Network, Wrench, Bot } from 'lucide-react';
 import { useChatStore, SkillItem, SubagentItem } from '@/stores/chatStore';
+import { useAppStore } from '@/stores/appStore';
 import { SkillsTab } from './tools/SkillsTab';
 import { SubagentsTab } from './tools/SubagentsTab';
 import { McpServersTab } from './tools/McpServersTab';
@@ -19,11 +20,28 @@ export const ToolsView: React.FC = () => {
         activeSessionId: s.activeSessionId,
       }))
     );
+  const { toolsIntent, setToolsIntent } = useAppStore(
+    useShallow((s) => ({
+      toolsIntent: s.toolsIntent,
+      setToolsIntent: s.setToolsIntent,
+    }))
+  );
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
   const [activeTab, setActiveTab] = useState<'skills' | 'subagents' | 'mcp'>('skills');
+  const [autoOpenConnectorWizard, setAutoOpenConnectorWizard] = useState(false);
   const [inspectingSkill, setInspectingSkill] = useState<SkillItem | null>(null);
   const [inspectingSubagent, setInspectingSubagent] = useState<SubagentItem | null>(null);
+
+  useEffect(() => {
+    if (!toolsIntent) return;
+    if (toolsIntent.tab) setActiveTab(toolsIntent.tab);
+    if (toolsIntent.openConnectorWizard) {
+      setActiveTab('mcp');
+      setAutoOpenConnectorWizard(true);
+    }
+    setToolsIntent(null);
+  }, [toolsIntent, setToolsIntent]);
 
   return (
     <div className='flex-1 h-full flex flex-col bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150 overflow-hidden text-[var(--ui-text-primary)] select-none'>
@@ -160,6 +178,8 @@ export const ToolsView: React.FC = () => {
             mcpServers={mcpServers}
             workDir={activeSession?.workDir}
             refreshMcpAndSkills={refreshMcpAndSkills}
+            autoOpenWizard={autoOpenConnectorWizard}
+            onWizardOpened={() => setAutoOpenConnectorWizard(false)}
           />
         )}
         </div>

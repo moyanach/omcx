@@ -1,9 +1,11 @@
 import React from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/stores/appStore';
+import { useChatStore } from '@/stores/chatStore';
 import { usePanelResize } from '@/hooks/usePanelResize';
 import WorkspaceCard from './WorkspaceCard';
 import ContextCard from './ContextCard';
+import OutputsCard from './OutputsCard';
 import ConnectorsCard from './ConnectorsCard';
 import ChangesCard from './ChangesCard';
 import RepoWikiCard from './RepoWikiCard';
@@ -16,12 +18,21 @@ interface SessionInspectorColumnProps {
 
 /**
  * SessionInspectorColumn — 专属于当前会话的右侧精简监控面板 (对应参考图 4 绿色框区域)
- * 纯粹聚焦核心指标：当前工作空间多目录状态、Context 预算容量条、Connectors (MCP)、Changes 代码变更
+ * 根据会话模式 (code / work) 自适应裁剪研发卡片，保持桌面简洁专注
  */
 export const SessionInspectorColumn: React.FC<SessionInspectorColumnProps> = ({ isOpen }) => {
   const { inspectorWidth, setInspectorWidth } = useAppStore(
     useShallow((s) => ({ inspectorWidth: s.inspectorWidth, setInspectorWidth: s.setInspectorWidth }))
   );
+  const { sessions, activeSessionId, defaultAgentMode } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      defaultAgentMode: s.defaultAgentMode,
+    }))
+  );
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const isWorkMode = (activeSession?.agentMode || defaultAgentMode || 'code') === 'work';
 
   const {
     targetRef: inspectorRef,
@@ -75,20 +86,28 @@ export const SessionInspectorColumn: React.FC<SessionInspectorColumnProps> = ({ 
         {/* 2. Context 容量卡片 (五彩分段条) */}
         <ContextCard />
 
-        {/* 3. Connectors 连接器卡片 (MCP 服务清单) */}
+        {/* 3. Outputs 会话产物与交付物卡片 */}
+        <OutputsCard />
+
+        {/* 4. Connectors 连接器卡片 (MCP 服务清单) */}
         <ConnectorsCard />
 
-        {/* 4. Repo Wiki 仓库级文档 (基于符号索引生成并缓存) */}
-        <RepoWikiCard />
+        {/* 仅编程模式 (code) 展示工程研发向监控卡片，work 模式隐藏以降低噪音 */}
+        {!isWorkMode && (
+          <>
+            {/* 5. Repo Wiki 仓库级文档 (基于符号索引生成并缓存) */}
+            <RepoWikiCard />
 
-        {/* 5. 隔离工作树 (高风险任务在独立 Git worktree 中执行) */}
-        <WorktreeCard />
+            {/* 6. 隔离工作树 (高风险任务在独立 Git worktree 中执行) */}
+            <WorktreeCard />
 
-        {/* 6. Quest 规格文档 (需求/方案/验收/实施步骤) */}
-        <SpecCard />
+            {/* 7. Quest 规格文档 (需求/方案/验收/实施步骤) */}
+            <SpecCard />
 
-        {/* 7. Changes 代码变更卡片 (实时 Git 增删行 + 文件列表) */}
-        <ChangesCard />
+            {/* 8. Changes 代码变更卡片 (实时 Git 增删行 + 文件列表) */}
+            <ChangesCard />
+          </>
+        )}
       </div>
     </aside>
   );

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
+import { ChevronDown, ChevronRight, ExternalLink, Plus } from 'lucide-react';
 import { useChatStore } from '@/stores/chatStore';
 import { useAppStore } from '@/stores/appStore';
 
@@ -7,9 +7,15 @@ export const ConnectorsCard: React.FC = () => {
   const [isOpen, setIsOpen] = useState(true);
   const mcpServers = useChatStore((s) => s.mcpServers);
   const setActiveNavTab = useAppStore((s) => s.setActiveNavTab);
+  const setToolsIntent = useAppStore((s) => s.setToolsIntent);
 
   // 仅显示当前已启用的可用 MCP
   const activeServers = mcpServers.filter((s) => s.enabled !== false);
+
+  const openConnectorsPage = (openWizard = false) => {
+    setToolsIntent({ tab: 'mcp', openConnectorWizard: openWizard });
+    setActiveNavTab('tools');
+  };
 
   return (
     <div className='border-b border-[color:var(--ui-divider-hairline)] transition-colors select-none titlebar-no-drag last:border-b-0'>
@@ -63,12 +69,22 @@ export const ConnectorsCard: React.FC = () => {
           {/* 底部快速查看提示 */}
           <div className='pt-1.5 flex items-center justify-between text-[11px] text-[var(--ui-text-muted)] border-t border-[color:var(--ui-divider-hairline)] mt-1'>
             <span>MCP 连接器 ({activeServers.length})</span>
-            <span
-              onClick={() => setActiveNavTab('tools')}
-              className='hover:text-[var(--ui-text-primary)] cursor-pointer flex items-center gap-0.5 transition-colors'
-            >
-              管理 <ExternalLink size={10} />
-            </span>
+            <div className='flex items-center gap-2.5'>
+              <button
+                onClick={() => openConnectorsPage(true)}
+                className='hover:text-[var(--ui-accent-blue)] cursor-pointer flex items-center gap-0.5 transition-colors'
+                title='从预置模板一键添加飞书、钉钉、企业微信、Jira 等连接器'
+              >
+                <Plus size={11} />
+                <span>添加</span>
+              </button>
+              <span
+                onClick={() => openConnectorsPage(false)}
+                className='hover:text-[var(--ui-text-primary)] cursor-pointer flex items-center gap-0.5 transition-colors'
+              >
+                管理 <ExternalLink size={10} />
+              </span>
+            </div>
           </div>
         </div>
       )}

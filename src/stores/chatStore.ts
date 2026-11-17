@@ -48,6 +48,27 @@ export interface Message {
 
 export type PermissionMode = "plan" | "auto-sandbox" | "ask" | "full-access";
 export type ReasoningEffort = "off" | "low" | "medium" | "high" | "max";
+export type AgentMode = "code" | "work";
+
+export interface UserQuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface UserQuestionItem {
+  id: string;
+  question: string;
+  type: "single" | "multi" | "text";
+  options?: UserQuestionOption[];
+  allowCustom?: boolean;
+  placeholder?: string;
+}
+
+export interface PendingUserQuestion {
+  id: string;
+  title?: string;
+  questions: UserQuestionItem[];
+}
 
 export interface Session {
   id: string;
@@ -59,6 +80,8 @@ export interface Session {
   workDir?: string;
   permissionMode?: PermissionMode;
   reasoningEffort?: ReasoningEffort;
+  agentMode?: AgentMode;
+  sessionType?: "chat" | "automation";
   archived?: boolean;
 }
 

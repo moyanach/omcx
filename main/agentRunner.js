@@ -11,6 +11,7 @@ const {
   activeStreamSnapshotFlushers,
   activeStreamSessions,
   pendingPermissions,
+  pendingQuestions,
   getWorkspaceFolders,
   getModelConfig,
   normalizeUsage,
@@ -43,6 +44,7 @@ const {
 const { generateSessionTitleSidecar } = require("./runner/titleSidecar");
 const { registerBtwHandlers } = require("./runner/btwHandler");
 const { supersedeSessionPermissions, createPermissionChecker } = require("./runner/permissionGate");
+const { supersedeSessionQuestions, createQuestionAsker } = require("./runner/questionGate");
 const { createStreamTransport } = require("./runner/streamTransport");
 const { evaluateNoToolResponse } = require("./runner/continuationPolicy");
 const { executeToolBatch } = require("./runner/toolExecutor");
@@ -57,6 +59,18 @@ function registerAgentRunner() {
       entry.settle({
         allow: !!allow,
         decision: decision || (allow ? "allow_once" : "deny"),
+      });
+    }
+  });
+
+  ipcMain.on("chat-question-response", (event, { id, submitted, skipped, answers } = {}) => {
+    const entry = pendingQuestions.get(id);
+    if (entry) {
+      pendingQuestions.delete(id);
+      entry.settle({
+        submitted: Boolean(submitted),
+        skipped: Boolean(skipped),
+        answers: answers && typeof answers === "object" ? answers : {},
       });
     }
   });
@@ -77,6 +91,19 @@ function registerAgentRunner() {
           entry.settle({ allow: false, decision: "cancelled", reason: "用户已取消本次执行" });
         } catch {}
         rejectedPermissions += 1;
+      }
+
+      for (const [qId, entry] of pendingQuestions) {
+        if (entry.sessionId !== sessionId) continue;
+        pendingQuestions.delete(qId);
+        try {
+          entry.settle({
+            submitted: false,
+            skipped: true,
+            answers: {},
+            reason: "用户已取消本次执行",
+          });
+        } catch {}
       }
 
       console.log(
@@ -123,6 +150,7 @@ async function runAgentTurn(payload = {}, options = {}) {
     assistantMsgId,
     permissionMode,
     reasoningEffort,
+    agentMode,
   } = payload || {};
 
   const storageService = getStorageService();
@@ -246,14 +274,24 @@ async function runAgentTurn(payload = {}, options = {}) {
       PERMISSION_MODES.AUTO_SANDBOX
   );
 
+  const resolvedAgentMode =
+    (agentMode ||
+      session?.agent_mode ||
+      session?.agentMode ||
+      storageService.getConfig("default_agent_mode")) === "work"
+      ? "work"
+      : "code";
+
   if (
     session &&
     (session.work_dir !== sessionWorkDir ||
       session.permission_mode !== resolvedPermissionMode ||
+      session.agent_mode !== resolvedAgentMode ||
       (reasoningEffort && session.reasoning_effort !== reasoningEffort))
   ) {
     session.work_dir = sessionWorkDir;
     session.permission_mode = resolvedPermissionMode;
+    session.agent_mode = resolvedAgentMode;
     if (reasoningEffort) {
       session.reasoning_effort = reasoningEffort;
     }
@@ -285,6 +323,7 @@ async function runAgentTurn(payload = {}, options = {}) {
       previousRun.abortController.abort();
     } catch {}
     supersedeSessionPermissions(sessionId, replyStream, event);
+    supersedeSessionQuestions(sessionId, replyStream, event);
     console.warn(`[chat-request] session ${sessionId} 检测到并发请求，已中断上一轮 run`);
   }
 
@@ -309,6 +348,13 @@ async function runAgentTurn(payload = {}, options = {}) {
     writableFolders,
     sessionAbort,
     storageService,
+  });
+
+  const askUserFn = createQuestionAsker({
+    sessionId,
+    event,
+    replyStream,
+    customAskUser: typeof options.askUser === "function" ? options.askUser : null,
   });
 
   const initialTodos = [];
@@ -426,7 +472,9 @@ async function runAgentTurn(payload = {}, options = {}) {
     allowedFolders,
     writableFolders,
     permissionMode: resolvedPermissionMode,
+    agentMode: resolvedAgentMode,
     checkPermission: checkPermissionFn,
+    askUser: askUserFn,
     allowedToolNames: null,
     onTodosUpdate: null,
     abortSignal: sessionAbort.abortController.signal,
@@ -485,6 +533,7 @@ async function runAgentTurn(payload = {}, options = {}) {
       modelBaseUrl,
       enableTools,
       supportsVision,
+      agentMode: resolvedAgentMode,
       matchedWorkspace,
       allowedFolders,
       initialTodos,

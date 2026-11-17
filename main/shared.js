@@ -64,6 +64,10 @@ const MODULES = {
   contextCompactor: "../services/contextCompactor",
   modelErrorService: "../services/modelErrorService",
   workspaceRefreshService: "../services/workspaceRefreshService",
+  documentService: "../services/documentService",
+  automationService: "../services/automationService",
+  webhookService: "../services/webhookService",
+  cronParser: "../utils/cronParser",
 };
 
 const getStorageService = () => lazyRequire(MODULES.storageService);
@@ -98,11 +102,16 @@ const getSandboxPolicyService = () => lazyRequire(MODULES.sandboxPolicyService);
 const getContextCompactor = () => lazyRequire(MODULES.contextCompactor);
 const getModelErrorService = () => lazyRequire(MODULES.modelErrorService);
 const getWorkspaceRefreshService = () => lazyRequire(MODULES.workspaceRefreshService);
+const getDocumentService = () => lazyRequire(MODULES.documentService);
+const getAutomationService = () => lazyRequire(MODULES.automationService);
+const getWebhookService = () => lazyRequire(MODULES.webhookService);
+const getCronParser = () => lazyRequire(MODULES.cronParser);
 
 // ─── 运行时全局可变状态（统一收敛到 shared，避免模块循环依赖） ───
 const activeStreamSnapshotFlushers = new Map();
 const activeStreamSessions = new Map();
 const pendingPermissions = new Map();
+const pendingQuestions = new Map();
 const PERMISSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 let mainWindow = null;
@@ -628,16 +637,16 @@ async function buildAttachmentMessagesAsync(messages) {
         if (SPREADSHEET_EXTS.has(ext)) {
           guide = [
             "该文件为结构化表格数据，已完整保存在上述本地绝对路径（已加入当前会话只读信任目录）。",
-            "请通过 run_command 运行 Python 脚本（优先使用 pandas / openpyxl，若环境未安装可使用内置 zipfile + xml.etree.ElementTree 解析 .xlsx）开展分析：",
-            "1. 先探查所有工作表名称、各表总行数/列数、列名及前 5 行样本；",
-            "2. 再根据需求编写过滤、分组、聚合统计脚本输出结论，严禁直接全表 print 导致终端输出被截断。",
+            "请优先使用内置 read_document 工具解析读取（无需临时 Python 脚本）：",
+            "1. 先调用 read_document(path, mode='outline') 查看所有工作表名称、总行数/列数、列名及前 5 行样本；",
+            "2. 再调用 read_document(path, mode='read', sheet=..., startRow=..., maxRows=...) 分页读取或用 mode='search' 关键词定位；如需复杂多表聚合计算，可辅以 run_command。",
           ].join("\n");
         } else if (DOCUMENT_EXTS.has(ext)) {
           guide = [
             "该文件为办公排版文档，已完整保存在上述本地绝对路径（已加入当前会话只读信任目录）。",
-            "请通过 run_command 调用 Python 解析脚本提取结构与正文（如 PDF 用 pypdf/pdfplumber/pymupdf，DOCX 用 python-docx 或内置 zipfile + xml.etree.ElementTree 读取 word/document.xml）：",
-            "1. 先探查文档总页数、章节目录或段落数量；",
-            "2. 再按页码/章节分段提取或关键词检索，避免一次性输出过多文本导致截断。",
+            "请优先使用内置 read_document 工具解析读取（原生支持 PDF / DOCX / DOC / PPTX，无需临时 Python 脚本）：",
+            "1. 先调用 read_document(path, mode='outline') 查看总页数、标题大纲或幻灯片列表；",
+            "2. 再调用 read_document(path, mode='read', startPage=..., endPage=...) 分页提取，或用 mode='search' 检索关键段落。",
           ].join("\n");
         } else if (ARCHIVE_EXTS.has(ext)) {
           guide = "该文件为压缩归档包，已完整保存在上述本地绝对路径。如需查看内容，可通过 run_command 执行 unzip -l / tar -tzf 先查看文件列表，再按需解压到临时目录读取。";
@@ -936,10 +945,15 @@ module.exports = {
   getContextCompactor,
   getModelErrorService,
   getWorkspaceRefreshService,
+  getDocumentService,
+  getAutomationService,
+  getWebhookService,
+  getCronParser,
   initWorkspaceRefreshBridge,
   activeStreamSnapshotFlushers,
   activeStreamSessions,
   pendingPermissions,
+  pendingQuestions,
   PERMISSION_TIMEOUT_MS,
   setMainWindow,
   getMainWindow,

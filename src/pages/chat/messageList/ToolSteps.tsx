@@ -59,6 +59,29 @@ export function getToolStepSummary(tool: string, args: any) {
         icon: FileCode,
         category: 'read' as const,
       };
+    case 'read_document':
+      return {
+        title: `解析文档 ${getBaseName(args.path) || '文件'}`,
+        subtitle:
+          args.mode === 'outline'
+            ? `${args.path || ''} (查看大纲结构)`
+            : args.mode === 'search'
+              ? `${args.path || ''} · 检索 "${args.query || ''}"`
+              : args.sheet
+                ? `${args.path || ''} · Sheet [${args.sheet}]`
+                : args.startPage
+                  ? `${args.path || ''} (第 ${args.startPage}~${args.endPage || args.startPage} 页)`
+                  : args.path || '',
+        icon: FileCode,
+        category: 'read' as const,
+      };
+    case 'generate_document':
+      return {
+        title: `生成文档 ${getBaseName(args.path) || '交付物'}`,
+        subtitle: args.title ? `${args.path || ''} · ${args.title}` : args.path || '',
+        icon: Edit3,
+        category: 'edit' as const,
+      };
     case 'edit_file':
       return {
         title: `修改 ${getBaseName(args.path) || '文件'}`,
@@ -107,6 +130,20 @@ export function getToolStepSummary(tool: string, args: any) {
         subtitle: args.url ? String(args.url).replace(/^https?:\/\//, '').slice(0, 60) : '',
         icon: Globe,
         category: 'search' as const,
+      };
+    case 'ask_user_question':
+      return {
+        title: `向你确认信息`,
+        subtitle: args.title || (Array.isArray(args.questions) ? args.questions[0]?.question : '') || '',
+        icon: Sparkles,
+        category: 'other' as const,
+      };
+    case 'spec_write':
+      return {
+        title: `生成规格文档`,
+        subtitle: args.title || '',
+        icon: FileCode,
+        category: 'edit' as const,
       };
     default: {
       if (tool.startsWith('mcp__')) {

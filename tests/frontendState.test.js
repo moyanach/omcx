@@ -183,3 +183,44 @@ test("chatStore serviceSlice handleWorkspaceChanged 按区域精确递增版本�
   assert.equal(mcpCalls >= 1, true);
 });
 
+test("chatStore setAgentMode 全局与当前会话联动，新会话继承 defaultAgentMode，questionBySession 正确维护", async () => {
+  const useChatStore = loadChatStoreInTestEnv();
+  let lastSavedMode = null;
+  let lastConfigSaved = null;
+  window.electronAPI.dbUpdateSessionAgentMode = async (id, agentMode) => {
+    lastSavedMode = { id, agentMode };
+    return { success: true };
+  };
+  window.electronAPI.setConfig = async (k, v) => {
+    lastConfigSaved = { k, v };
+  };
+
+  useChatStore.setState({
+    sessions: [{ id: "s1", title: "S1", updatedAt: 1, agentMode: "code" }],
+    activeSessionId: "s1",
+    defaultAgentMode: "code",
+  });
+
+  await useChatStore.getState().setAgentMode("work");
+  assert.equal(useChatStore.getState().defaultAgentMode, "work");
+  assert.equal(useChatStore.getState().sessions.find((s) => s.id === "s1")?.agentMode, "work");
+  assert.deepEqual(lastSavedMode, { id: "s1", agentMode: "work" });
+  assert.deepEqual(lastConfigSaved, { k: "default_agent_mode", v: "work" });
+
+  // 新建会话继承当前全局 defaultAgentMode
+  const createdId = await useChatStore.getState().addSession({ workDir: "/tmp/work-dir" });
+  assert.ok(createdId);
+  assert.equal(useChatStore.getState().sessions.find((s) => s.id === createdId)?.agentMode, "work");
+
+  // 交互式提问状态写入与清理
+  useChatStore.getState().setSessionQuestion(createdId, {
+    id: "q_1",
+    title: "确认",
+    questions: [{ id: "f1", question: "选哪个？", type: "single", options: [{ label: "A" }] }],
+  });
+  assert.equal(useChatStore.getState().questionBySession[createdId]?.id, "q_1");
+  useChatStore.getState().setSessionQuestion(createdId, null);
+  assert.equal(useChatStore.getState().questionBySession[createdId], null);
+});
+
+

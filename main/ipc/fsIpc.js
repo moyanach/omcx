@@ -3,7 +3,7 @@ const fs = require("fs");
 const fsp = fs.promises;
 const os = require("os");
 const crypto = require("crypto");
-const { ipcMain, dialog, shell } = require("electron");
+const { ipcMain, dialog, shell, BrowserWindow } = require("electron");
 const {
   safeHandler,
   asyncPathExists,
@@ -21,6 +21,7 @@ const {
   getFileIndexer,
   getToolRegistry,
   getWorkspaceRefreshService,
+  getDocumentService,
 } = require("../shared");
 
 const DIRECT_READONLY_TOOLS = new Set([
@@ -554,6 +555,187 @@ function registerFsIpc() {
         });
       }
       return revertResult;
+    })
+  );
+
+  async function resolveReadableWorkOrOutputPath(workDir, filePath) {
+    if (!filePath || typeof filePath !== "string") {
+      return { ok: false, error: "缺少文件路径" };
+    }
+    const { DEFAULT_ROOT } = getPathResolver();
+    const { checkSensitivePath, resolveRealPathSafe, isUnderFolderReal } = getSandboxPolicyService();
+    const storageService = getStorageService();
+
+    const baseRoot = workDir && String(workDir).trim() ? path.resolve(workDir.trim()) : DEFAULT_ROOT;
+    const { allowedFolders } = getWorkspaceFolders(baseRoot);
+    const validFolders = allowedFolders.length > 0 ? allowedFolders : [baseRoot];
+
+    let targetAbs = path.isAbsolute(filePath)
+      ? path.resolve(filePath)
+      : path.resolve(baseRoot, filePath);
+    if (!(await asyncPathExists(targetAbs))) {
+      for (const folder of validFolders) {
+        const candidate = path.resolve(folder, filePath);
+        if (await asyncPathExists(candidate)) {
+          targetAbs = candidate;
+          break;
+        }
+      }
+    }
+
+    if (!(await asyncPathExists(targetAbs))) {
+      return { ok: false, error: `文件不存在: ${filePath}` };
+    }
+
+    const checkTarget = resolveRealPathSafe(targetAbs) || targetAbs;
+    const inWorkspace = validFolders.some((root) => isUnderFolderReal(checkTarget, root));
+    const inOutputs = isKnownSessionOutputPath(checkTarget);
+    const inAttachments = storageService.isSessionAttachmentPath(checkTarget);
+    if ((!inWorkspace && !inOutputs && !inAttachments) || checkSensitivePath(checkTarget).blocked) {
+      return { ok: false, error: `安全策略已拒绝访问受保护路径: ${filePath}` };
+    }
+    return { ok: true, targetAbs };
+  }
+
+  async function renderHtmlToPdfBuffer({ htmlContent, loadUrl }) {
+    const win = new BrowserWindow({
+      show: false,
+      width: 1024,
+      height: 768,
+      webPreferences: {
+        sandbox: true,
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+    });
+    let tmpHtmlPath = null;
+    try {
+      if (loadUrl) {
+        await win.loadURL(loadUrl);
+      } else {
+        tmpHtmlPath = path.join(
+          os.tmpdir(),
+          `omcx-pdf-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.html`
+        );
+        await fsp.writeFile(tmpHtmlPath, htmlContent, "utf-8");
+        await win.loadFile(tmpHtmlPath);
+      }
+      await new Promise((r) => setTimeout(r, 180));
+      return await win.webContents.printToPDF({
+        printBackground: true,
+        pageSize: "A4",
+        margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 },
+      });
+    } finally {
+      if (!win.isDestroyed()) win.destroy();
+      if (tmpHtmlPath) {
+        await fsp.unlink(tmpHtmlPath).catch(() => {});
+      }
+    }
+  }
+
+  ipcMain.handle(
+    "preview-workspace-document",
+    safeHandler(async (event, { workDir, filePath } = {}) => {
+      const resolved = await resolveReadableWorkOrOutputPath(workDir, filePath);
+      if (!resolved.ok) {
+        return { success: false, error: resolved.error };
+      }
+      const preview = await getDocumentService().previewDocumentForWorkbench(resolved.targetAbs);
+      return {
+        success: true,
+        absPath: resolved.targetAbs,
+        preview,
+      };
+    })
+  );
+
+  ipcMain.handle(
+    "export-file-output",
+    safeHandler(async (event, { workDir, filePath, format = "original" } = {}) => {
+      const resolved = await resolveReadableWorkOrOutputPath(workDir, filePath);
+      if (!resolved.ok) {
+        return { success: false, error: resolved.error };
+      }
+      const targetAbs = resolved.targetAbs;
+
+      const ext = path.extname(targetAbs).toLowerCase();
+      const baseName = path.basename(targetAbs, ext);
+      const isMarkdown = ext === ".md" || ext === ".markdown";
+      const isHtml = ext === ".html" || ext === ".htm";
+
+      if (format === "html" && isMarkdown) {
+        const mdContent = await fsp.readFile(targetAbs, "utf-8");
+        const { buildStandaloneMarkdownHtml } = require("../../utils/markdownHtmlExporter");
+        const htmlContent = buildStandaloneMarkdownHtml(mdContent, { title: baseName });
+        const result = await dialog.showSaveDialog(getMainWindow(), {
+          title: "导出排版 HTML 文档（可在浏览器中打印为 PDF）",
+          defaultPath: path.join(os.homedir(), "Desktop", `${baseName}.html`),
+          filters: [{ name: "HTML 文档 (可打印为 PDF)", extensions: ["html"] }],
+        });
+        if (result.canceled || !result.filePath) {
+          return { success: false, canceled: true };
+        }
+        await fsp.writeFile(result.filePath, htmlContent, "utf-8");
+        return { success: true, savedPath: result.filePath };
+      }
+
+      if (format === "pdf") {
+        const result = await dialog.showSaveDialog(getMainWindow(), {
+          title: "导出 PDF 文档",
+          defaultPath: path.join(os.homedir(), "Desktop", `${baseName}.pdf`),
+          filters: [{ name: "PDF 文档", extensions: ["pdf"] }],
+        });
+        if (result.canceled || !result.filePath) {
+          return { success: false, canceled: true };
+        }
+
+        if (ext === ".pdf") {
+          await fsp.copyFile(targetAbs, result.filePath);
+          return { success: true, savedPath: result.filePath };
+        }
+
+        let pdfBuf;
+        if (isMarkdown) {
+          const mdContent = await fsp.readFile(targetAbs, "utf-8");
+          const { buildStandaloneMarkdownHtml } = require("../../utils/markdownHtmlExporter");
+          const htmlContent = buildStandaloneMarkdownHtml(mdContent, { title: baseName });
+          pdfBuf = await renderHtmlToPdfBuffer({ htmlContent });
+        } else if (isHtml) {
+          const localUrl = `local-media://local${encodeURI(targetAbs)}?render=1`;
+          pdfBuf = await renderHtmlToPdfBuffer({ loadUrl: localUrl });
+        } else if (ext === ".docx") {
+          const docPreview = await getDocumentService().previewDocumentForWorkbench(targetAbs);
+          const safeTitle = baseName.replace(/[<>&"]/g, "");
+          const htmlContent = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8" /><title>${safeTitle}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.7;color:#111827;max-width:780px;margin:24px auto;padding:0 16px;font-size:14px}h1,h2,h3{color:#0f172a;margin-top:1.3em}table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #cbd5e1;padding:6px 10px;text-align:left}th{background:#f1f5f9}</style></head><body>${docPreview?.html || ""}</body></html>`;
+          pdfBuf = await renderHtmlToPdfBuffer({ htmlContent });
+        } else {
+          const rawText = await fsp.readFile(targetAbs, "utf-8");
+          const escaped = rawText
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+          const htmlContent = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8" /><style>body{font-family:"SF Mono",Menlo,Consolas,"PingFang SC",monospace;font-size:12px;line-height:1.6;color:#111827;white-space:pre-wrap;word-break:break-word;margin:20px;}</style></head><body>${escaped}</body></html>`;
+          pdfBuf = await renderHtmlToPdfBuffer({ htmlContent });
+        }
+
+        await fsp.writeFile(result.filePath, pdfBuf);
+        return { success: true, savedPath: result.filePath };
+      }
+
+      const cleanExt = ext.replace(/^\./, "");
+      const result = await dialog.showSaveDialog(getMainWindow(), {
+        title: "另存为文件",
+        defaultPath: path.join(os.homedir(), "Desktop", path.basename(targetAbs)),
+        filters: cleanExt
+          ? [{ name: `${cleanExt.toUpperCase()} 文件`, extensions: [cleanExt] }]
+          : undefined,
+      });
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true };
+      }
+      await fsp.copyFile(targetAbs, result.filePath);
+      return { success: true, savedPath: result.filePath };
     })
   );
 

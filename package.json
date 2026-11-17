@@ -18,10 +18,18 @@
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper node_modules/node-pty/prebuilds/darwin-x64/spawn-helper 2>/dev/null || true"
   },
   "dependencies": {
+    "@xmldom/xmldom": "^0.9.12",
     "better-sqlite3": "^9.6.0",
     "cheerio": "^1.2.0",
+    "docx": "^9.15.4",
     "electron-updater": "^6.8.11",
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.2",
+    "mammoth": "^1.13.0",
     "node-pty": "^1.1.0",
+    "pdf-parse": "^1.1.1",
+    "pptxgenjs": "^4.0.1",
+    "word-extractor": "^1.0.4",
     "zod": "^3.25.76"
   },
   "devDependencies": {

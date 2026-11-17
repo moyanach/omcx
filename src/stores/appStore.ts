@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 export type View = "chat" | "settings";
-export type NavTab = "sessions" | "tools" | "workspaces" | "settings";
+export type NavTab = "sessions" | "automations" | "tools" | "workspaces" | "settings";
 export type ThemeMode = "light" | "dark" | "system";
 
 const LEFT_SIDEBAR_WIDTH_KEY = "omcx.left_sidebar_width";
@@ -83,6 +83,14 @@ interface AppState {
   /** 右侧监控面板拖拽宽度（持久化到 localStorage） */
   inspectorWidth: number;
   setInspectorWidth: (width: number) => void;
+  /** 跨视图跳转至工具中心的意图（如自动切换 MCP 标签并打开添加向导） */
+  toolsIntent: { tab?: "skills" | "subagents" | "mcp"; openConnectorWizard?: boolean } | null;
+  setToolsIntent: (
+    intent: { tab?: "skills" | "subagents" | "mcp"; openConnectorWizard?: boolean } | null
+  ) => void;
+  /** 定时任务收件箱未读结果数量 */
+  unreadAutomationRuns: number;
+  setUnreadAutomationRuns: (count: number) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -135,4 +143,8 @@ export const useAppStore = create<AppState>((set) => ({
       window.localStorage.setItem(INSPECTOR_WIDTH_KEY, String(next));
     } catch {}
   },
+  toolsIntent: null,
+  setToolsIntent: (intent) => set({ toolsIntent: intent }),
+  unreadAutomationRuns: 0,
+  setUnreadAutomationRuns: (count) => set({ unreadAutomationRuns: Math.max(0, Number(count) || 0) }),
 }));

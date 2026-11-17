@@ -11,6 +11,7 @@ import SettingsModal from '@/components/settings/SettingsModal';
 const ToolsView = lazy(() => import('@/pages/ToolsView'));
 const WorkspacesView = lazy(() => import('@/pages/WorkspacesView'));
 const SettingsView = lazy(() => import('@/pages/SettingsView'));
+const AutomationsView = lazy(() => import('@/pages/AutomationsView'));
 
 const ViewFallback: React.FC = () => (
   <div className='flex-1 h-full flex items-center justify-center text-xs text-[var(--ui-text-muted)] gap-2'>
@@ -23,6 +24,12 @@ const MainContent: React.FC = () => {
   const activeNavTab = useAppStore((s) => s.activeNavTab);
 
   switch (activeNavTab) {
+    case 'automations':
+      return (
+        <Suspense fallback={<ViewFallback />}>
+          <AutomationsView />
+        </Suspense>
+      );
     case 'tools':
       return (
         <Suspense fallback={<ViewFallback />}>
@@ -77,6 +84,24 @@ const Layout: React.FC = () => {
     if (!window.electronAPI?.watchWorkspace) return;
     void window.electronAPI.watchWorkspace(activeWorkDir || null).catch(() => {});
   }, [activeWorkDir, activeWorkspaceFoldersKey]);
+
+  useEffect(() => {
+    const syncUnread = async () => {
+      try {
+        const res = await window.electronAPI?.listAutomations?.();
+        if (typeof res?.unreadCount === 'number') {
+          useAppStore.getState().setUnreadAutomationRuns(res.unreadCount);
+        }
+      } catch {}
+    };
+    void syncUnread();
+    const unsub = window.electronAPI?.onAutomationUpdated?.(() => {
+      void syncUnread();
+    });
+    return () => {
+      unsub?.();
+    };
+  }, []);
 
   return (
     <div className='flex h-full w-full overflow-hidden bg-[var(--ui-app-bg)]'>

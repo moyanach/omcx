@@ -84,6 +84,8 @@ function initDb() {
       work_dir TEXT,
       permission_mode TEXT,
       reasoning_effort TEXT,
+      agent_mode TEXT DEFAULT 'code',
+      session_type TEXT DEFAULT 'chat',
       archived INTEGER DEFAULT 0,
       created_at INTEGER,
       updated_at INTEGER
@@ -121,6 +123,47 @@ function initDb() {
       created_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_outputs_session ON session_outputs(session_id, created_at ASC);
+
+    CREATE TABLE IF NOT EXISTS automations (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      enabled INTEGER DEFAULT 1,
+      schedule_type TEXT NOT NULL DEFAULT 'interval',
+      interval_minutes INTEGER DEFAULT 60,
+      cron_expr TEXT,
+      prompt TEXT NOT NULL,
+      work_dir TEXT,
+      agent_mode TEXT DEFAULT 'work',
+      permission_mode TEXT DEFAULT 'auto-sandbox',
+      model TEXT,
+      webhook_target_id TEXT,
+      notify_on TEXT DEFAULT 'always',
+      next_run_at INTEGER,
+      last_run_at INTEGER,
+      last_status TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS automation_runs (
+      id TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL,
+      automation_name TEXT NOT NULL,
+      trigger_source TEXT NOT NULL DEFAULT 'schedule',
+      status TEXT NOT NULL DEFAULT 'running',
+      triage_state TEXT NOT NULL DEFAULT 'unread',
+      session_id TEXT,
+      summary TEXT,
+      error TEXT,
+      outputs_json TEXT,
+      cost_usd REAL DEFAULT 0,
+      duration_ms INTEGER DEFAULT 0,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_automation_runs_started ON automation_runs(started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_automation_runs_aid ON automation_runs(automation_id, started_at DESC);
   `);
 
   // 保证历史 messages 表升级增加 reasoning_chars 列
@@ -131,6 +174,19 @@ function initDb() {
     }
   } catch (e) {
     console.warn("[dbWorker] 检查 messages 表列失败:", e.message);
+  }
+
+  // 保证历史 sessions 表升级增加 agent_mode / session_type 列
+  try {
+    const sessionCols = db.pragma("table_info(sessions)");
+    if (!sessionCols.some((c) => c.name === "agent_mode")) {
+      db.exec("ALTER TABLE sessions ADD COLUMN agent_mode TEXT DEFAULT 'code';");
+    }
+    if (!sessionCols.some((c) => c.name === "session_type")) {
+      db.exec("ALTER TABLE sessions ADD COLUMN session_type TEXT DEFAULT 'chat';");
+    }
+  } catch (e) {
+    console.warn("[dbWorker] 检查 sessions 表列失败:", e.message);
   }
 
   statements = {
@@ -144,8 +200,8 @@ function initDb() {
     getSessions: db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC"),
     getSession: db.prepare("SELECT * FROM sessions WHERE id = ?"),
     upsertSession: db.prepare(`
-      INSERT INTO sessions (id, title, title_source, model, workspace_id, work_dir, permission_mode, reasoning_effort, archived, created_at, updated_at)
-      VALUES (@id, @title, @title_source, @model, @workspace_id, @work_dir, @permission_mode, @reasoning_effort, @archived, @created_at, @updated_at)
+      INSERT INTO sessions (id, title, title_source, model, workspace_id, work_dir, permission_mode, reasoning_effort, agent_mode, session_type, archived, created_at, updated_at)
+      VALUES (@id, @title, @title_source, @model, @workspace_id, @work_dir, @permission_mode, @reasoning_effort, @agent_mode, @session_type, @archived, @created_at, @updated_at)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         title_source = excluded.title_source,
@@ -154,6 +210,8 @@ function initDb() {
         work_dir = excluded.work_dir,
         permission_mode = excluded.permission_mode,
         reasoning_effort = excluded.reasoning_effort,
+        agent_mode = excluded.agent_mode,
+        session_type = excluded.session_type,
         archived = excluded.archived,
         updated_at = excluded.updated_at
     `),
@@ -197,7 +255,7 @@ function initDb() {
     searchSessionTitles: db.prepare(`
       SELECT id AS session_id, title, updated_at
       FROM sessions
-      WHERE title LIKE ? ESCAPE '\\'
+      WHERE (session_type IS NULL OR session_type != 'automation') AND title LIKE ? ESCAPE '\\'
       ORDER BY updated_at DESC
       LIMIT ?
     `),
@@ -205,10 +263,70 @@ function initDb() {
       SELECT m.session_id, s.title, s.updated_at, m.content, m.role, m.created_at
       FROM messages m
       INNER JOIN sessions s ON s.id = m.session_id
-      WHERE m.content LIKE ? ESCAPE '\\'
+      WHERE (s.session_type IS NULL OR s.session_type != 'automation') AND m.content LIKE ? ESCAPE '\\'
       ORDER BY m.created_at DESC
       LIMIT ?
     `),
+
+    getAutomations: db.prepare("SELECT * FROM automations ORDER BY updated_at DESC"),
+    upsertAutomation: db.prepare(`
+      INSERT INTO automations (
+        id, name, description, enabled, schedule_type, interval_minutes, cron_expr,
+        prompt, work_dir, agent_mode, permission_mode, model, webhook_target_id,
+        notify_on, next_run_at, last_run_at, last_status, created_at, updated_at
+      )
+      VALUES (
+        @id, @name, @description, @enabled, @schedule_type, @interval_minutes, @cron_expr,
+        @prompt, @work_dir, @agent_mode, @permission_mode, @model, @webhook_target_id,
+        @notify_on, @next_run_at, @last_run_at, @last_status, @created_at, @updated_at
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        description = excluded.description,
+        enabled = excluded.enabled,
+        schedule_type = excluded.schedule_type,
+        interval_minutes = excluded.interval_minutes,
+        cron_expr = excluded.cron_expr,
+        prompt = excluded.prompt,
+        work_dir = excluded.work_dir,
+        agent_mode = excluded.agent_mode,
+        permission_mode = excluded.permission_mode,
+        model = excluded.model,
+        webhook_target_id = excluded.webhook_target_id,
+        notify_on = excluded.notify_on,
+        next_run_at = excluded.next_run_at,
+        last_run_at = excluded.last_run_at,
+        last_status = excluded.last_status,
+        updated_at = excluded.updated_at
+    `),
+    deleteAutomation: db.prepare("DELETE FROM automations WHERE id = ?"),
+
+    getAutomationRuns: db.prepare("SELECT * FROM automation_runs ORDER BY started_at DESC LIMIT ?"),
+    upsertAutomationRun: db.prepare(`
+      INSERT INTO automation_runs (
+        id, automation_id, automation_name, trigger_source, status, triage_state,
+        session_id, summary, error, outputs_json, cost_usd, duration_ms, started_at, finished_at
+      )
+      VALUES (
+        @id, @automation_id, @automation_name, @trigger_source, @status, @triage_state,
+        @session_id, @summary, @error, @outputs_json, @cost_usd, @duration_ms, @started_at, @finished_at
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        automation_name = excluded.automation_name,
+        status = excluded.status,
+        triage_state = excluded.triage_state,
+        session_id = excluded.session_id,
+        summary = excluded.summary,
+        error = excluded.error,
+        outputs_json = excluded.outputs_json,
+        cost_usd = excluded.cost_usd,
+        duration_ms = excluded.duration_ms,
+        finished_at = excluded.finished_at
+    `),
+    updateAutomationRunTriage: db.prepare("UPDATE automation_runs SET triage_state = ? WHERE id = ?"),
+    markAllAutomationRunsRead: db.prepare("UPDATE automation_runs SET triage_state = 'read' WHERE triage_state = 'unread'"),
+    deleteAutomationRun: db.prepare("DELETE FROM automation_runs WHERE id = ?"),
+    deleteAutomationRunsByRule: db.prepare("DELETE FROM automation_runs WHERE automation_id = ?"),
   };
 }
 
@@ -245,12 +363,20 @@ parentPort.on("message", (msg) => {
           work_dir: r.work_dir || null,
           permission_mode: r.permission_mode || "auto-sandbox",
           reasoning_effort: r.reasoning_effort || "medium",
+          agent_mode: r.agent_mode === "work" ? "work" : "code",
+          session_type: r.session_type === "automation" ? "automation" : "chat",
           archived: Boolean(r.archived),
           created_at: r.created_at,
           updated_at: r.updated_at,
         }));
+        const automations = statements.getAutomations.all();
+        const automationRuns = statements.getAutomationRuns.all(300);
 
-        parentPort.postMessage({ id, success: true, result: { configs, sessions } });
+        parentPort.postMessage({
+          id,
+          success: true,
+          result: { configs, sessions, automations, automationRuns },
+        });
         break;
       }
 
@@ -263,7 +389,14 @@ parentPort.on("message", (msg) => {
       }
 
       case "UPSERT_SESSION": {
-        statements.upsertSession.run(payload);
+        const record = {
+          agent_mode: "code",
+          session_type: "chat",
+          ...payload,
+          agent_mode: payload?.agent_mode === "work" ? "work" : "code",
+          session_type: payload?.session_type === "automation" ? "automation" : "chat",
+        };
+        statements.upsertSession.run(record);
         parentPort.postMessage({ id, success: true });
         break;
       }
@@ -392,6 +525,61 @@ parentPort.on("message", (msg) => {
           .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
           .slice(0, limit);
         parentPort.postMessage({ id, success: true, result: sorted });
+        break;
+      }
+
+      case "GET_AUTOMATIONS": {
+        const rows = statements.getAutomations.all();
+        parentPort.postMessage({ id, success: true, result: rows });
+        break;
+      }
+
+      case "UPSERT_AUTOMATION": {
+        statements.upsertAutomation.run(payload);
+        parentPort.postMessage({ id, success: true });
+        break;
+      }
+
+      case "DELETE_AUTOMATION": {
+        const aid = typeof payload === "string" ? payload : payload?.id || "";
+        const delTx = db.transaction(() => {
+          statements.deleteAutomation.run(aid);
+          statements.deleteAutomationRunsByRule.run(aid);
+        });
+        delTx();
+        parentPort.postMessage({ id, success: true });
+        break;
+      }
+
+      case "GET_AUTOMATION_RUNS": {
+        const limit = Math.max(1, Math.min(1000, Number(payload?.limit) || 300));
+        const rows = statements.getAutomationRuns.all(limit);
+        parentPort.postMessage({ id, success: true, result: rows });
+        break;
+      }
+
+      case "UPSERT_AUTOMATION_RUN": {
+        statements.upsertAutomationRun.run(payload);
+        parentPort.postMessage({ id, success: true });
+        break;
+      }
+
+      case "UPDATE_AUTOMATION_RUN_TRIAGE": {
+        statements.updateAutomationRunTriage.run(payload?.triage_state || "read", payload?.id || "");
+        parentPort.postMessage({ id, success: true });
+        break;
+      }
+
+      case "MARK_ALL_AUTOMATION_RUNS_READ": {
+        statements.markAllAutomationRunsRead.run();
+        parentPort.postMessage({ id, success: true });
+        break;
+      }
+
+      case "DELETE_AUTOMATION_RUN": {
+        const runId = typeof payload === "string" ? payload : payload?.id || "";
+        statements.deleteAutomationRun.run(runId);
+        parentPort.postMessage({ id, success: true });
         break;
       }
 

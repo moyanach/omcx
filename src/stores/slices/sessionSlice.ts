@@ -6,6 +6,7 @@ import type {
   LlmModelItem,
   PermissionMode,
   ReasoningEffort,
+  AgentMode,
   Message,
 } from "../chatStore";
 
@@ -51,6 +52,7 @@ export interface SessionSlice {
   workspaces: WorkspaceItem[];
   models: LlmModelItem[];
   defaultPermissionMode: PermissionMode;
+  defaultAgentMode: AgentMode;
   isWorkspaceModalOpen: boolean;
   activeEditingWorkspace: WorkspaceItem | null;
 
@@ -75,7 +77,9 @@ export interface SessionSlice {
   setSessionWorkDir: (id: string, workDir: string | null) => Promise<void>;
   setSessionReasoningEffort: (id: string, effort: ReasoningEffort) => Promise<void>;
   setSessionPermissionMode: (sessionId: string, mode: PermissionMode) => Promise<void>;
+  setAgentMode: (mode: AgentMode, sessionId?: string | null) => Promise<void>;
   updateSessionModel: (sessionId: string, model: string) => Promise<void>;
+  promoteAutomationSession: (rawSession: any) => Promise<void>;
 }
 
 export const createSessionSlice: StateCreator<
@@ -90,6 +94,7 @@ export const createSessionSlice: StateCreator<
   workspaces: [],
   models: [],
   defaultPermissionMode: "auto-sandbox",
+  defaultAgentMode: "code",
   isWorkspaceModalOpen: false,
   activeEditingWorkspace: null,
 
@@ -283,7 +288,10 @@ export const createSessionSlice: StateCreator<
       const initialMessages: Record<string, Message[]> = {};
 
       if (dbSessions.length > 0) {
-        activeId = dbSessions[0].id;
+        const firstChatSession =
+          dbSessions.find((s: any) => s.session_type !== "automation" && s.sessionType !== "automation") ||
+          dbSessions[0];
+        activeId = firstChatSession.id;
         const dbMsgs = await window.electronAPI.dbGetMessages(activeId);
         initialMessages[activeId] = dbMsgs.map((m: any) => {
           let parsedMeta = null;
@@ -309,13 +317,14 @@ export const createSessionSlice: StateCreator<
         const initialModel = usableFallback?.id || chatModels[0]?.id || "";
 
         const newId = crypto.randomUUID();
-        const defaultSession = {
+        const newSession = {
           id: newId,
           title: "新的 Agent 会话",
           updatedAt: Date.now(),
           model: initialModel,
+          agent_mode: get().defaultAgentMode || "code",
         };
-        await window.electronAPI.dbAddSession(defaultSession);
+        await window.electronAPI.dbAddSession(newSession);
 
         const welcomeMsg = {
           id: "m1",
@@ -332,7 +341,7 @@ export const createSessionSlice: StateCreator<
           metadata: null,
         });
 
-        dbSessions.push(defaultSession);
+        dbSessions.push(newSession);
         activeId = newId;
         initialMessages[newId] = [welcomeMsg];
       }
@@ -356,6 +365,9 @@ export const createSessionSlice: StateCreator<
           workDir: s.work_dir || s.workDir || undefined,
           permissionMode: (s.permission_mode || s.permissionMode || "auto-sandbox") as PermissionMode,
           reasoningEffort: (s.reasoning_effort || s.reasoningEffort || "medium") as ReasoningEffort,
+          agentMode: ((s.agent_mode || s.agentMode) === "work" ? "work" : "code") as AgentMode,
+          sessionType:
+            (s.session_type || s.sessionType) === "automation" ? "automation" : "chat",
           archived: !!s.archived,
         })),
         activeSessionId: activeId,
@@ -411,6 +423,12 @@ export const createSessionSlice: StateCreator<
           ) {
             set({ defaultPermissionMode: savedPermMode });
           }
+          const savedAgentMode = await window.electronAPI.getConfig("default_agent_mode");
+          if (savedAgentMode === "work" || savedAgentMode === "code") {
+            set({ defaultAgentMode: savedAgentMode });
+          } else if (activeSession?.agent_mode === "work" || activeSession?.agentMode === "work") {
+            set({ defaultAgentMode: "work" });
+          }
           const savedAutoOpen = await window.electronAPI.getConfig("auto_open_html_outputs");
           if (savedAutoOpen === "false") {
             set({ autoOpenHtmlOutputs: false });
@@ -454,6 +472,8 @@ export const createSessionSlice: StateCreator<
       workDir: targetWorkDir || undefined,
       permissionMode: get().defaultPermissionMode || "auto-sandbox",
       reasoningEffort: "medium",
+      agentMode: get().defaultAgentMode || "code",
+      sessionType: "chat",
     };
 
     try {
@@ -462,6 +482,7 @@ export const createSessionSlice: StateCreator<
         workspace_id: newSession.workspaceId,
         work_dir: newSession.workDir,
         reasoning_effort: newSession.reasoningEffort,
+        agent_mode: newSession.agentMode,
       });
 
       set((state) => ({
@@ -525,6 +546,7 @@ export const createSessionSlice: StateCreator<
         get().defaultPermissionMode ||
         "auto-sandbox",
       reasoningEffort: workspaceSessions[0]?.reasoningEffort || "medium",
+      agentMode: get().defaultAgentMode || "code",
     };
 
     try {
@@ -533,6 +555,7 @@ export const createSessionSlice: StateCreator<
         workspace_id: newSession.workspaceId,
         work_dir: newSession.workDir,
         reasoning_effort: newSession.reasoningEffort,
+        agent_mode: newSession.agentMode,
       });
 
       set((state) => ({
@@ -684,6 +707,8 @@ export const createSessionSlice: StateCreator<
         delete nextWaiting[id];
         const nextPermissions = { ...state.permissionBySession };
         delete nextPermissions[id];
+        const nextQuestions = { ...state.questionBySession };
+        delete nextQuestions[id];
         const nextToolCalls = { ...state.toolCallsBySession };
         delete nextToolCalls[id];
         const nextTodos = { ...state.todosBySession };
@@ -706,6 +731,7 @@ export const createSessionSlice: StateCreator<
           generatingBySession: nextGenerating,
           waitingBySession: nextWaiting,
           permissionBySession: nextPermissions,
+          questionBySession: nextQuestions,
           toolCallsBySession: nextToolCalls,
           todosBySession: nextTodos,
           contextMetricsBySession: nextMetrics,
@@ -743,6 +769,7 @@ export const createSessionSlice: StateCreator<
         workDir: record.work_dir || undefined,
         permissionMode: record.permission_mode,
         reasoningEffort: record.reasoning_effort,
+        agentMode: ((record.agent_mode || record.agentMode) === "work" ? "work" : "code") as AgentMode,
         archived: Boolean(record.archived),
       };
 
@@ -918,6 +945,33 @@ export const createSessionSlice: StateCreator<
     }
   },
 
+  setAgentMode: async (mode, sessionId) => {
+    const normalized: AgentMode = mode === "work" ? "work" : "code";
+    const targetSessionId = sessionId !== undefined ? sessionId : get().activeSessionId;
+    set((state) => ({
+      defaultAgentMode: normalized,
+      sessions: targetSessionId
+        ? state.sessions.map((s) =>
+            s.id === targetSessionId ? { ...s, agentMode: normalized, updatedAt: Date.now() } : s
+          )
+        : state.sessions,
+    }));
+    if (targetSessionId && window.electronAPI?.dbUpdateSessionAgentMode) {
+      try {
+        await window.electronAPI.dbUpdateSessionAgentMode(targetSessionId, normalized);
+      } catch (err) {
+        console.error("更新会话工作模式失败:", err);
+      }
+    }
+    if (window.electronAPI?.setConfig) {
+      try {
+        await window.electronAPI.setConfig("default_agent_mode", normalized);
+      } catch (err) {
+        console.error("保存默认工作模式失败:", err);
+      }
+    }
+  },
+
   updateSessionModel: async (sessionId, model) => {
     set((state) => ({
       sessions: state.sessions.map((s) =>
@@ -939,5 +993,32 @@ export const createSessionSlice: StateCreator<
         console.error("更新模型持久化失败:", err);
       }
     }
+  },
+
+  promoteAutomationSession: async (rawSession) => {
+    if (!rawSession || !rawSession.id) return;
+    const mapped: Session = {
+      id: rawSession.id,
+      title: rawSession.title || "定时任务会话",
+      title_source: rawSession.title_source || "custom",
+      updatedAt: rawSession.updated_at || rawSession.updatedAt || Date.now(),
+      model: rawSession.model || "",
+      workspaceId: rawSession.workspace_id || rawSession.workspaceId || undefined,
+      workDir: rawSession.work_dir || rawSession.workDir || undefined,
+      permissionMode: (rawSession.permission_mode || rawSession.permissionMode || "auto-sandbox") as PermissionMode,
+      reasoningEffort: (rawSession.reasoning_effort || rawSession.reasoningEffort || "medium") as ReasoningEffort,
+      agentMode: ((rawSession.agent_mode || rawSession.agentMode) === "work" ? "work" : "code") as AgentMode,
+      sessionType: "chat",
+      archived: Boolean(rawSession.archived),
+    };
+    set((state) => {
+      const exists = state.sessions.some((s) => s.id === mapped.id);
+      return {
+        sessions: exists
+          ? state.sessions.map((s) => (s.id === mapped.id ? mapped : s))
+          : [mapped, ...state.sessions],
+      };
+    });
+    await get().setActiveSession(mapped.id);
   },
 });

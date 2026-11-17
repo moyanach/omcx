@@ -74,6 +74,29 @@ const BEHAVIOR_SECTION = `你是 OMCX，一名运行在桌面客户端中的专�
   - **读写冲突红线**: 并行探索/分析任务全部设为 \`readOnly: true\`；若并行派发写代码的子代理（\`general\` 或 \`readOnly: false\`），必须确保各子代理负责的文件路径完全不重叠，或先由并行只读子代理完成各模块分析，再由你汇总统一执行文件修改。
 - **支持动态角色生成**: 除了预设的 \`explore\` / \`planner\` / \`reviewer\` / \`general\`，你可以随时通过 \`role\` 参数动态定义符合当前领域的专项角色（如 \`role: "Electron IPC 安全审计员"\`）。`;
 
+const WORK_BEHAVIOR_SECTION = `你是 OMCX，一名运行在桌面客户端中的自主通用工作智能体（Work Agent）。你的目标是以高准确度、严谨的证据溯源和清晰的交付物，协助用户完成文档整理、数据分析、信息调研、方案撰写、文件归档及脚本辅助自动化等通用工作任务。
+
+# 一、 沟通原则与输出规范
+- **高效直达，结构清晰**: 直奔主题，避免空洞客套。优先采用结论先行、结构化标题、要点列表或 Markdown 表格呈现核心信息与交付成果。
+- **语言策略**: 默认使用中文进行分析与回复；原始数据、文件名、专业术语与命令参数保留原始表述。
+- **严谨溯源**: 引用本地文件或网页内容时，明确给出对应的文件名称、路径（如 \`reports/q3-summary.md\`）或来源链接，严禁凭空编造数据、引用或结论。
+- **严禁无意义表情**: 全程严禁使用 Emoji 表情符号，保持专业克制的桌面工作台体验。
+
+# 二、 真实性与先读后做 (Evidence First)
+- **先查后答，杜绝臆造**: 在总结文档、汇总表格或处理文件前，必须先用 \`list_directory\`、\`read_file\` 或 \`search_code\` 核查真实文件内容与目录结构。
+- **遇歧义主动提问**: 当需求存在多种可选方案、交付格式不明确（如报告粒度、表格列设计、整理规则）或需要用户做关键拍板时，优先调用 \`ask_user_question\` 工具给出清晰选项，由用户点选确认后再继续执行。
+- **如实反馈**: 工具调用、数据解析或外部检索遇到异常时，直接说明原因与影响范围，不掩盖缺陷。
+
+# 三、 交付物与工作区操作规范
+- **优先产出可交付成果**: 若任务适合形成书面沉淀（报告、清单、方案、汇总表、HTML 可视化卡片等），主动使用 \`write_file\` / \`edit_file\` 将最终成果整理为独立且格式良好的本地文件（如 \`.md\`、\`.csv\`、\`.html\`），方便用户在右侧产物与工作台中直接预览和导出。
+- **专用工具优先**: 检索和读写文件优先使用 \`list_directory\`、\`read_file\`、\`search_code\`、\`write_file\`、\`edit_file\`；涉及文档格式转换、数据清洗或批量整理等确需脚本辅助的操作时，可使用 \`run_command\` 完成（保持最小变更范围，不覆盖原始重要资料）。
+- **无依赖并行调用**: 批量阅读多份资料或并发检索多个主题时，在同一轮中并行发起工具调用。
+
+# 四、 任务规划与安全红线
+- **多步骤规划**: 面对多文件整理、长篇调研汇报或跨步骤任务，使用 \`todo_write\` 建立 3 至 6 项清晰进度并在每一步推进状态；简单问答不要调用 \`todo_write\`。
+- **危险动作事前确认**: 批量删除、覆盖重要原始文件或执行不可逆外部操作前，先征得用户确认。
+- **隐私与目录隔离**: 严格保护用户凭据与隐私数据；所有文件操作严格限定在用户选定的目标工作空间目录内。`;
+
 function truncate(text, maxChars, label = "") {
   if (!text) return "";
   if (text.length <= maxChars) return text;
@@ -196,8 +219,8 @@ function getGitSnapshot(workDir) {
   return value;
 }
 
-function buildBehaviorSection() {
-  return BEHAVIOR_SECTION;
+function buildBehaviorSection(agentMode = "code") {
+  return agentMode === "work" ? WORK_BEHAVIOR_SECTION : BEHAVIOR_SECTION;
 }
 
 function buildRulesSection(rules) {
@@ -353,9 +376,10 @@ function buildPermissionSandboxSection(permissionMode = "auto-sandbox") {
   return lines.join("\n");
 }
 
-function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode = "auto-sandbox" }) {
+function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode = "auto-sandbox", agentMode = "code" }) {
   const policy = getPermissionModePolicy(permissionMode);
   const lines = ["【环境信息】"];
+  lines.push(`- 工作模式: ${agentMode === "work" ? "通用工作 (work)" : "编程研发 (code)"}`);
   lines.push(`- 主工作目录: ${workDir || "未指定"}`);
 
   const extraFolders = matchedWorkspace?.folders
@@ -499,12 +523,19 @@ function buildSystemContext({
   model = "",
   enableTools = true,
   permissionMode = "auto-sandbox",
+  agentMode = "code",
   customSystemPrompt = "",
   gitInfo: providedGitInfo = undefined,
   includeTodosInSystem = false,
   includeGitInSystem = false,
 } = {}) {
-  const gitInfo = providedGitInfo !== undefined ? providedGitInfo : getGitSnapshot(workDir);
+  const normalizedMode = agentMode === "work" ? "work" : "code";
+  const gitInfo =
+    providedGitInfo !== undefined
+      ? providedGitInfo
+      : normalizedMode === "work"
+      ? null
+      : getGitSnapshot(workDir);
   const sections = [];
 
   const push = (name, content) => {
@@ -513,12 +544,14 @@ function buildSystemContext({
     sections.push({ name, content: text, chars: text.length, tokens: estimateTokens(text) });
   };
 
-  push("behavior", buildBehaviorSection());
+  push("behavior", buildBehaviorSection(normalizedMode));
   push("sandbox", buildPermissionSandboxSection(permissionMode));
   push("custom_prompt", buildCustomSystemPromptSection(customSystemPrompt));
   push("rules", buildRulesSection(projectRules));
-  push("repo_map", buildRepoMapSection(repoMap));
-  push("repo_wiki", buildRepoWikiSection(repoWiki, repoWikiPath));
+  if (normalizedMode !== "work") {
+    push("repo_map", buildRepoMapSection(repoMap));
+    push("repo_wiki", buildRepoWikiSection(repoWiki, repoWikiPath));
+  }
   push("skills", buildSkillsSection(skills));
   push("memory", buildMemorySection(memories, memoryIndex));
   if (includeTodosInSystem) {
@@ -529,9 +562,21 @@ function buildSystemContext({
     push("subagents", buildSubagentSection(workDir));
   }
   push("workspace", buildWorkspaceSection(matchedWorkspace, workDir));
-  push("worktree", buildWorktreeSection(workDir));
-  push("environment", buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode }));
-  if (includeGitInSystem) {
+  if (normalizedMode !== "work") {
+    push("worktree", buildWorktreeSection(workDir));
+  }
+  push(
+    "environment",
+    buildEnvironmentSection({
+      workDir,
+      matchedWorkspace,
+      gitInfo,
+      model,
+      permissionMode,
+      agentMode: normalizedMode,
+    })
+  );
+  if (includeGitInSystem && normalizedMode !== "work") {
     push("git", buildGitSection(gitInfo));
   }
 

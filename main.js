@@ -6,6 +6,7 @@ const {
   getStorageService,
   getUpdaterService,
   getWorkspaceRefreshService,
+  getAutomationService,
   initWorkspaceRefreshBridge,
   setMainWindow,
   getMainWindow,
@@ -24,6 +25,7 @@ const { registerMcpSkillsIpc } = require("./main/ipc/mcpSkillsIpc");
 const { registerGitIpc } = require("./main/ipc/gitIpc");
 const { registerFsIpc } = require("./main/ipc/fsIpc");
 const { registerTerminalBrowserIpc } = require("./main/ipc/terminalBrowserIpc");
+const { registerAutomationIpc } = require("./main/ipc/automationIpc");
 const { registerAgentRunner } = require("./main/agentRunner");
 
 // 全局未捕获异常与未处理 Rejection 兜底：记录堆栈、落盘中断快照并通知渲染进程
@@ -118,14 +120,23 @@ app.whenReady().then(() => {
   registerGitIpc();
   registerFsIpc();
   registerTerminalBrowserIpc();
+  registerAutomationIpc();
   registerAgentRunner();
 
   const win = createWindow();
   getUpdaterService().initAutoUpdater(win);
+  getAutomationService()
+    .initAutomationRuntime()
+    .catch((err) => {
+      console.warn("[main] 初始化定时任务调度器失败:", err?.message || err);
+    });
 });
 
 app.on("before-quit", () => {
   flushActiveRunsAndStorageOnExit();
+  try {
+    getLoadedModule(MODULES.automationService)?.shutdownAutomationRuntime?.();
+  } catch {}
   try {
     getLoadedModule(MODULES.workspaceRefreshService)?.unwatchAllWorkspaces?.();
   } catch {}

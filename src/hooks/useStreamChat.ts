@@ -224,6 +224,7 @@ export function useStreamChat() {
     clearSessionToolCalls,
     setSessionTodos,
     setSessionPermission,
+    setSessionQuestion,
     addMessage,
     appendMessageDelta,
     appendMessageReasoning,
@@ -244,6 +245,7 @@ export function useStreamChat() {
       clearSessionToolCalls: s.clearSessionToolCalls,
       setSessionTodos: s.setSessionTodos,
       setSessionPermission: s.setSessionPermission,
+      setSessionQuestion: s.setSessionQuestion,
       addMessage: s.addMessage,
       appendMessageDelta: s.appendMessageDelta,
       appendMessageReasoning: s.appendMessageReasoning,
@@ -278,6 +280,7 @@ export function useStreamChat() {
       clearSessionToolCalls(targetSessionId);
       setSessionTodos(targetSessionId, []);
       setSessionPermission(targetSessionId, null);
+      setSessionQuestion(targetSessionId, null);
       setSessionWaiting(targetSessionId, 0);
 
       const startTime = Date.now();
@@ -373,6 +376,8 @@ export function useStreamChat() {
       const currentWorkDir = currentSession?.workDir || null;
       const currentPermissionMode = currentSession?.permissionMode || "auto-sandbox";
       const currentReasoningEffort = currentSession?.reasoningEffort || "medium";
+      const currentAgentMode =
+        currentSession?.agentMode || useChatStore.getState().defaultAgentMode || "code";
 
       if (window.electronAPI?.streamChat) {
         window.electronAPI.streamChat(
@@ -387,6 +392,7 @@ export function useStreamChat() {
             flushBuffer();
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
+            setSessionQuestion(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
             setSessionWaiting(targetSessionId, 0);
             const durationMs = Date.now() - startTime;
@@ -465,6 +471,7 @@ export function useStreamChat() {
             appendMessageDelta(targetSessionId, assistantMsgId, errorContent);
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
+            setSessionQuestion(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
             setSessionWaiting(targetSessionId, 0);
             saveMessageToDb(targetSessionId, {
@@ -553,6 +560,17 @@ export function useStreamChat() {
             if (!data?.id || current.id === data.id) {
               setSessionPermission(targetSessionId, null);
             }
+          },
+          currentAgentMode,
+          (questionData: any) => {
+            setSessionQuestion(targetSessionId, questionData);
+          },
+          (data: any) => {
+            const current = useChatStore.getState().questionBySession?.[targetSessionId];
+            if (!current) return;
+            if (!data?.id || current.id === data.id) {
+              setSessionQuestion(targetSessionId, null);
+            }
           }
         );
       } else {
@@ -591,6 +609,7 @@ export function useStreamChat() {
       clearSessionToolCalls(targetSessionId);
       setSessionTodos(targetSessionId, []);
       setSessionPermission(targetSessionId, null);
+      setSessionQuestion(targetSessionId, null);
       setSessionWaiting(targetSessionId, 0);
 
       const startTime = Date.now();
@@ -676,6 +695,8 @@ export function useStreamChat() {
         const currentWorkDir = currentSession?.workDir || null;
         const currentPermissionMode = currentSession?.permissionMode || "auto-sandbox";
         const currentReasoningEffort = currentSession?.reasoningEffort || "medium";
+        const currentAgentMode =
+          currentSession?.agentMode || useChatStore.getState().defaultAgentMode || "code";
 
         window.electronAPI.streamChat(
           targetSessionId,
@@ -689,6 +710,7 @@ export function useStreamChat() {
             flushBuffer();
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
+            setSessionQuestion(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
             setSessionWaiting(targetSessionId, 0);
             const durationMs = Date.now() - startTime;
@@ -767,6 +789,7 @@ export function useStreamChat() {
             appendMessageDelta(targetSessionId, assistantMsgId, errorContent);
             setSessionGenerating(targetSessionId, false);
             setSessionPermission(targetSessionId, null);
+            setSessionQuestion(targetSessionId, null);
             setSessionStartTime(targetSessionId, null);
             setSessionWaiting(targetSessionId, 0);
             saveMessageToDb(targetSessionId, {
@@ -854,6 +877,17 @@ export function useStreamChat() {
             if (!data?.id || current.id === data.id) {
               setSessionPermission(targetSessionId, null);
             }
+          },
+          currentAgentMode,
+          (questionData: any) => {
+            setSessionQuestion(targetSessionId, questionData);
+          },
+          (data: any) => {
+            const current = useChatStore.getState().questionBySession?.[targetSessionId];
+            if (!current) return;
+            if (!data?.id || current.id === data.id) {
+              setSessionQuestion(targetSessionId, null);
+            }
           }
         );
       } catch (err) {
@@ -888,6 +922,7 @@ export function useStreamChat() {
     setSessionGenerating(activeSessionId, false);
     setSessionWaiting(activeSessionId, 0);
     setSessionPermission(activeSessionId, null);
+    setSessionQuestion(activeSessionId, null);
     if (window.electronAPI?.cancelChat) {
       window.electronAPI.cancelChat(activeSessionId);
     }

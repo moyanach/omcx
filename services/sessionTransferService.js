@@ -68,6 +68,7 @@ function forkSession(sessionId, options = {}) {
     work_dir: session.work_dir,
     permission_mode: session.permission_mode,
     reasoning_effort: session.reasoning_effort,
+    agent_mode: session.agent_mode === "work" ? "work" : "code",
     created_at: now,
     updated_at: now,
   });

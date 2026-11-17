@@ -27,6 +27,7 @@ const RENDERER_CSP = [
 ].join("; ");
 
 const LOCAL_MEDIA_CSP = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+const LOCAL_MEDIA_PDF_CSP = "default-src 'self' local-media: blob: data:; object-src 'self' local-media: blob:; script-src 'none'; form-action 'none'; base-uri 'none'";
 const LOCAL_MEDIA_RENDER_CSP =
   "sandbox; default-src 'none'; img-src local-media: data:; style-src 'unsafe-inline' local-media:; font-src local-media: data:; media-src local-media: data:; script-src 'none'; form-action 'none'; base-uri 'none'";
 
@@ -165,11 +166,13 @@ function registerProtocols() {
       else if (lower.endsWith(".webp")) mimeType = "image/webp";
       else if (lower.endsWith(".gif")) mimeType = "image/gif";
       else if (lower.endsWith(".svg")) mimeType = "image/svg+xml";
+      else if (lower.endsWith(".pdf")) mimeType = "application/pdf";
       else if (lower.endsWith(".html") || lower.endsWith(".htm")) mimeType = "text/plain; charset=utf-8";
       else if (lower.endsWith(".css")) mimeType = "text/plain; charset=utf-8";
       else if (lower.endsWith(".js") || lower.endsWith(".mjs")) mimeType = "text/plain; charset=utf-8";
       else if (lower.endsWith(".json")) mimeType = "text/plain; charset=utf-8";
 
+      const isPdfDoc = lower.endsWith(".pdf");
       const isHtmlDoc = lower.endsWith(".html") || lower.endsWith(".htm");
       const renderAsDocument = isHtmlDoc && wantsRender;
       if (renderAsDocument) mimeType = "text/html; charset=utf-8";
@@ -181,7 +184,11 @@ function registerProtocols() {
           "Content-Type": mimeType,
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "public, max-age=86400",
-          "Content-Security-Policy": renderAsDocument ? LOCAL_MEDIA_RENDER_CSP : LOCAL_MEDIA_CSP,
+          "Content-Security-Policy": isPdfDoc
+            ? LOCAL_MEDIA_PDF_CSP
+            : renderAsDocument
+            ? LOCAL_MEDIA_RENDER_CSP
+            : LOCAL_MEDIA_CSP,
           "X-Content-Type-Options": "nosniff",
         },
       });

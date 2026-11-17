@@ -43,15 +43,17 @@ export const AgentLiveStatusBar: React.FC<{
   activeTodos: TodoItem[];
   hasStreamingText: boolean;
 }> = ({ activeToolCalls, activeTodos, hasStreamingText }) => {
-  const { activeSessionId, sessionStartTimeBySession, waitingBySession } = useChatStore(
+  const { activeSessionId, sessionStartTimeBySession, waitingBySession, questionBySession } = useChatStore(
     useShallow((s) => ({
       activeSessionId: s.activeSessionId,
       sessionStartTimeBySession: s.sessionStartTimeBySession,
       waitingBySession: s.waitingBySession,
+      questionBySession: s.questionBySession,
     }))
   );
   const sessionStartTime = activeSessionId ? sessionStartTimeBySession[activeSessionId] : null;
   const waitingSec = activeSessionId ? waitingBySession[activeSessionId] || 0 : 0;
+  const hasPendingQuestion = Boolean(activeSessionId && questionBySession[activeSessionId]);
 
   // 根据会话绝对启动时间戳计算物理流逝秒数：切换会话重新挂载时无缝继承真实时长，彻底杜绝归零重置
   const computeElapsedSec = () => {
@@ -93,7 +95,9 @@ export const AgentLiveStatusBar: React.FC<{
   const currentTodo = activeTodos.find((t) => t.status === 'in_progress');
 
   let statusText = '正在深入思考与规划方案...';
-  if (waitingSec >= 15 && !runningStep && !hasStreamingText) {
+  if (hasPendingQuestion) {
+    statusText = '正在等待你的卡片确认与补充信息...';
+  } else if (waitingSec >= 15 && !runningStep && !hasStreamingText) {
     statusText =
       waitingSec >= 120
         ? `上游模型已 ${Math.floor(waitingSec / 60)} 分钟无响应，仍在等待（可随时停止）...`
