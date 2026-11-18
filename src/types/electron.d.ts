@@ -92,7 +92,7 @@ export interface ElectronAPI {
   gitFetch: (workDir: string) => Promise<any>;
   gitPull: (workDir: string) => Promise<any>;
   gitPush: (workDir: string) => Promise<any>;
-  gitMergeBranch: (workDir: string, sourceBranch: string) => Promise<any>;
+  gitMergeBranch: (workDir: string, sourceBranch: string, options?: { noFf?: boolean }) => Promise<any>;
   gitStashAction: (workDir: string, action: string) => Promise<any>;
   gitCherryPick: (workDir: string, hash: string) => Promise<any>;
   gitCreateBranchAt: (workDir: string, branchName: string, startPoint?: string) => Promise<any>;

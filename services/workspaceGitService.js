@@ -859,7 +859,7 @@ async function gitPush(workDir) {
   return { success: false, error: friendlyErr, rawError: rawErr };
 }
 
-async function gitMergeBranch(workDir, sourceBranch) {
+async function gitMergeBranch(workDir, sourceBranch, { noFf = false } = {}) {
   if (!resolveGitRepoRoot(workDir)) {
     return { success: false, error: "当前目录不是有效的 Git 仓库" };
   }
@@ -871,7 +871,8 @@ async function gitMergeBranch(workDir, sourceBranch) {
   if (stRes.ok && stRes.stdout.trim()) {
     return { success: false, error: "当前工作区有未提交修改，请先 Commit 或 Stash 后再合并" };
   }
-  const res = await runGitExec(["merge", "--no-ff", safeSource], workDir);
+  const mergeArgs = noFf ? ["merge", "--no-ff", safeSource] : ["merge", safeSource];
+  const res = await runGitExec(mergeArgs, workDir);
   if (!res.ok) {
     const raw = (res.stderr || res.stdout || res.error || "").trim();
     if (/CONFLICT|Automatic merge failed/i.test(raw)) {
@@ -881,7 +882,14 @@ async function gitMergeBranch(workDir, sourceBranch) {
     return { success: false, error: raw || `合并 ${safeSource} 失败` };
   }
   invalidateGitStatusCache(workDir);
-  return { success: true, message: `已成功将 ${safeSource} 合并到当前分支` };
+  const isFastForward = !noFf && /Fast-forward/i.test(res.stdout || "");
+  return {
+    success: true,
+    fastForward: isFastForward,
+    message: isFastForward
+      ? `已快进合并 ${safeSource} 到当前分支`
+      : `已将 ${safeSource} 合并到当前分支`,
+  };
 }
 
 async function gitStashAction(workDir, action = "push") {

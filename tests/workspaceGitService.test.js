@@ -13,6 +13,7 @@ const {
   commitWorkspaceChanges,
   checkoutWorkspaceBranch,
   gitCreateBranchAt,
+  gitMergeBranch,
   gitPush,
 } = require("../services/workspaceGitService");
 
@@ -114,5 +115,53 @@ test("gitCreateBranchAt 与 gitPush 处理异名上游错绑场景", async () =>
     assert.equal(pushRes2.success, true, pushRes2.error);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("gitMergeBranch 默认允许 Fast-Forward 保持多分支在同一水平线，并支持显式 noFf", async () => {
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-git-merge-test-"));
+  try {
+    git(repoDir, "init", "-b", "release");
+    git(repoDir, "config", "user.email", "test@omcx.local");
+    git(repoDir, "config", "user.name", "OMCX Tester");
+
+    fs.writeFileSync(path.join(repoDir, "app.txt"), "v1\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "chore: base");
+
+    git(repoDir, "checkout", "-b", "develop");
+    git(repoDir, "checkout", "-b", "feature");
+    fs.writeFileSync(path.join(repoDir, "app.txt"), "v2\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "feat: update in feature");
+    const featureHead = git(repoDir, "rev-parse", "HEAD");
+
+    // 1. develop 默认合并 feature -> Fast-Forward 到同一提交
+    await checkoutWorkspaceBranch(repoDir, "develop");
+    const mergeDev = await gitMergeBranch(repoDir, "feature");
+    assert.equal(mergeDev.success, true, mergeDev.error);
+    assert.equal(mergeDev.fastForward, true);
+    assert.equal(git(repoDir, "rev-parse", "develop"), featureHead);
+
+    // 2. release 默认合并 develop -> 三分支位于同一 Commit（同一水平线）
+    await checkoutWorkspaceBranch(repoDir, "release");
+    const mergeRel = await gitMergeBranch(repoDir, "develop");
+    assert.equal(mergeRel.success, true, mergeRel.error);
+    assert.equal(mergeRel.fastForward, true);
+    assert.equal(git(repoDir, "rev-parse", "release"), featureHead);
+
+    // 3. 显式传入 { noFf: true } 时创建双父节点的合并提交
+    git(repoDir, "checkout", "feature");
+    fs.writeFileSync(path.join(repoDir, "app.txt"), "v3\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "feat: next change");
+    await checkoutWorkspaceBranch(repoDir, "develop");
+    const mergeNoFf = await gitMergeBranch(repoDir, "feature", { noFf: true });
+    assert.equal(mergeNoFf.success, true, mergeNoFf.error);
+    assert.equal(mergeNoFf.fastForward, false);
+    const parents = git(repoDir, "rev-list", "--parents", "-n", "1", "HEAD").split(/\s+/);
+    assert.equal(parents.length, 3);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
   }
 });

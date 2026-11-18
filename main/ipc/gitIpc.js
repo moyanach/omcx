@@ -120,8 +120,8 @@ function registerGitIpc() {
 
   ipcMain.handle(
     "git-merge-branch",
-    safeHandler(async (event, { workDir, sourceBranch } = {}) =>
-      notifyGitMutation(workDir, await getWorkspaceGitService().gitMergeBranch(workDir, sourceBranch), {
+    safeHandler(async (event, { workDir, sourceBranch, noFf = false } = {}) =>
+      notifyGitMutation(workDir, await getWorkspaceGitService().gitMergeBranch(workDir, sourceBranch, { noFf: Boolean(noFf) }), {
         invalidateFiles: true,
         areas: ["files", "git", "worktrees"],
       })

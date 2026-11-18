@@ -151,6 +151,7 @@ export const GitGraphView: React.FC<{ refreshKey?: number }> = ({ refreshKey }) 
   const [mergeOpen, setMergeOpen] = useState(false);
   const [localBranches, setLocalBranches] = useState<string[]>([]);
   const [mergeSource, setMergeSource] = useState("");
+  const [mergeNoFf, setMergeNoFf] = useState(false);
   const mergeMenuRef = useRef<HTMLDivElement | null>(null);
 
   // 从提交创建分支状态
@@ -287,11 +288,12 @@ export const GitGraphView: React.FC<{ refreshKey?: number }> = ({ refreshKey }) 
     if (!mergeSource) return;
     const ok = await runGitAction(
       "merge",
-      () => window.electronAPI.gitMergeBranch(workDir, mergeSource),
+      () => window.electronAPI.gitMergeBranch(workDir, mergeSource, { noFf: mergeNoFf }),
       `已合并 ${mergeSource}`
     );
     if (ok) {
       setMergeOpen(false);
+      setMergeNoFf(false);
     }
   };
 
@@ -554,6 +556,7 @@ export const GitGraphView: React.FC<{ refreshKey?: number }> = ({ refreshKey }) 
               onClick={() => {
                 const candidates = localBranches.filter((b) => b !== currentBranch);
                 setMergeSource((prev) => (candidates.includes(prev) ? prev : candidates[0] || ""));
+                setMergeNoFf(false);
                 setMergeOpen((v) => !v);
               }}
               disabled={Boolean(opBusy) || localBranches.filter((b) => b !== currentBranch).length === 0}
@@ -587,6 +590,17 @@ export const GitGraphView: React.FC<{ refreshKey?: number }> = ({ refreshKey }) 
                       </button>
                     ))}
                 </div>
+                <label className="flex items-start gap-1.5 pt-1 border-t border-[color:var(--ui-divider-hairline)] cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={mergeNoFf}
+                    onChange={(e) => setMergeNoFf(e.target.checked)}
+                    className="mt-0.5 rounded border-[color:var(--ui-border-subtle)] accent-[var(--ui-accent-blue)]"
+                  />
+                  <span className="text-[10px] leading-snug text-[var(--ui-text-muted)]">
+                    总是创建合并提交 (<code className="font-mono">--no-ff</code>)，不勾选则允许快进保持分支在同一水平线
+                  </span>
+                </label>
                 <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-[color:var(--ui-divider-hairline)]">
                   <button
                     onClick={() => setMergeOpen(false)}

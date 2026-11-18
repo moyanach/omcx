@@ -205,8 +205,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   gitFetch: (workDir) => ipcRenderer.invoke("git-fetch", { workDir }),
   gitPull: (workDir) => ipcRenderer.invoke("git-pull", { workDir }),
   gitPush: (workDir) => ipcRenderer.invoke("git-push", { workDir }),
-  gitMergeBranch: (workDir, sourceBranch) =>
-    ipcRenderer.invoke("git-merge-branch", { workDir, sourceBranch }),
+  gitMergeBranch: (workDir, sourceBranch, options = {}) =>
+    ipcRenderer.invoke("git-merge-branch", { workDir, sourceBranch, ...options }),
   gitStashAction: (workDir, action) =>
     ipcRenderer.invoke("git-stash-action", { workDir, action }),
   gitCherryPick: (workDir, hash) =>
