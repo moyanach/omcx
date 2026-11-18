@@ -785,19 +785,78 @@ async function gitPush(workDir) {
   }
   const headRes = await runGitExec(["rev-parse", "--abbrev-ref", "HEAD"], workDir);
   const currentBranch = headRes.ok ? headRes.stdout.trim() : "";
-  if (!currentBranch || currentBranch === "HEAD") {
+  if (!currentBranch || currentBranch === "HEAD" || currentBranch.startsWith("-")) {
     return { success: false, error: "当前处于游离 HEAD 状态，请先切换到具体分支后再推送" };
   }
-  const upRes = await runGitExec(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], workDir);
-  const args = upRes.ok ? ["push"] : ["push", "-u", "origin", currentBranch];
+
+  const remotesRes = await runGitExec(["remote"], workDir);
+  const remotes = remotesRes.ok
+    ? remotesRes.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+    : [];
+  if (remotes.length === 0) {
+    return { success: false, error: "当前仓库尚未配置远程仓库 (remote)，请先添加远端地址后再推送" };
+  }
+
+  const [upRes, remoteCfg, mergeCfg] = await Promise.all([
+    runGitExec(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], workDir),
+    runGitExec(["config", "--get", `branch.${currentBranch}.remote`], workDir),
+    runGitExec(["config", "--get", `branch.${currentBranch}.merge`], workDir),
+  ]);
+
+  const configuredRemote = remoteCfg.ok ? remoteCfg.stdout.trim() : "";
+  const targetRemote =
+    configuredRemote && configuredRemote !== "." && remotes.includes(configuredRemote)
+      ? configuredRemote
+      : remotes.includes("origin")
+        ? "origin"
+        : remotes[0];
+
+  let args;
+  let reboundFrom = "";
+
+  if (upRes.ok) {
+    const upstreamRef = upRes.stdout.trim();
+    let upstreamBranch = mergeCfg.ok
+      ? mergeCfg.stdout.trim().replace(/^refs\/heads\//, "")
+      : "";
+    if (!upstreamBranch && configuredRemote && configuredRemote !== "." && upstreamRef.startsWith(`${configuredRemote}/`)) {
+      upstreamBranch = upstreamRef.slice(configuredRemote.length + 1);
+    }
+
+    if (configuredRemote && configuredRemote !== "." && upstreamBranch === currentBranch) {
+      args = ["push"];
+    } else {
+      // 当前分支错绑了异名上游（如基于 origin/main 切出后 upstream 指向了 origin/main），
+      // 改为安全推送并绑定到同名远程分支，避免推送被 Git simple 策略拒绝或误推主分支
+      args = ["push", "-u", targetRemote, currentBranch];
+      reboundFrom = upstreamRef;
+    }
+  } else {
+    args = ["push", "-u", targetRemote, currentBranch];
+  }
+
   const res = await new Promise((resolve) => {
     execFile("git", args, { cwd: workDir, timeout: 30000 }, (err, stdout, stderr) => {
       resolve({ ok: !err, stdout: stdout || "", stderr: stderr || (err ? err.message : "") });
     });
   });
-  return res.ok
-    ? { success: true, message: `已推送分支 ${currentBranch}` }
-    : { success: false, error: (res.stderr || res.stdout || "Push 失败").trim() };
+
+  if (res.ok) {
+    invalidateGitStatusCache(workDir);
+    const message = reboundFrom
+      ? `已推送分支 ${currentBranch} 到 ${targetRemote}/${currentBranch}（原追踪 ${reboundFrom} 已修正为同名上游）`
+      : `已推送分支 ${currentBranch}`;
+    return { success: true, message };
+  }
+
+  const rawErr = (res.stderr || res.stdout || "Push 失败").trim();
+  let friendlyErr = rawErr;
+  if (/non-fast-forward|fetch first|failed to push some refs/i.test(rawErr)) {
+    friendlyErr = `推送被拒绝：远程仓库 ${targetRemote}/${currentBranch} 存在本地尚未拉取的新提交，请先执行 Pull 合并后再推送。\n${rawErr}`;
+  } else if (/Authentication failed|Permission denied|Could not read from remote repository/i.test(rawErr)) {
+    friendlyErr = `推送鉴权失败，请检查远程仓库权限或 SSH/Token 凭据。\n${rawErr}`;
+  }
+  return { success: false, error: friendlyErr, rawError: rawErr };
 }
 
 async function gitMergeBranch(workDir, sourceBranch) {
@@ -873,7 +932,8 @@ async function gitCreateBranchAt(workDir, branchName, startPoint) {
   if (!safeStart || safeStart.startsWith("-")) {
     return { success: false, error: "起点引用无效" };
   }
-  const res = await runGitExec(["checkout", "-b", safeBranch, safeStart], workDir);
+  // 使用 --no-track 避免基于远端分支（如 origin/main）创建新分支时错绑异名上游
+  const res = await runGitExec(["checkout", "--no-track", "-b", safeBranch, safeStart], workDir);
   if (res.ok) invalidateGitStatusCache(workDir);
   return res.ok
     ? { success: true, branch: safeBranch, message: `已创建并切换到分支 ${safeBranch}` }
