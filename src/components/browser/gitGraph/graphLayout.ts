@@ -116,6 +116,14 @@ export function buildGraphLayout(commits: GitGraphCommit[]): LaidOutRow[] {
       lanes[matchingLanes[k]] = null;
     }
 
+    // 记录在分配当前 commit 的 parents 之前就已存在的其它活跃泳道（仅这些泳道需要在下半段直连向下，避免新分叉泳道产生垂直毛刺）
+    const passThroughLanes = new Set<number>();
+    for (let i = 0; i < lanes.length; i += 1) {
+      if (lanes[i] !== null && i !== lane) {
+        passThroughLanes.add(i);
+      }
+    }
+
     // 3. 把 parents 放到泳道中（第一个 parent 继承当前泳道，其余 parent 分配新泳道或复用已存在泳道）
     const parents = commit.parents || [];
     if (parents.length === 0) {
@@ -144,9 +152,9 @@ export function buildGraphLayout(commits: GitGraphCommit[]): LaidOutRow[] {
       }
     }
 
-    // 其它未涉及的活跃泳道在下半段继续直连向下
-    for (let i = 0; i < lanes.length; i += 1) {
-      if (lanes[i] === null || i === lane) continue;
+    // 仅原先已贯穿本行的活跃泳道在下半段直连向下；本行新开辟的分叉泳道只保留从当前圆点弯出的连线
+    for (const i of passThroughLanes) {
+      if (lanes[i] === null) continue;
       const alreadyDrawn = segments.some(
         (s) => s.kind === "out" && s.toLane === i && s.fromLane === i
       );

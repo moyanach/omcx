@@ -310,4 +310,45 @@ test("ToolSteps 状态判定正确识别内层失败并输出失败摘要（杜�
   assert.equal(getToolOutputSummary(aggSuccess), "统计 3181 行 · 12 个分组");
 });
 
+test("buildGraphLayout Merge 分叉新辟泳道不产生垂直毛刺，既有并行泳道直连贯通", async () => {
+  const entryPath = path.resolve(__dirname, "../src/components/browser/gitGraph/graphLayout.ts");
+  const built = await esbuild.build({
+    entryPoints: [entryPath],
+    bundle: false,
+    platform: "node",
+    format: "cjs",
+    write: false,
+  });
+  const mod = new Module(entryPath);
+  mod.filename = entryPath;
+  mod._compile(built.outputFiles[0].text, entryPath);
+  const { buildGraphLayout } = mod.exports;
+
+  // 场景 1：单主线 Merge 新开辟泳道 1，不应出现 fromLane:1 -> toLane:1 kind:"out" 的垂直毛刺
+  // 场景 2：分支线在泳道 1 内再次 Merge 新开辟泳道 2，此时泳道 0（主线）应继续直连，泳道 2 不应产生垂直毛刺
+  const commits = [
+    { hash: "m1", shortHash: "m1", parents: ["c1", "b1"], refs: [], author: "a", relativeTime: "1m", subject: "Merge b1" },
+    { hash: "b1", shortHash: "b1", parents: ["b2", "f1"], refs: [], author: "a", relativeTime: "2m", subject: "Merge f1 into b" },
+    { hash: "f1", shortHash: "f1", parents: ["b2"], refs: [], author: "a", relativeTime: "3m", subject: "feat f1" },
+    { hash: "b2", shortHash: "b2", parents: ["c1"], refs: [], author: "a", relativeTime: "4m", subject: "work b2" },
+    { hash: "c1", shortHash: "c1", parents: [], refs: [], author: "a", relativeTime: "5m", subject: "init" },
+  ];
+
+  const rows = buildGraphLayout(commits);
+  assert.equal(rows.length, 5);
+
+  // Row 0 (m1): 新辟泳道 1，仅应有 (0->0 out) 和 (0->1 out)，绝不能有 (1->1 out)
+  const r0Out = rows[0].segments.filter((s) => s.kind === "out");
+  assert.deepEqual(
+    r0Out.map((s) => [s.fromLane, s.toLane]),
+    [[0, 0], [0, 1]]
+  );
+
+  // Row 1 (b1 在泳道 1): 泳道 0 是原先存在的贯穿泳道应保留 (0->0 out)，新辟泳道 2 绝不能有 (2->2 out)
+  const r1Out = rows[1].segments.filter((s) => s.kind === "out");
+  assert.ok(r1Out.some((s) => s.fromLane === 0 && s.toLane === 0), "已有并行泳道 0 应保持直连");
+  assert.ok(r1Out.some((s) => s.fromLane === 1 && s.toLane === 2), "应存在从泳道 1 弯向新泳道 2 的连线");
+  assert.ok(!r1Out.some((s) => s.fromLane === 2 && s.toLane === 2), "新辟泳道 2 不应产生垂直毛刺");
+});
+
 

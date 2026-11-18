@@ -55,16 +55,18 @@ export const GraphCommitRow: React.FC<GraphCommitRowProps> = React.memo(({
                             y2={midY}
                             stroke={seg.color}
                             strokeWidth={1.75}
+                            strokeLinecap="round"
                           />
                         );
                       }
                       return (
                         <path
                           key={idx}
-                          d={`M ${x1} 0 C ${x1} ${midY * 0.65}, ${x2} ${midY * 0.35}, ${x2} ${midY}`}
+                          d={`M ${x1} 0 C ${x1} ${midY * 0.45}, ${x2} ${midY * 0.55}, ${x2} ${midY}`}
                           fill="none"
                           stroke={seg.color}
                           strokeWidth={1.75}
+                          strokeLinecap="round"
                         />
                       );
                     }
@@ -79,16 +81,18 @@ export const GraphCommitRow: React.FC<GraphCommitRowProps> = React.memo(({
                           y2={ROW_HEIGHT}
                           stroke={seg.color}
                           strokeWidth={1.75}
+                          strokeLinecap="round"
                         />
                       );
                     }
                     return (
                       <path
                         key={idx}
-                        d={`M ${x1} ${midY} C ${x1} ${midY + (ROW_HEIGHT - midY) * 0.65}, ${x2} ${midY + (ROW_HEIGHT - midY) * 0.35}, ${x2} ${ROW_HEIGHT}`}
+                        d={`M ${x1} ${midY} C ${x1} ${midY + (ROW_HEIGHT - midY) * 0.45}, ${x2} ${midY + (ROW_HEIGHT - midY) * 0.55}, ${x2} ${ROW_HEIGHT}`}
                         fill="none"
                         stroke={seg.color}
                         strokeWidth={1.75}
+                        strokeLinecap="round"
                       />
                     );
                   })}
