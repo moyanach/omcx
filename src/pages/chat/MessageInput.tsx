@@ -1,24 +1,24 @@
 import React, { useRef, useEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   Send,
   FolderGit2,
-  ChevronDown,
   Paperclip,
-  X,
   Square,
-  FileSpreadsheet,
-  FileCode,
-  FileText,
-  FileArchive,
-  File as GenericFileIcon,
+  CornerDownRight,
+  FileCode2,
+  Folder,
 } from "lucide-react";
-import { useChatStore } from "@/stores/chatStore";
+import { useChatStore, type PermissionMode, type QueuedPrompt } from "@/stores/chatStore";
 import MentionPopover, { type MentionPosition } from "@/pages/chat/MentionPopover";
+import SlashCommandPopover, {
+  type SlashCommandItem,
+} from "@/pages/chat/SlashCommandPopover";
+import PromptQueueBar from "@/pages/chat/PromptQueueBar";
 import {
   MAX_CHAT_ATTACHMENTS,
   MAX_CHAT_ATTACHMENT_BYTES,
   classifyAttachment,
-  formatFileSize,
   getFileExtension,
   type DraftChatAttachment,
 } from "@/lib/chatAttachment";
@@ -26,9 +26,24 @@ import {
   filterUnifiedMentions,
   getCaretCoordinates,
   loadWorkspaceFileIndex,
+  getShortFileMentionToken,
+  findMatchedFileMention,
+  tokenizeTextWithMentions,
+  compactFileMentionsInText,
   type FileIndexEntry,
   type UnifiedMentionItem,
 } from "@/lib/fileMention";
+import {
+  MENTION_TRIGGER,
+  PERMISSION_MODE_OPTIONS,
+  REASONING_OPTIONS,
+  type ReasoningOption,
+} from "./messageInput/constants";
+import { AttachmentPreviewStrip } from "./messageInput/AttachmentPreviewStrip";
+import { PermissionModeSelector } from "./messageInput/PermissionModeSelector";
+import { ModelReasoningSelector } from "./messageInput/ModelReasoningSelector";
+
+export { REASONING_OPTIONS, type ReasoningOption };
 
 interface Props {
   value: string;
@@ -47,6 +62,10 @@ interface Props {
   chatModels?: any[];
   onChangeModel?: (modelId: string) => void;
 
+  // 权限与沙箱模式
+  permissionMode?: PermissionMode;
+  onChangePermissionMode?: (mode: PermissionMode) => void;
+
   // 图片附件
   attachments?: DraftChatAttachment[];
   onChangeAttachments?: (next: DraftChatAttachment[]) => void;
@@ -54,9 +73,27 @@ interface Props {
 
   // 中断当前生成任务
   onCancel?: () => void;
-}
 
-const MENTION_TRIGGER = /(?:^|[\s(（[【"'`\u4e00-\u9fa5])@([^\s@]*)$/;
+  // 任务排队支持
+  promptQueue?: QueuedPrompt[];
+  onRunQueuedNow?: (prompt: QueuedPrompt) => void;
+  onSteerQueuedNow?: (prompt: QueuedPrompt) => void;
+  onEditQueued?: (prompt: QueuedPrompt) => void;
+  onMoveQueuedToTop?: (promptId: string) => void;
+  onRemoveQueued?: (promptId: string) => void;
+  onClearQueue?: () => void;
+
+  // 直接将当前输入框内容注入执行中的 Agent（中途纠偏，不入队）
+  onSteerCurrent?: () => void;
+
+  // @文件短名映射与索引联动
+  mentionMap?: Record<string, string>;
+  onChangeMentionMap?: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  onFileIndexChange?: (files: FileIndexEntry[]) => void;
+
+  // 外部聚焦与快捷触发请求（例如空会话欢迎台点击起手卡）
+  focusRequest?: { seq: number; trigger?: "@" | "/" } | null;
+}
 
 const MessageInput: React.FC<Props> = ({
   value,
@@ -64,24 +101,74 @@ const MessageInput: React.FC<Props> = ({
   onSend,
   isGenerating,
   disabled,
+  containerWidth,
   workDir,
   onSelectWorkDir,
   selectedModel,
   chatModels,
   onChangeModel,
+  permissionMode = "auto-sandbox",
+  onChangePermissionMode,
   attachments = [] as DraftChatAttachment[],
   onChangeAttachments,
   onNotify,
   onCancel,
+  promptQueue,
+  onRunQueuedNow,
+  onSteerQueuedNow,
+  onEditQueued,
+  onMoveQueuedToTop,
+  onRemoveQueued,
+  onClearQueue,
+  onSteerCurrent,
+  mentionMap,
+  onChangeMentionMap,
+  onFileIndexChange,
+  focusRequest,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { workspaces, skills, mcpServers } = useChatStore();
+  const [internalMentionMap, setInternalMentionMap] = useState<Record<string, string>>({});
+  const activeMentionMap = mentionMap ?? internalMentionMap;
+  const setActiveMentionMap = onChangeMentionMap ?? setInternalMentionMap;
+  const [isComposing, setIsComposing] = useState(false);
+
+  const {
+    activeSessionId,
+    sessions,
+    setSessionReasoningEffort,
+    workspaces,
+    skills,
+    mcpServers,
+    subagents,
+    filesRevision,
+    commandsRevision,
+  } = useChatStore(
+    useShallow((s) => ({
+      activeSessionId: s.activeSessionId,
+      sessions: s.sessions,
+      setSessionReasoningEffort: s.setSessionReasoningEffort,
+      workspaces: s.workspaces,
+      skills: s.skills,
+      mcpServers: s.mcpServers,
+      subagents: s.subagents,
+      filesRevision: s.filesRevision,
+      commandsRevision: s.commandsRevision,
+    }))
+  );
 
   const [dragging, setDragging] = useState(false);
 
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const currentEffortId = activeSession?.reasoningEffort || "medium";
+
   const [fileIndex, setFileIndex] = useState<FileIndexEntry[]>([]);
-  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  const [mention, setMention] = useState<{
+    start: number;
+    query: string;
+    dirPrefix?: { short: string; full: string };
+  } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionPos, setMentionPos] = useState<MentionPosition>({
     top: 0,
@@ -90,23 +177,84 @@ const MessageInput: React.FC<Props> = ({
     listMaxHeight: 260,
   });
 
+  // 斜杠命令补全
+  const [slash, setSlash] = useState<{ start: number; query: string } | null>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashCommands, setSlashCommands] = useState<SlashCommandItem[]>([]);
+
+  const filteredSlashCommands = useMemo(() => {
+    const query = (slash?.query || "").toLowerCase();
+    return slashCommands
+      .filter(
+        (cmd) =>
+          !query ||
+          cmd.name.toLowerCase().includes(query) ||
+          (cmd.description || "").toLowerCase().includes(query)
+      )
+      .slice(0, 12);
+  }, [slash?.query, slashCommands]);
+
+  useEffect(() => {
+    let alive = true;
+    if (!window.electronAPI?.getSlashCommands) return;
+    window.electronAPI
+      .getSlashCommands(workDir || null)
+      .then((list: SlashCommandItem[]) => {
+        if (alive) setSlashCommands(Array.isArray(list) ? list : []);
+      })
+      .catch(() => {
+        if (alive) setSlashCommands([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [workDir, commandsRevision]);
+
   // 匹配绑定的多目录工作空间项目名称
   const matchedWs = workspaces.find((w) =>
     w.folders.some((f) => f.path === workDir) || w.id === workDir
   );
+  const workspaceFoldersKey = useMemo(
+    () => (matchedWs ? matchedWs.folders.map((f) => f.path).join("|") : ""),
+    [matchedWs]
+  );
   const workspaceDisplayName = matchedWs?.name || (workDir ? workDir.split(/[\\/]/).filter(Boolean).pop() : "选择工作空间目录");
+
+  const effectiveMentionQuery = useMemo(() => {
+    if (!mention) return "";
+    if (mention.dirPrefix && mention.query.startsWith(mention.dirPrefix.short)) {
+      return mention.dirPrefix.full + mention.query.slice(mention.dirPrefix.short.length);
+    }
+    return mention.query;
+  }, [mention]);
 
   const { items: mentionItems, grouped: mentionGrouped } = useMemo(
     () =>
       mention
-        ? filterUnifiedMentions(mention.query, fileIndex, skills, mcpServers)
-        : { items: [], grouped: { skills: [], mcps: [], files: [] } },
-    [mention, fileIndex, skills, mcpServers]
+        ? filterUnifiedMentions(
+            effectiveMentionQuery,
+            fileIndex,
+            // 已停用的技能不再出现在 @ 引用候选里
+            (skills || []).filter((skill) => skill.enabled !== false),
+            mcpServers,
+            subagents
+          )
+        : { items: [], grouped: { subagents: [], skills: [], mcps: [], files: [] } },
+    [mention, effectiveMentionQuery, fileIndex, skills, mcpServers, subagents]
   );
+
+  const syncOverlayLayout = (el?: HTMLTextAreaElement | null) => {
+    const node = el || textareaRef.current;
+    const overlay = overlayRef.current;
+    if (!node || !overlay) return;
+    overlay.style.width = `${node.clientWidth}px`;
+    overlay.scrollTop = node.scrollTop;
+  };
 
   const resizeTextarea = (el: HTMLTextAreaElement) => {
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+    syncOverlayLayout(el);
   };
 
   const updateMentionPosition = (el: HTMLTextAreaElement, caret: number) => {
@@ -117,7 +265,7 @@ const MessageInput: React.FC<Props> = ({
     const availableBelow = window.innerHeight - rect.bottom - 16;
     const above = availableAbove >= 240 || availableAbove >= availableBelow;
     const maxHeight = Math.max(150, Math.min(400, above ? availableAbove : availableBelow));
-    const left = Math.max(8, Math.min(rect.left + coords.left, window.innerWidth - 452));
+    const left = Math.max(8, Math.min(rect.left + coords.left, window.innerWidth - 468));
 
     setMentionPos({
       top: above ? anchorTop - 8 : rect.bottom + 8,
@@ -132,12 +280,38 @@ const MessageInput: React.FC<Props> = ({
     if (!el || !mention) return;
 
     const caret = el.selectionStart ?? value.length;
-    const inserted = item.insertText;
+    let inserted = item.insertText;
+    let nextDirPrefix: { short: string; full: string } | undefined;
+
+    if (item.category === "file" && item.filePath) {
+      const shortToken = getShortFileMentionToken(
+        item.filePath,
+        Boolean(item.isDir),
+        activeMentionMap
+      );
+      setActiveMentionMap((prev) => ({
+        ...prev,
+        [shortToken]: item.filePath!,
+      }));
+      inserted = item.isDir ? `@${shortToken}` : `@${shortToken} `;
+      if (item.isDir) {
+        nextDirPrefix = { short: shortToken, full: item.filePath };
+      }
+    }
+
     const nextValue = value.slice(0, mention.start) + inserted + value.slice(caret);
     const nextCaret = mention.start + inserted.length;
 
     onChange(nextValue);
-    setMention(item.isDir ? { start: mention.start, query: item.insertText.slice(1) } : null);
+    setMention(
+      item.isDir
+        ? {
+            start: mention.start,
+            query: inserted.slice(1),
+            dirPrefix: nextDirPrefix,
+          }
+        : null
+    );
     setMentionIndex(0);
 
     requestAnimationFrame(() => {
@@ -177,7 +351,7 @@ const MessageInput: React.FC<Props> = ({
 
     const usedNumbers = new Set(
       attachments.map((item) => {
-        const matched = item.placeholder.match(/#(d+)/);
+        const matched = item.placeholder.match(/#(\d+)/);
         return matched ? Number(matched[1]) : 0;
       })
     );
@@ -208,20 +382,9 @@ const MessageInput: React.FC<Props> = ({
 
     onChangeAttachments([...attachments, ...drafts]);
 
-    const el = textareaRef.current;
-    if (!el) return;
-
-    const currentValue = el.value;
-    const caret = el.selectionStart ?? currentValue.length;
-    const inserted = drafts.map((draft) => `${draft.placeholder} `).join("");
-    const nextValue = currentValue.slice(0, caret) + inserted + currentValue.slice(caret);
-    const nextCaret = caret + inserted.length;
-
-    onChange(nextValue);
+    // 不再向输入框正文注入 [image #1] / [file #1: xxx] 占位符，保持输入区纯净，附件统一展示在顶部栏
     requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(nextCaret, nextCaret);
-      resizeTextarea(el);
+      textareaRef.current?.focus();
     });
   };
 
@@ -234,10 +397,6 @@ const MessageInput: React.FC<Props> = ({
       URL.revokeObjectURL(target.previewUrl);
     }
     onChangeAttachments(attachments.filter((item) => item.id !== id));
-
-    if (target.placeholder && value.includes(target.placeholder)) {
-      onChange(value.replace(`${target.placeholder} `, "").replace(target.placeholder, ""));
-    }
   };
 
   const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -255,6 +414,34 @@ const MessageInput: React.FC<Props> = ({
     if (files.length > 0) {
       e.preventDefault();
       addFiles(files);
+      return;
+    }
+
+    // 粘贴纯文本中若包含 @path/to/file 完整路径，自动紧凑为短文件名胶囊并记录完整路径映射
+    const pastedText = e.clipboardData?.getData("text/plain");
+    if (pastedText && pastedText.includes("@")) {
+      const { text: compacted, mentionMap: nextMap } = compactFileMentionsInText(
+        pastedText,
+        fileIndex,
+        activeMentionMap
+      );
+      if (compacted !== pastedText) {
+        e.preventDefault();
+        setActiveMentionMap(nextMap);
+        const el = e.currentTarget;
+        const start = el.selectionStart ?? value.length;
+        const end = el.selectionEnd ?? start;
+        const nextValue = value.slice(0, start) + compacted + value.slice(end);
+        const nextCaret = start + compacted.length;
+        onChange(nextValue);
+        requestAnimationFrame(() => {
+          const node = textareaRef.current;
+          if (!node) return;
+          node.focus();
+          node.setSelectionRange(nextCaret, nextCaret);
+          resizeTextarea(node);
+        });
+      }
     }
   };
 
@@ -288,18 +475,78 @@ const MessageInput: React.FC<Props> = ({
 
     const caret = el.selectionStart ?? nextValue.length;
     const match = nextValue.slice(0, caret).match(MENTION_TRIGGER);
+    const slashMatch = nextValue.slice(0, caret).match(/^\/([a-zA-Z0-9_-]*)$/);
+
+    if (slashMatch) {
+      setSlash({ start: 0, query: slashMatch[1] });
+      setSlashIndex(0);
+      setMention(null);
+      updateMentionPosition(el, caret);
+    } else if (slash) {
+      setSlash(null);
+    }
 
     if (match) {
       const query = match[1];
-      setMention({ start: caret - query.length - 1, query });
+      const nextStart = caret - query.length - 1;
+      const keepDirPrefix =
+        mention?.dirPrefix &&
+        nextStart === mention.start &&
+        query.startsWith(mention.dirPrefix.short)
+          ? mention.dirPrefix
+          : undefined;
+      setMention({ start: nextStart, query, dirPrefix: keepDirPrefix });
       setMentionIndex(0);
+      setSlash(null);
       updateMentionPosition(el, caret);
     } else if (mention) {
       setMention(null);
     }
   };
 
+  const selectSlashCommand = (item: SlashCommandItem) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const caret = el.selectionStart ?? value.length;
+    const inserted = `/${item.name} `;
+    const nextValue = inserted + value.slice(caret);
+    onChange(nextValue);
+    setSlash(null);
+    setSlashIndex(0);
+    requestAnimationFrame(() => {
+      const node = textareaRef.current;
+      if (!node) return;
+      node.focus();
+      node.setSelectionRange(inserted.length, inserted.length);
+      resizeTextarea(node);
+    });
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // 中文输入法组合态下的 Enter 只是确认候选词，绝不能触发送信
+    if ((e.nativeEvent as any).isComposing || (e as any).keyCode === 229) {
+      return;
+    }
+    if (slash && filteredSlashCommands.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((i) => (i + 1) % filteredSlashCommands.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex(
+          (i) => (i - 1 + filteredSlashCommands.length) % filteredSlashCommands.length
+        );
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        selectSlashCommand(filteredSlashCommands[slashIndex]);
+        return;
+      }
+    }
+
     if (mention && mentionItems.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -318,10 +565,51 @@ const MessageInput: React.FC<Props> = ({
       }
     }
 
-    if (e.key === "Escape" && mention) {
+    // Shift + Tab 快捷循环切换 Agent 权限与沙箱模式（对齐主流 Agent CLI/IDE 交互）
+    if (e.key === "Tab" && e.shiftKey && onChangePermissionMode) {
+      e.preventDefault();
+      const idx = PERMISSION_MODE_OPTIONS.findIndex((item) => item.id === permissionMode);
+      const next = PERMISSION_MODE_OPTIONS[(idx + 1) % PERMISSION_MODE_OPTIONS.length];
+      onChangePermissionMode(next.id);
+      onNotify?.(`已切换权限模式：${next.label} (${next.sandboxTag})`);
+      return;
+    }
+
+    if (e.key === "Escape" && (mention || slash)) {
       e.preventDefault();
       setMention(null);
+      setSlash(null);
       return;
+    }
+
+    // 退格整块删除已识别的 @文件 胶囊（当弹窗未打开且光标紧贴在 @文件 末尾时）
+    if (e.key === "Backspace" && !e.metaKey && !e.ctrlKey && !e.altKey && !mention && !slash) {
+      const el = textareaRef.current;
+      if (el && el.selectionStart === el.selectionEnd) {
+        const caret = el.selectionStart ?? 0;
+        const beforeCaret = value.slice(0, caret);
+        const trailingMention = beforeCaret.match(
+          /(^|[\s(（[【"'`\u4e00-\u9fa5])(@[^\s@`"'<>|]+)$/
+        );
+        if (trailingMention) {
+          const tokenWithAt = trailingMention[2];
+          const tokenBody = tokenWithAt.slice(1);
+          if (findMatchedFileMention(tokenBody, activeMentionMap, fileIndex)) {
+            e.preventDefault();
+            const deleteFrom = caret - tokenWithAt.length;
+            const nextValue = value.slice(0, deleteFrom) + value.slice(caret);
+            onChange(nextValue);
+            requestAnimationFrame(() => {
+              const node = textareaRef.current;
+              if (!node) return;
+              node.focus();
+              node.setSelectionRange(deleteFrom, deleteFrom);
+              resizeTextarea(node);
+            });
+            return;
+          }
+        }
+      }
     }
 
     // 生成中按 Esc 直接中断当前任务
@@ -334,38 +622,116 @@ const MessageInput: React.FC<Props> = ({
     if (e.key === "Enter") {
       if (e.shiftKey) return;
       e.preventDefault();
-      onSend();
+      // 生成中按 Cmd/Ctrl + Enter：直接注入当前执行流程（中途纠偏），不进入排队
+      if (isGenerating && (e.metaKey || e.ctrlKey) && value.trim() && onSteerCurrent) {
+        onSteerCurrent();
+        return;
+      }
+      if ((value.trim() || attachments.length > 0) && !disabled) {
+        onSend();
+      }
     }
   };
 
-  // 工作目录变化时加载文件索引
+  // 工作目录变化时清理 @ 弹窗；目录、工作空间挂载文件夹或工作区文件变更时重载文件索引
+  useEffect(() => {
+    setMention(null);
+  }, [workDir]);
+
   useEffect(() => {
     let alive = true;
-    setMention(null);
 
     if (!workDir) {
       setFileIndex([]);
+      onFileIndexChange?.([]);
       return;
     }
 
-    loadWorkspaceFileIndex(workDir)
-      .then((index) => {
-        if (alive) setFileIndex(index.files || []);
-      })
-      .catch(() => {
-        if (alive) setFileIndex([]);
-      });
+    const loadNow = () => {
+      loadWorkspaceFileIndex(workDir)
+        .then((index) => {
+          if (alive) {
+            const files = index.files || [];
+            setFileIndex(files);
+            onFileIndexChange?.(files);
+          }
+        })
+        .catch(() => {
+          if (alive) {
+            setFileIndex([]);
+            onFileIndexChange?.([]);
+          }
+        });
+    };
+
+    const timer = filesRevision > 0 ? window.setTimeout(loadNow, 200) : null;
+    if (timer === null) loadNow();
 
     return () => {
       alive = false;
+      if (timer !== null) window.clearTimeout(timer);
     };
-  }, [workDir]);
+  }, [workDir, workspaceFoldersKey, filesRevision]);
+
+  // 同步富文本镜像层：将输入框内的 @文件 识别为「文件图标 + 文件名」胶囊，不展示完整路径
+  const overlayRenderData = useMemo(() => {
+    if (!value || !value.includes("@")) {
+      return { hasFileMentions: false, nodes: null as React.ReactNode };
+    }
+    const segments = tokenizeTextWithMentions(value);
+    let hasFileMentions = false;
+    const nodes = segments.map((seg, idx) => {
+      if (seg.type === "text") {
+        return <React.Fragment key={idx}>{seg.value}</React.Fragment>;
+      }
+      const matched = findMatchedFileMention(seg.token, activeMentionMap, fileIndex);
+      if (!matched) {
+        return <React.Fragment key={idx}>{seg.raw}</React.Fragment>;
+      }
+      hasFileMentions = true;
+      return (
+        <span
+          key={idx}
+          className="rounded-[4px] bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] py-[1px] shadow-[0_0_0_1px_var(--ui-accent-blue-border)] box-decoration-clone"
+        >
+          <span className="relative inline-block">
+            <span className="opacity-0">@</span>
+            {matched.isDir ? (
+              <Folder
+                size={11}
+                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-[var(--ui-accent-blue)]"
+              />
+            ) : (
+              <FileCode2
+                size={11}
+                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-[var(--ui-accent-blue)]"
+              />
+            )}
+          </span>
+          <span>{seg.token}</span>
+        </span>
+      );
+    });
+    return { hasFileMentions, nodes };
+  }, [value, activeMentionMap, fileIndex]);
+
+  const showOverlay = overlayRenderData.hasFileMentions && !isComposing;
+
+  useEffect(() => {
+    if (showOverlay) {
+      requestAnimationFrame(() => syncOverlayLayout());
+    }
+  }, [value, showOverlay, containerWidth]);
+
+  const hasInputOrAttachment = Boolean(value.trim() || attachments.length > 0);
+  const canSend = hasInputOrAttachment && !disabled;
 
   useEffect(() => {
     if (mentionIndex >= mentionItems.length) {
       setMentionIndex(0);
     }
   }, [mentionItems.length, mentionIndex]);
+
 
   // 重置高度当 value 清空时
   useEffect(() => {
@@ -375,95 +741,107 @@ const MessageInput: React.FC<Props> = ({
     }
   }, [value]);
 
+  // 响应外部聚焦与快捷触发请求（如欢迎台点击卡片预填）
+  useEffect(() => {
+    if (!focusRequest?.seq) return;
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const caret = el.value.length;
+      el.setSelectionRange(caret, caret);
+      resizeTextarea(el);
+
+      if (focusRequest.trigger === "/") {
+        const slashMatch = el.value.slice(0, caret).match(/^\/([a-zA-Z0-9_-]*)$/);
+        if (slashMatch) {
+          setSlash({ start: 0, query: slashMatch[1] });
+          setSlashIndex(0);
+          setMention(null);
+          updateMentionPosition(el, caret);
+        }
+      } else if (focusRequest.trigger === "@") {
+        const match = el.value.slice(0, caret).match(MENTION_TRIGGER);
+        if (match) {
+          const query = match[1];
+          const nextStart = caret - query.length - 1;
+          setMention({ start: nextStart, query });
+          setMentionIndex(0);
+          setSlash(null);
+          updateMentionPosition(el, caret);
+        }
+      }
+    });
+  }, [focusRequest]);
+
   return (
-    <div className="w-full px-5 pb-4 pt-1.5 bg-transparent flex-shrink-0">
+    <div className="w-full px-3 pb-1.5 pt-0.5 bg-transparent flex-shrink-0">
+      {/* 吸附在输入框上方的任务排队栏 */}
+      {promptQueue && promptQueue.length > 0 && (
+        <PromptQueueBar
+          queue={promptQueue}
+          onRunNow={(p) => onRunQueuedNow?.(p)}
+          onSteerNow={(p) => onSteerQueuedNow?.(p)}
+          onEdit={(p) => onEditQueued?.(p)}
+          onMoveToTop={(id) => onMoveQueuedToTop?.(id)}
+          onRemove={(id) => onRemoveQueued?.(id)}
+          onClearAll={() => onClearQueue?.()}
+        />
+      )}
+
       {/* 现代化输入卡片 (全宽 100% 铺满大 Card 底部，与上方消息区边缘保持垂直对齐线) */}
       <div
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className={`w-full bg-[#1e1e1e] hover:bg-[#202020] focus-within:bg-[#1f1f1f] border rounded-xl shadow-lg transition-all duration-200 overflow-hidden flex flex-col ${
+        className={`w-full bg-[var(--ui-composer-bg)] hover:bg-[var(--ui-composer-hover-bg)] border rounded-xl transition-all duration-200 overflow-hidden flex flex-col ${
           dragging
             ? "border-blue-500/70 ring-2 ring-blue-500/20"
-            : "border-[#2d2d2d] focus-within:border-[#3e3e3e]"
+            : "border-[color:var(--ui-border-subtle)] focus-within:border-[color:var(--ui-accent-blue-border)]"
         }`}
       >
-        {/* 多类型附件预览条 (支持图片缩略图与多样化文件胶囊卡片) */}
-        {attachments.length > 0 && (
-          <div className="flex gap-2 px-4 pt-3 pb-1 overflow-x-auto custom-scrollbar">
-            {attachments.map((item) => (
-              <div
-                key={item.id}
-                className="relative flex-shrink-0 group rounded-xl overflow-hidden border border-[#353535] bg-[#141414]"
-                title={`${item.name} (${formatFileSize(item.size)}) · ${item.placeholder}`}
-              >
-                {item.category === "image" && item.previewUrl ? (
-                  <div className="relative w-16 h-16">
-                    <img src={item.previewUrl} alt={item.name} className="w-full h-full object-cover" />
-                    <span className="absolute bottom-0 left-0 right-0 text-[9px] leading-4 bg-black/70 text-neutral-300 text-center font-mono truncate px-1">
-                      {item.placeholder}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 px-3 py-2 h-14 max-w-[200px] select-none">
-                    <div className="w-8 h-8 rounded-lg bg-[#222222] border border-[#333333] flex items-center justify-center flex-shrink-0">
-                      {item.category === "spreadsheet" && (
-                        <FileSpreadsheet size={16} className="text-emerald-400" />
-                      )}
-                      {item.category === "text" && (
-                        <FileCode size={16} className="text-blue-400" />
-                      )}
-                      {item.category === "document" && (
-                        <FileText size={16} className="text-rose-400" />
-                      )}
-                      {item.category === "archive" && (
-                        <FileArchive size={16} className="text-amber-400" />
-                      )}
-                      {item.category === "binary" && (
-                        <GenericFileIcon size={16} className="text-purple-400" />
-                      )}
-                    </div>
-                    <div className="flex flex-col min-w-0 pr-4">
-                      <span className="text-xs font-medium text-neutral-200 truncate" title={item.name}>
-                        {item.name}
-                      </span>
-                      <span className="text-[10px] text-neutral-500 font-mono">
-                        {formatFileSize(item.size)}
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => removeAttachment(item.id)}
-                  className="absolute top-1 right-1 w-4 h-4 rounded-full bg-black/80 text-neutral-300 hover:text-white hover:bg-rose-600 flex items-center justify-center transition-colors shadow-sm"
-                  title="移除此附件"
-                >
-                  <X size={10} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
+        <AttachmentPreviewStrip attachments={attachments} onRemove={removeAttachment} />
 
         {/* 文本输入区 (绝对无边框、无内发光、无任何独立框线) */}
         <div className="px-4 pt-3.5 pb-2">
-          <textarea
-            ref={textareaRef}
-            value={value}
-            onChange={handleInputChange}
-            onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
-            onBlur={() => window.setTimeout(() => setMention(null), 150)}
-            placeholder="输入消息或任务，输入 @ 引用资源，粘贴或拖入图片、表格、文档，Enter 发送，Shift + Enter 换行..."
-            style={{ border: 'none', outline: 'none', boxShadow: 'none' }}
-            className="chat-textarea-seamless w-full max-h-44 min-h-[46px] bg-transparent text-neutral-100 placeholder-neutral-500 resize-none border-none outline-none ring-0 focus:ring-0 focus:outline-none focus:border-none shadow-none text-sm leading-relaxed scroll-smooth"
-            rows={1}
-          />
+          <div className="relative w-full">
+            {showOverlay && (
+              <div
+                ref={overlayRef}
+                aria-hidden="true"
+                className="pointer-events-none absolute top-0 left-0 bottom-0 overflow-hidden whitespace-pre-wrap break-words font-sans text-sm leading-relaxed tracking-normal text-[var(--ui-text-primary)] select-none p-0 m-0"
+              >
+                {overlayRenderData.nodes}
+                {value.endsWith("\n") ? " " : null}
+              </div>
+            )}
+            <textarea
+              ref={textareaRef}
+              value={value}
+              onChange={handleInputChange}
+              onScroll={(e) => syncOverlayLayout(e.currentTarget)}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              onCompositionStart={() => setIsComposing(true)}
+              onCompositionEnd={() => setIsComposing(false)}
+              onBlur={() => window.setTimeout(() => setMention(null), 150)}
+              placeholder={
+                isGenerating
+                  ? "Agent 执行中：Enter 加入任务队列，⌘ + Enter 追加上下文，Esc 停止生成..."
+                  : "输入消息或任务，输入 @ 引用资源，粘贴或拖入图片、表格、文档，Enter 发送，Shift + Enter 换行..."
+              }
+              style={{ border: 'none', outline: 'none', boxShadow: 'none' }}
+              className={`chat-textarea-seamless relative z-10 block w-full max-h-44 min-h-[46px] bg-transparent placeholder-[var(--ui-text-faint)] resize-none border-none outline-none ring-0 focus:ring-0 focus:outline-none focus:border-none shadow-none font-sans text-sm leading-relaxed tracking-normal break-words p-0 m-0 ${
+                showOverlay
+                  ? "text-transparent caret-[var(--ui-text-primary)] selection:bg-blue-500/25"
+                  : "text-[var(--ui-text-primary)]"
+              }`}
+              rows={1}
+            />
+          </div>
         </div>
 
-        {/* 底部功能栏 (彻底移除 border-t 割裂线条，自然与文本区融为一体) */}
+        {/* 底部功能栏 */}
         <div className="flex items-center justify-between px-4 pb-3 pt-0">
           <div className="flex items-center gap-2">
             {/* 全格式文件上传按钮 */}
@@ -482,19 +860,19 @@ const MessageInput: React.FC<Props> = ({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={!onChangeAttachments || attachments.length >= MAX_CHAT_ATTACHMENTS}
-              className="flex items-center justify-center w-7 h-7 rounded-lg text-neutral-400 hover:text-white bg-[#161616] hover:bg-[#222222] border border-[#2d2d2d] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center justify-center w-7 h-7 rounded-lg text-[var(--ui-text-muted)] hover:text-[var(--ui-text-primary)] bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] border border-[color:var(--ui-border-hairline)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               title={`添加附件 (支持图片、代码、表格、文档等，最多 ${MAX_CHAT_ATTACHMENTS} 个)`}
             >
               <Paperclip size={13} />
             </button>
-            {/* 工作空间目录按钮 (优先展示项目工作空间名称) */}
+            {/* 工作空间目录按钮 */}
             {onSelectWorkDir && (
               <button
                 onClick={onSelectWorkDir}
-                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg transition-colors select-none shadow-sm group border ${
+                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg transition-colors select-none group border ${
                   workDir
-                    ? "bg-blue-500/10 text-blue-300 border-blue-500/20 hover:bg-blue-500/20"
-                    : "text-neutral-300 hover:text-white bg-[#161616] hover:bg-[#222222] border-[#2d2d2d]"
+                    ? "bg-[var(--ui-accent-blue-soft)] text-[var(--ui-accent-blue)] border-[color:var(--ui-accent-blue-border)] hover:opacity-90"
+                    : "text-[var(--ui-text-secondary)] hover:text-[var(--ui-text-primary)] bg-[var(--ui-chip-bg)] hover:bg-[var(--ui-chip-hover-bg)] border-[color:var(--ui-border-hairline)]"
                 }`}
                 title={
                   matchedWs
@@ -504,63 +882,98 @@ const MessageInput: React.FC<Props> = ({
                     : "未指定工作空间，点击选择本地项目目录"
                 }
               >
-                <FolderGit2 size={13} className="text-blue-400 group-hover:scale-105 transition-transform flex-shrink-0" />
+                <FolderGit2 size={13} className="text-[var(--ui-accent-blue)] group-hover:scale-105 transition-transform flex-shrink-0" />
                 <span className="max-w-[200px] truncate font-medium">
                   {workspaceDisplayName}
                 </span>
               </button>
             )}
 
-            {/* 模型下拉选择器 */}
+
+            {/* 权限与沙箱模式选择器（对标 Claude Code / Cursor / Codex 主流 4 档沙箱权限） */}
+            {onChangePermissionMode && (
+              <PermissionModeSelector
+                permissionMode={permissionMode}
+                onChangePermissionMode={onChangePermissionMode}
+              />
+            )}
+
+            {/* 模型与推理强度一体化选择器 */}
             {chatModels && chatModels.length > 0 && onChangeModel && (
-              <div className="relative">
-                <select
-                  value={selectedModel}
-                  onChange={(e) => onChangeModel(e.target.value)}
-                  className="appearance-none bg-[#161616] hover:bg-[#222222] border border-[#2d2d2d] rounded-lg pl-2.5 pr-7 py-1 text-xs font-medium text-neutral-300 hover:text-white outline-none focus:border-blue-500/50 transition-colors cursor-pointer"
-                >
-                  {chatModels.map((m) => (
-                    <option key={m.id} value={m.id} className="bg-[#1c1c1c] text-neutral-200">
-                      {m.name || m.model_id}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown
-                  size={12}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none"
-                />
-              </div>
+              <ModelReasoningSelector
+                selectedModel={selectedModel}
+                chatModels={chatModels}
+                onChangeModel={onChangeModel}
+                currentEffortId={currentEffortId}
+                activeSessionId={activeSessionId}
+                onChangeEffort={setSessionReasoningEffort}
+                onNotify={onNotify}
+              />
             )}
           </div>
 
-          {/* 右侧发送 / 停止按钮 */}
-          <div>
+          {/* 右侧发送 / 停止 / 排队 / 纠偏按钮 */}
+          <div className="flex items-center gap-1.5">
             {isGenerating ? (
-              <button
-                type="button"
-                onClick={() => onCancel?.()}
-                className="w-8 h-8 rounded-xl flex items-center justify-center bg-rose-500/15 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 hover:border-rose-500 transition-all shadow-md shadow-rose-600/10 active:scale-95 cursor-pointer"
-                title="停止生成 (Esc)"
-              >
-                <Square size={11} fill="currentColor" />
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => onCancel?.()}
+                  className="w-8 h-8 rounded-xl flex items-center justify-center bg-[var(--ui-accent-rose-soft)] hover:bg-rose-600 text-[var(--ui-accent-rose)] hover:text-white border border-[color:var(--ui-accent-rose-border)] hover:border-rose-500 transition-all shadow-sm active:scale-95 cursor-pointer"
+                  title="停止生成 (Esc)"
+                >
+                  <Square size={11} fill="currentColor" />
+                </button>
+                {value.trim() && onSteerCurrent && (
+                  <button
+                    type="button"
+                    onClick={onSteerCurrent}
+                    className="h-8 px-2 rounded-xl flex items-center gap-1 justify-center bg-[var(--ui-accent-blue-soft)] hover:opacity-90 text-[var(--ui-accent-blue)] border border-[color:var(--ui-accent-blue-border)] active:scale-95 cursor-pointer transition-all"
+                    title="追加至当前执行（中途补充背景/澄清细节/纠偏，⌘ + Enter）"
+                  >
+                    <CornerDownRight size={13} />
+                    <span className="text-[11px] font-medium whitespace-nowrap">追加</span>
+                  </button>
+                )}
+                {hasInputOrAttachment && (
+                  <button
+                    type="button"
+                    onClick={onSend}
+                    className="w-8 h-8 rounded-xl flex items-center justify-center bg-amber-500 hover:bg-amber-400 text-black shadow-sm active:scale-95 cursor-pointer transition-all"
+                    title="加入任务队列 (Enter)"
+                  >
+                    <Send size={13} className="translate-x-0.5 -translate-y-0.5" />
+                  </button>
+                )}
+              </>
             ) : (
               <button
                 onClick={onSend}
-                disabled={!value.trim() || disabled}
+                disabled={!canSend}
                 className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all ${
-                  value.trim() && !disabled
-                    ? "bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/30 active:scale-95 cursor-pointer"
-                    : "bg-[#252525] text-neutral-500 cursor-not-allowed border border-[#303030]"
+                  canSend
+                    ? "bg-blue-600 hover:bg-blue-500 text-white shadow-sm active:scale-95 cursor-pointer"
+                    : "bg-[var(--ui-chip-bg)] text-[var(--ui-text-faint)] cursor-not-allowed border border-[color:var(--ui-border-hairline)]"
                 }`}
                 title="发送 (Enter)"
               >
-                <Send size={14} className={value.trim() ? "translate-x-0.5 -translate-y-0.5" : ""} />
+                <Send size={14} className={hasInputOrAttachment ? "translate-x-0.5 -translate-y-0.5" : ""} />
               </button>
             )}
           </div>
         </div>
       </div>
+
+      {slash && (
+        <SlashCommandPopover
+          items={filteredSlashCommands}
+          activeIndex={Math.min(slashIndex, Math.max(0, filteredSlashCommands.length - 1))}
+          query={slash.query}
+          position={mentionPos}
+          onSelect={selectSlashCommand}
+          onHover={setSlashIndex}
+        />
+      )}
 
       {mention && (mentionItems.length > 0 || !mention.query) && (
         <MentionPopover

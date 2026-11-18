@@ -1,24 +1,29 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '@/stores/chatStore';
 
 export const ContextCard: React.FC = () => {
   const [isOpen, setIsOpen] = useState(true);
-  const { contextMetrics, messages, activeSessionId, lastCompaction } = useChatStore();
-
-  const activeMsgs = activeSessionId ? messages[activeSessionId] || [] : [];
+  const { contextMetrics, activeMsgsCount, lastCompaction } = useChatStore(
+    useShallow((s) => ({
+      contextMetrics: s.contextMetrics,
+      activeMsgsCount: s.activeSessionId ? s.messages[s.activeSessionId]?.length || 0 : 0,
+      lastCompaction: s.lastCompaction,
+    }))
+  );
 
   // 如果主进程尚未推送指标，提供基于当前消息数量的初始默认估算
   const metrics = contextMetrics || {
     totalLimit: 1000000,
     totalLimitFormatted: '1M',
-    usedTokens: Math.max(120, activeMsgs.length * 80),
-    usedTokensFormatted: activeMsgs.length > 0 ? `${(activeMsgs.length * 0.1).toFixed(1)}k` : '0.1k',
-    usedPercent: activeMsgs.length > 0 ? Math.min(100, parseFloat(((activeMsgs.length * 80 / 1000000) * 100).toFixed(1))) : 0.1,
+    usedTokens: Math.max(120, activeMsgsCount * 80),
+    usedTokensFormatted: activeMsgsCount > 0 ? `${(activeMsgsCount * 0.1).toFixed(1)}k` : '0.1k',
+    usedPercent: activeMsgsCount > 0 ? Math.min(100, parseFloat(((activeMsgsCount * 80 / 1000000) * 100).toFixed(1))) : 0.1,
     breakdown: {
       messages: {
-        tokens: activeMsgs.length * 60,
-        formatted: `${(activeMsgs.length * 0.06).toFixed(1)}k`,
+        tokens: activeMsgsCount * 60,
+        formatted: `${(activeMsgsCount * 0.06).toFixed(1)}k`,
         percent: 0.1,
         color: '#3b82f6',
         label: 'Messages',
@@ -56,34 +61,34 @@ export const ContextCard: React.FC = () => {
 
   const { breakdown } = metrics;
   const items = [
-    breakdown.messages,
-    breakdown.systemTools,
-    breakdown.systemPrompt,
-    breakdown.skills,
-    breakdown.freeSpace,
+    { ...breakdown.messages, isFree: false },
+    { ...breakdown.systemTools, isFree: false },
+    { ...breakdown.systemPrompt, isFree: false },
+    { ...breakdown.skills, isFree: false },
+    { ...breakdown.freeSpace, isFree: true },
   ];
 
   return (
-    <div className='bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl overflow-hidden transition-all duration-200 select-none titlebar-no-drag'>
+    <div className='border-b border-[color:var(--ui-divider-hairline)] transition-colors select-none titlebar-no-drag last:border-b-0'>
       {/* 头部标题与折叠开关 */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className='w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/[0.02] transition-colors'
+        className='w-full flex items-center justify-between px-4 py-3 text-left hover:bg-[var(--ui-block-hover-bg)] transition-colors'
       >
         <span className='flex items-center gap-2 min-w-0'>
-          <span className='font-semibold text-sm text-neutral-200 tracking-wide'>
+          <span className='font-semibold text-sm text-[var(--ui-text-primary)] tracking-wide'>
             上下文
           </span>
           {lastCompaction && (
             <span
-              className='px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono flex-shrink-0'
+              className='px-1.5 py-0.2 rounded-full text-[10px] bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border border-[color:var(--ui-accent-emerald-border)] font-mono flex-shrink-0'
               title={`上次压缩：${lastCompaction.beforeTokens.toLocaleString()} → ${lastCompaction.afterTokens.toLocaleString()} tokens · ${new Date(lastCompaction.at).toLocaleTimeString()}`}
             >
               已压缩
             </span>
           )}
         </span>
-        <div className='text-neutral-400'>
+        <div className='text-[var(--ui-text-faint)]'>
           {isOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
         </div>
       </button>
@@ -93,16 +98,16 @@ export const ContextCard: React.FC = () => {
         <div className='px-4 pb-4 pt-1 flex flex-col gap-3.5'>
           {/* 使用比例与容量指示 */}
           <div className='flex items-center justify-between text-xs'>
-            <span className='font-medium text-neutral-200'>
+            <span className='font-medium text-[var(--ui-text-primary)]'>
               {metrics.usedPercent}% used
             </span>
-            <span className='text-neutral-400 font-mono'>
+            <span className='text-[var(--ui-text-muted)] font-mono'>
               {metrics.usedTokensFormatted} / {metrics.totalLimitFormatted}
             </span>
           </div>
 
           {/* 五彩分段进度条 */}
-          <div className='w-full h-2 rounded-full overflow-hidden flex bg-[#2e2e2e]'>
+          <div className='w-full h-2 rounded-full overflow-hidden flex bg-[var(--ui-chip-bg)]'>
             {items.map((item, idx) => {
               if (item.percent <= 0) return null;
               return (
@@ -110,7 +115,7 @@ export const ContextCard: React.FC = () => {
                   key={idx}
                   style={{
                     width: `${item.percent}%`,
-                    backgroundColor: item.color,
+                    backgroundColor: item.isFree ? 'transparent' : item.color,
                   }}
                   title={`${item.label}: ${item.formatted} (${item.percent}%)`}
                   className='h-full transition-all duration-300'
@@ -124,20 +129,23 @@ export const ContextCard: React.FC = () => {
             {items.map((item, idx) => (
               <div
                 key={idx}
-                className='flex items-center justify-between text-xs text-neutral-300'
+                className='flex items-center justify-between text-xs text-[var(--ui-text-secondary)]'
               >
                 <div className='flex items-center gap-2.5'>
                   <span
                     className='w-2.5 h-2.5 rounded-sm flex-shrink-0'
-                    style={{ backgroundColor: item.color }}
+                    style={{
+                      backgroundColor: item.isFree ? 'var(--ui-chip-hover-bg)' : item.color,
+                      border: item.isFree ? '1px solid var(--ui-border-subtle)' : undefined,
+                    }}
                   />
-                  <span className='text-neutral-300 font-medium'>
+                  <span className='text-[var(--ui-text-secondary)] font-medium'>
                     {item.label}
                   </span>
                 </div>
-                <div className='flex items-center gap-3 font-mono text-[11px] text-neutral-400'>
+                <div className='flex items-center gap-3 font-mono text-[11px] text-[var(--ui-text-muted)]'>
                   <span>{item.formatted}</span>
-                  <span className='w-11 text-right text-neutral-400'>
+                  <span className='w-11 text-right text-[var(--ui-text-muted)]'>
                     {item.percent}%
                   </span>
                 </div>

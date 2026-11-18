@@ -3,7 +3,7 @@ export interface FileIndexEntry {
   isDir: boolean;
 }
 
-export type MentionCategory = "file" | "skill" | "mcp";
+export type MentionCategory = "file" | "skill" | "mcp" | "subagent";
 
 export interface UnifiedMentionItem {
   id: string;
@@ -11,8 +11,9 @@ export interface UnifiedMentionItem {
   title: string;
   subtitle?: string;
   insertText: string;
+  filePath?: string;
   isDir?: boolean;
-  scope?: "project" | "global";
+  scope?: "project" | "global" | "builtin";
   tools?: string[];
 }
 
@@ -132,10 +133,12 @@ export function filterUnifiedMentions(
   files: FileIndexEntry[],
   skills: Array<{ id?: string; name: string; description?: string; scope?: string; tools?: string[] }> = [],
   mcps: Array<{ id?: string; name: string; description?: string; command?: string }> = [],
+  subagents: Array<{ id: string; name: string; description?: string; scope?: string; readOnly?: boolean }> = [],
   limit = 12
 ): {
   items: UnifiedMentionItem[];
   grouped: {
+    subagents: UnifiedMentionItem[];
     skills: UnifiedMentionItem[];
     mcps: UnifiedMentionItem[];
     files: UnifiedMentionItem[];
@@ -146,13 +149,51 @@ export function filterUnifiedMentions(
 
   const isSkillPrefix = lowerQ.startsWith("skill:");
   const isMcpPrefix = lowerQ.startsWith("mcp:");
+  const isAgentPrefix = lowerQ.startsWith("agent:");
 
   const skillFilterTerm = isSkillPrefix ? q.slice(6).trim() : q;
   const mcpFilterTerm = isMcpPrefix ? q.slice(4).trim() : q;
+  const agentFilterTerm = isAgentPrefix ? q.slice(6).trim() : q;
+
+  // 0. 过滤与排序 Subagents
+  const scoredSubagents: Array<{ item: UnifiedMentionItem; score: number }> = [];
+  if (!isSkillPrefix && !isMcpPrefix) {
+    for (const agent of subagents) {
+      const id = agent.id || "";
+      const name = agent.name || id;
+      const desc = agent.description || "";
+      let score = 0;
+      if (!agentFilterTerm) {
+        score = 10;
+      } else {
+        const idScore = fuzzyScore(agentFilterTerm, id);
+        const nameScore = fuzzyScore(agentFilterTerm, name);
+        const descScore = desc ? fuzzyScore(agentFilterTerm, desc) - 15 : -1;
+        score = Math.max(idScore, nameScore, descScore);
+        if (isAgentPrefix && id.toLowerCase().startsWith(agentFilterTerm.toLowerCase())) {
+          score += 50;
+        }
+      }
+      if (score >= 0) {
+        scoredSubagents.push({
+          item: {
+            id: `subagent:${id}`,
+            category: "subagent",
+            title: name,
+            subtitle: desc,
+            insertText: `@agent:${id} `,
+            scope: (agent.scope as any) || "builtin",
+          },
+          score,
+        });
+      }
+    }
+  }
+  scoredSubagents.sort((a, b) => b.score - a.score);
 
   // 1. 过滤与排序 Skills
   const scoredSkills: Array<{ item: UnifiedMentionItem; score: number }> = [];
-  if (!isMcpPrefix) {
+  if (!isMcpPrefix && !isAgentPrefix) {
     for (const skill of skills) {
       const name = skill.name || "";
       const desc = skill.description || "";
@@ -187,7 +228,7 @@ export function filterUnifiedMentions(
 
   // 2. 过滤与排序 MCP Servers
   const scoredMcps: Array<{ item: UnifiedMentionItem; score: number }> = [];
-  if (!isSkillPrefix) {
+  if (!isSkillPrefix && !isAgentPrefix) {
     for (const mcp of mcps) {
       const name = mcp.name || "";
       const desc = mcp.description || mcp.command || "";
@@ -220,16 +261,21 @@ export function filterUnifiedMentions(
 
   // 3. 过滤与排序 Files & Dirs
   const scoredFiles: Array<{ item: UnifiedMentionItem; score: number }> = [];
-  if (!isSkillPrefix && !isMcpPrefix) {
+  if (!isSkillPrefix && !isMcpPrefix && !isAgentPrefix) {
     const matchedFiles = filterMentions(files, q, 10);
     matchedFiles.forEach((file) => {
+      const cleanPath = file.path.replace(/\/+$/, "");
+      const baseName = cleanPath.split("/").filter(Boolean).pop() || cleanPath;
+      const fullTargetPath = file.isDir ? `${cleanPath}/` : cleanPath;
+      const shortToken = file.isDir ? `${baseName}/` : `${baseName} `;
       scoredFiles.push({
         item: {
           id: `file:${file.path}`,
           category: "file",
-          title: file.path.split("/").filter(Boolean).pop() || file.path,
-          subtitle: file.path.split("/").slice(0, -1).join("/"),
-          insertText: `@${file.path}${file.isDir ? "/" : " "}`,
+          title: baseName,
+          subtitle: cleanPath.split("/").slice(0, -1).join("/"),
+          insertText: `@${shortToken}`,
+          filePath: fullTargetPath,
           isDir: file.isDir,
         },
         score: 1,
@@ -238,34 +284,45 @@ export function filterUnifiedMentions(
   }
 
   // 分组与配额截断 (默认展示时均衡配比)
+  let subagentItems = scoredSubagents.map((s) => s.item);
   let skillItems = scoredSkills.map((s) => s.item);
   let mcpItems = scoredMcps.map((m) => m.item);
   let fileItems = scoredFiles.map((f) => f.item);
 
   if (!q) {
-    skillItems = skillItems.slice(0, 4);
+    subagentItems = subagentItems.slice(0, 4);
+    skillItems = skillItems.slice(0, 3);
     mcpItems = mcpItems.slice(0, 2);
-    fileItems = fileItems.slice(0, 6);
+    fileItems = fileItems.slice(0, 5);
+  } else if (isAgentPrefix) {
+    subagentItems = subagentItems.slice(0, limit);
+    skillItems = [];
+    mcpItems = [];
+    fileItems = [];
   } else if (isSkillPrefix) {
     skillItems = skillItems.slice(0, limit);
+    subagentItems = [];
     mcpItems = [];
     fileItems = [];
   } else if (isMcpPrefix) {
     mcpItems = mcpItems.slice(0, limit);
+    subagentItems = [];
     skillItems = [];
     fileItems = [];
   } else {
     // 综合搜索模式：高分混合截取
-    skillItems = skillItems.slice(0, 4);
+    subagentItems = subagentItems.slice(0, 3);
+    skillItems = skillItems.slice(0, 3);
     mcpItems = mcpItems.slice(0, 2);
     fileItems = fileItems.slice(0, 6);
   }
 
-  const items = [...skillItems, ...mcpItems, ...fileItems];
+  const items = [...subagentItems, ...skillItems, ...mcpItems, ...fileItems];
 
   return {
     items,
     grouped: {
+      subagents: subagentItems,
       skills: skillItems,
       mcps: mcpItems,
       files: fileItems,
@@ -338,4 +395,211 @@ export function getCaretCoordinates(
   document.body.removeChild(mirror);
 
   return { top, left };
+}
+
+const MENTION_TOKEN_PATTERN = /(^|[\s(（[【"'`\u4e00-\u9fa5])@([^\s@`"'<>|]+)/g;
+const MENTION_TRAILING_PUNCTUATION = /[.,;:!?)\]}>，。；：！？、】》」』…]+$/;
+
+export type MentionTextSegment =
+  | { type: 'text'; value: string }
+  | { type: 'mention'; raw: string; token: string };
+
+/**
+ * 将文本切分为普通文本与 `@token` 引用片段，保持字符索引严格无损。
+ */
+export function tokenizeTextWithMentions(text: string): MentionTextSegment[] {
+  if (!text) return [];
+  const segments: MentionTextSegment[] = [];
+  const pattern = new RegExp(MENTION_TOKEN_PATTERN.source, 'g');
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    const prefix = match[1] || '';
+    const rawToken = match[2] || '';
+    const punctMatch = rawToken.match(MENTION_TRAILING_PUNCTUATION);
+    const punct = punctMatch ? punctMatch[0] : '';
+    const cleanToken = punct ? rawToken.slice(0, -punct.length) : rawToken;
+    const tokenStart = match.index + prefix.length;
+
+    if (!cleanToken) continue;
+
+    if (tokenStart > cursor) {
+      segments.push({ type: 'text', value: text.slice(cursor, tokenStart) });
+    }
+
+    const mentionRaw = `@${cleanToken}`;
+    segments.push({ type: 'mention', raw: mentionRaw, token: cleanToken });
+    cursor = tokenStart + mentionRaw.length;
+  }
+
+  if (cursor < text.length) {
+    segments.push({ type: 'text', value: text.slice(cursor) });
+  }
+
+  return segments;
+}
+
+/**
+ * 为文件/目录生成简短的展示 Token（默认仅文件名；若同一输入中存在同名冲突则附带最少父目录前缀消歧）。
+ */
+export function getShortFileMentionToken(
+  fullPath: string,
+  isDir: boolean,
+  existingMap: Record<string, string> = {},
+): string {
+  const normalized = fullPath.replace(/\/+$/, '').replace(/^\.\//, '');
+  const fullWithSlash = isDir ? `${normalized}/` : normalized;
+  const parts = normalized.split('/').filter(Boolean);
+
+  for (let depth = 1; depth <= parts.length; depth += 1) {
+    const candidate = parts.slice(-depth).join('/');
+    const key = isDir ? `${candidate}/` : candidate;
+    const existing = existingMap[key];
+    if (!existing || existing === fullWithSlash) {
+      return key;
+    }
+  }
+
+  return fullWithSlash;
+}
+
+function isSpecialMentionPrefix(token: string): boolean {
+  return (
+    token.startsWith('skill:') ||
+    token.startsWith('mcp:') ||
+    token.startsWith('agent:')
+  );
+}
+
+/**
+ * 识别文本中的 `@token` 是否指向有效的文件或目录（返回展示用文件名 basename 与完整路径）。
+ */
+export function findMatchedFileMention(
+  token: string,
+  mentionMap: Record<string, string> = {},
+  workspaceFiles?: FileIndexEntry[],
+): { displayName: string; fullPath: string; isDir: boolean } | null {
+  const clean = token.replace(MENTION_TRAILING_PUNCTUATION, '');
+  if (!clean || isSpecialMentionPrefix(clean) || clean === '.' || clean === '..') {
+    return null;
+  }
+
+  const mapped = mentionMap[clean] || (!clean.endsWith('/') ? mentionMap[`${clean}/`] : undefined);
+  if (mapped) {
+    const isDir = mapped.endsWith('/');
+    const stripped = mapped.replace(/\/+$/, '');
+    const displayName = stripped.split('/').filter(Boolean).pop() || clean;
+    return {
+      displayName: isDir ? `${displayName}/` : displayName,
+      fullPath: mapped,
+      isDir,
+    };
+  }
+
+  if (workspaceFiles && workspaceFiles.length > 0) {
+    const normClean = clean.replace(/\/+$/, '').replace(/^\.\//, '');
+    if (!normClean) return null;
+
+    const exact = workspaceFiles.find((entry) => entry.path.replace(/\/+$/, '') === normClean);
+    const suffixMatches = exact
+      ? [exact]
+      : workspaceFiles.filter((entry) => {
+          const p = entry.path.replace(/\/+$/, '');
+          return p === normClean || p.endsWith(`/${normClean}`);
+        });
+
+    if (suffixMatches.length > 0) {
+      const matched = suffixMatches[0];
+      const isDir = Boolean(matched.isDir || clean.endsWith('/'));
+      const stripped = matched.path.replace(/\/+$/, '');
+      const fullPath = isDir ? `${stripped}/` : stripped;
+      const displayName = stripped.split('/').filter(Boolean).pop() || clean;
+      return {
+        displayName: isDir ? `${displayName}/` : displayName,
+        fullPath,
+        isDir,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 发送前将输入框中的短文件 Token（如 `@MessageInput.tsx`）无损还原为完整工作区相对路径。
+ */
+export function resolveFileMentionsInText(
+  text: string,
+  mentionMap: Record<string, string> = {},
+  workspaceFiles?: FileIndexEntry[],
+): string {
+  if (!text || !text.includes('@')) return text;
+
+  return text.replace(MENTION_TOKEN_PATTERN, (full, prefix: string, rawToken: string) => {
+    const punctMatch = rawToken.match(MENTION_TRAILING_PUNCTUATION);
+    const punct = punctMatch ? punctMatch[0] : '';
+    const clean = punct ? rawToken.slice(0, -punct.length) : rawToken;
+
+    if (!clean || isSpecialMentionPrefix(clean)) return full;
+
+    const mapped = mentionMap[clean] || (!clean.endsWith('/') ? mentionMap[`${clean}/`] : undefined);
+    if (mapped) {
+      return `${prefix}@${mapped}${punct}`;
+    }
+
+    if (workspaceFiles && workspaceFiles.length > 0) {
+      const normClean = clean.replace(/\/+$/, '').replace(/^\.\//, '');
+      const exact = workspaceFiles.find((entry) => entry.path.replace(/\/+$/, '') === normClean);
+      if (exact) {
+        const target = exact.isDir ? `${exact.path.replace(/\/+$/, '')}/` : exact.path;
+        return `${prefix}@${target}${punct}`;
+      }
+      const suffix = workspaceFiles.find((entry) =>
+        entry.path.replace(/\/+$/, '').endsWith(`/${normClean}`)
+      );
+      if (suffix) {
+        const target = suffix.isDir ? `${suffix.path.replace(/\/+$/, '')}/` : suffix.path;
+        return `${prefix}@${target}${punct}`;
+      }
+    }
+
+    return full;
+  });
+}
+
+/**
+ * 将完整路径文本（如从文件树插入的 `@src/pages/ChatView.tsx`）紧凑化为短文件名 Token 并写入映射表。
+ */
+export function compactFileMentionsInText(
+  text: string,
+  workspaceFiles?: FileIndexEntry[],
+  existingMap: Record<string, string> = {},
+): { text: string; mentionMap: Record<string, string> } {
+  if (!text || !text.includes('@')) {
+    return { text, mentionMap: { ...existingMap } };
+  }
+
+  const nextMap: Record<string, string> = { ...existingMap };
+  const compacted = text.replace(MENTION_TOKEN_PATTERN, (full, prefix: string, rawToken: string) => {
+    const punctMatch = rawToken.match(MENTION_TRAILING_PUNCTUATION);
+    const punct = punctMatch ? punctMatch[0] : '';
+    const clean = punct ? rawToken.slice(0, -punct.length) : rawToken;
+
+    if (!clean || isSpecialMentionPrefix(clean) || !clean.includes('/')) {
+      return full;
+    }
+
+    const isDir = clean.endsWith('/');
+    const normClean = clean.replace(/\/+$/, '').replace(/^\.\//, '');
+    const matched = workspaceFiles?.find((entry) => entry.path.replace(/\/+$/, '') === normClean);
+    const actualIsDir = matched ? Boolean(matched.isDir) : isDir;
+    const fullTarget = actualIsDir ? `${normClean}/` : normClean;
+    const shortToken = getShortFileMentionToken(normClean, actualIsDir, nextMap);
+    nextMap[shortToken] = fullTarget;
+
+    return `${prefix}@${shortToken}${punct}`;
+  });
+
+  return { text: compacted, mentionMap: nextMap };
 }

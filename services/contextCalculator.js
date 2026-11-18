@@ -61,12 +61,21 @@ function calculateContextMetrics({
   skillsTokens: explicitSkillsTokens = undefined,
   maxTokensLimit = 1000000,
 }) {
-  // 1. Messages Token
+  // 1. Messages Token (排除 system 角色，避免系统提示词被双重计入)
   let messagesTokens = 0;
   for (const msg of messages) {
+    if (!msg || msg.role === "system") continue;
     messagesTokens += estimateContentTokens(msg.content);
     if (msg.tool_calls) {
       messagesTokens += estimateTokens(msg.tool_calls);
+    }
+    // 推理内容在开启回传后会随请求体上传，必须计入预算，
+    // 否则 maybeCompact 阈值会系统性低估并触发 provider 上下文溢出。
+    if (typeof msg.reasoning_content === "string" && msg.reasoning_content) {
+      messagesTokens += estimateTokens(msg.reasoning_content);
+    }
+    if (typeof msg.reasoning === "string" && msg.reasoning) {
+      messagesTokens += estimateTokens(msg.reasoning);
     }
   }
 
@@ -149,13 +158,20 @@ function calculateContextMetrics({
 }
 
 function formatTokenCount(count) {
-  if (count >= 1000000) {
-    return `${(count / 1000000).toFixed(count % 1000000 === 0 ? 0 : 1)}M`;
+  const num = Number(count) || 0;
+  if (num <= 0) {
+    return "0k";
   }
-  if (count >= 1000) {
-    return `${(count / 1000).toFixed(1)}k`;
+  if (num >= 1000000) {
+    return `${(num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1)}M`;
   }
-  return String(count);
+  if (num >= 1000) {
+    return `${(num / 1000).toFixed(1)}k`;
+  }
+  if (num >= 100) {
+    return `${(num / 1000).toFixed(1)}k`;
+  }
+  return "<0.1k";
 }
 
 module.exports = {

@@ -1,0 +1,13 @@
+{
+  "ok": false,
+  "cancelled": false,
+  "error": "请先在【设置】中配置该模型的 API Key",
+  "content": "",
+  "reasoning": "",
+  "durationMs": 833,
+  "toolRounds": 0,
+  "usage": null,
+  "costUsd": 0,
+  "model": "deepseek/deepseek-chat",
+  "provider": "openrouter"
+}

@@ -1,7 +1,10 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFileSync, execFile } = require("child_process");
+const { discoverSubagents } = require("../services/subagentService");
+const { getPermissionModePolicy } = require("../services/sandboxPolicyService");
+const { isUnderWorktreesRoot } = require("../services/gitWorktreeService");
 
 const RULES_BUDGET = 8000;
 const SKILLS_BUDGET = 20000;
@@ -29,7 +32,7 @@ const BEHAVIOR_SECTION = `你是 OMCX，一名运行在桌面客户端中的专�
 - **失败如实反馈**: 运行测试或构建失败时，直接展示原始失败堆栈并分析原因，严禁使用"应该没问题"掩盖错误。
 
 # 三、 工业级微创精准修改 (Surgical Precision)
-- **局部修改优于全量覆盖**: 必须优先使用 \`edit_file\` 进行基于上下文的精准替换，严禁全量重写大文件。\`write_file\` 仅允许用于创建全新文件。
+- **局部修改优于全量覆盖**: 必须优先使用 \`edit_file\` 进行基于上下文的精准替换，严禁全量重写大文件。\`write_file\` 仅允许用于创建全新文件或全量替换目标文档；若待生成的全新文件或文档超过 350 行，可先用 \`write_file\` 写入前半部分与骨架，再用 \`edit_file\` 分段追加后半部分，避免单次工具参数过大被截断。
 - **杜绝偷懒占位符**: 严禁在修改产出的代码中使用 \`// ... 保持原有逻辑不变\`、\`// TODO: rest of code\` 等截断占位符，这会导致严重的生产破坏！
 - **尊重现有代码生态**: 新写的代码必须与目标文件风格高度一致：严格匹配其命名风格、注释密度、单双引号规范、分号习惯及缩进机制（空格数或 Tab）。
 - **最小变动范围**: 仅修改达成目标所必需的代码行。严禁顺手格式化整篇文件、严禁修改公共接口签名或破坏无关模块的导入导出。
@@ -58,7 +61,41 @@ const BEHAVIOR_SECTION = `你是 OMCX，一名运行在桌面客户端中的专�
 
 # 七、 上下文管理与自律
 - **复用既有事实**: 在长对话中，直接复用已验证的结论与历史事实，严禁在每一轮无意义地重复推导或重复声明已有背景。
-- **上限感知**: 当感知到上下文接近上限或收到压缩通知时，先对当前代码状态与待办项做简要收敛，再继续执行。`;
+- **上限感知**: 当感知到上下文接近上限或收到压缩通知时，先对当前代码状态与待办项做简要收敛，再继续执行。
+
+# 八、 子代理自主调度与并行分治规范 (Subagent & Parallel Fan-out)
+你拥有 \`dispatch_subagent\` 工具，无需等待用户手动 \`@\`，你必须根据任务复杂度**自主判断**是否开启子代理：
+- **何时直接执行（不开启 Subagent）**:
+  - 已知确切文件路径、仅涉及 1~2 个文件的局部读取或修改、或预计 3 次以内工具调用即可完成的简单任务，由你直接调用 \`read_file\` / \`edit_file\` 完成，避免子代理启动开销。
+- **何时开启单个 Subagent（上下文隔离）**:
+  - 开放式代码库探索（不确定逻辑散落在哪些目录）、需要阅读超过 4 个文件或长日志排查根因、或需要对代码进行独立专项审查（\`reviewer\`）时，主动调用 \`dispatch_subagent\`，防止大量中间搜索内容污染主会话上下文。
+- **何时开启多 Subagent 并行处理（大型任务加速 Fan-out）**:
+  - 当遇到涉及多个独立目录、前后端多层、或多个子系统的大型任务时，优先使用 \`dispatch_subagent\` 的 \`tasks\` 数组参数（或在同一轮并发发起多个 \`dispatch_subagent\` 调用），将大任务拆解为 2~4 个正交子任务**并行执行**。
+  - **读写冲突红线**: 并行探索/分析任务全部设为 \`readOnly: true\`；若并行派发写代码的子代理（\`general\` 或 \`readOnly: false\`），必须确保各子代理负责的文件路径完全不重叠，或先由并行只读子代理完成各模块分析，再由你汇总统一执行文件修改。
+- **支持动态角色生成**: 除了预设的 \`explore\` / \`planner\` / \`reviewer\` / \`general\`，你可以随时通过 \`role\` 参数动态定义符合当前领域的专项角色（如 \`role: "Electron IPC 安全审计员"\`）。`;
+
+const WORK_BEHAVIOR_SECTION = `你是 OMCX，一名运行在桌面客户端中的自主通用工作智能体（Work Agent）。你的目标是以高准确度、严谨的证据溯源和清晰的交付物，协助用户完成文档整理、数据分析、信息调研、方案撰写、文件归档及脚本辅助自动化等通用工作任务。
+
+# 一、 沟通原则与输出规范
+- **高效直达，结构清晰**: 直奔主题，避免空洞客套。优先采用结论先行、结构化标题、要点列表或 Markdown 表格呈现核心信息与交付成果。
+- **语言策略**: 默认使用中文进行分析与回复；原始数据、文件名、专业术语与命令参数保留原始表述。
+- **严谨溯源**: 引用本地文件或网页内容时，明确给出对应的文件名称、路径（如 \`reports/q3-summary.md\`）或来源链接，严禁凭空编造数据、引用或结论。
+- **严禁无意义表情**: 全程严禁使用 Emoji 表情符号，保持专业克制的桌面工作台体验。
+
+# 二、 真实性与先读后做 (Evidence First)
+- **先查后答，杜绝臆造**: 在总结文档、汇总表格或处理文件前，必须先用 \`list_directory\`、\`read_file\` 或 \`search_code\` 核查真实文件内容与目录结构。
+- **遇歧义主动提问**: 当需求存在多种可选方案、交付格式不明确（如报告粒度、表格列设计、整理规则）或需要用户做关键拍板时，优先调用 \`ask_user_question\` 工具给出清晰选项，由用户点选确认后再继续执行。
+- **如实反馈**: 工具调用、数据解析或外部检索遇到异常时，直接说明原因与影响范围，不掩盖缺陷。
+
+# 三、 交付物与工作区操作规范
+- **优先产出可交付成果**: 若任务适合形成书面沉淀（报告、清单、方案、汇总表、HTML 可视化卡片等），主动使用 \`write_file\` / \`edit_file\` 将最终成果整理为独立且格式良好的本地文件（如 \`.md\`、\`.csv\`、\`.html\`），方便用户在右侧产物与工作台中直接预览和导出。
+- **专用工具优先**: 检索和读写文件优先使用 \`list_directory\`、\`read_file\`、\`search_code\`、\`write_file\`、\`edit_file\`；涉及文档格式转换、数据清洗或批量整理等确需脚本辅助的操作时，可使用 \`run_command\` 完成（保持最小变更范围，不覆盖原始重要资料）。
+- **无依赖并行调用**: 批量阅读多份资料或并发检索多个主题时，在同一轮中并行发起工具调用。
+
+# 四、 任务规划与安全红线
+- **多步骤规划**: 面对多文件整理、长篇调研汇报或跨步骤任务，使用 \`todo_write\` 建立 3 至 6 项清晰进度并在每一步推进状态；简单问答不要调用 \`todo_write\`。
+- **危险动作事前确认**: 批量删除、覆盖重要原始文件或执行不可逆外部操作前，先征得用户确认。
+- **隐私与目录隔离**: 严格保护用户凭据与隐私数据；所有文件操作严格限定在用户选定的目标工作空间目录内。`;
 
 function truncate(text, maxChars, label = "") {
   if (!text) return "";
@@ -82,6 +119,68 @@ function runGit(args, cwd) {
   } catch {
     return "";
   }
+}
+
+function runGitAsync(args, cwd) {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      args,
+      {
+        cwd,
+        timeout: 2500,
+        encoding: "utf8",
+      },
+      (err, stdout) => {
+        if (err || !stdout) return resolve("");
+        resolve(stdout.trim());
+      }
+    );
+  });
+}
+
+async function getGitSnapshotAsync(workDir) {
+  if (!workDir || !fs.existsSync(path.join(workDir, ".git"))) return null;
+
+  const cached = gitCache.get(workDir);
+  if (cached && Date.now() - cached.at < GIT_CACHE_TTL) {
+    return cached.value;
+  }
+
+  const [branchRaw, originHead, userRaw, statusRaw, commitsRaw] = await Promise.all([
+    runGitAsync(["rev-parse", "--abbrev-ref", "HEAD"], workDir),
+    runGitAsync(["symbolic-ref", "refs/remotes/origin/HEAD"], workDir),
+    runGitAsync(["config", "user.name"], workDir),
+    runGitAsync(["status", "--short"], workDir),
+    runGitAsync(["log", "--oneline", `-${RECENT_COMMITS}`], workDir),
+  ]);
+
+  const branch = branchRaw || "unknown";
+  let mainBranch = "";
+  if (originHead) {
+    mainBranch = originHead.replace("refs/remotes/origin/", "");
+  }
+  if (!mainBranch) {
+    const [hasMain, hasMaster] = await Promise.all([
+      runGitAsync(["rev-parse", "--verify", "main"], workDir),
+      runGitAsync(["rev-parse", "--verify", "master"], workDir),
+    ]);
+    if (hasMain) mainBranch = "main";
+    else if (hasMaster) mainBranch = "master";
+    else mainBranch = "main";
+  }
+
+  const user = userRaw || "unknown";
+  const statusLines = statusRaw ? statusRaw.split("\n").filter(Boolean) : [];
+  const commits = commitsRaw ? commitsRaw.split("\n").filter(Boolean) : [];
+
+  const value = { branch, mainBranch, user, statusLines, commits };
+  gitCache.set(workDir, { at: Date.now(), value });
+  if (gitCache.size > 20) {
+    const oldest = Array.from(gitCache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) gitCache.delete(oldest[0]);
+  }
+  return value;
 }
 
 function getGitSnapshot(workDir) {
@@ -120,8 +219,8 @@ function getGitSnapshot(workDir) {
   return value;
 }
 
-function buildBehaviorSection() {
-  return BEHAVIOR_SECTION;
+function buildBehaviorSection(agentMode = "code") {
+  return agentMode === "work" ? WORK_BEHAVIOR_SECTION : BEHAVIOR_SECTION;
 }
 
 function buildRulesSection(rules) {
@@ -216,6 +315,20 @@ function buildToolSection(toolDocs) {
   return `【工具手册】\n${body}`;
 }
 
+function buildSubagentSection(workDir) {
+  try {
+    const agents = discoverSubagents(workDir);
+    if (!agents || agents.length === 0) return "";
+    const lines = agents.map(
+      (a) =>
+        `- **${a.id}** (${a.name}, ${a.readOnly ? "只读" : "读写"}): ${a.description} [可用工具: ${(a.tools || []).join(", ")}]`
+    );
+    return `【预设子代理模板 (亦可通过 role 参数动态创建任意专项子代理)】\n${lines.join("\n")}`;
+  } catch {
+    return "";
+  }
+}
+
 function buildWorkspaceSection(matchedWorkspace, workDir) {
   if (matchedWorkspace && Array.isArray(matchedWorkspace.folders) && matchedWorkspace.folders.length > 0) {
     const folderLines = matchedWorkspace.folders
@@ -235,8 +348,38 @@ ${folderLines}
   return "";
 }
 
-function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model }) {
+function buildPermissionSandboxSection(permissionMode = "auto-sandbox") {
+  const policy = getPermissionModePolicy(permissionMode);
+  const lines = [
+    `【当前权限与沙箱模式: ${policy.label} (${policy.id})】`,
+    `- 模式说明: ${policy.description}`,
+  ];
+
+  if (policy.id === "plan") {
+    lines.push(
+      "- 执行约束: 当前处于只读规划模式，已隐藏 `write_file` / `edit_file` 工具，且所有子代理与命令均运行于只读沙箱中。请专注于代码检索、架构分析与方案设计（可使用 `todo_write` 拆解任务），切勿尝试修改文件。"
+    );
+  } else if (policy.id === "auto-sandbox") {
+    lines.push(
+      "- 执行约束: 工作空间目录内的文件读写与常规开发命令可自动执行；`run_command` 运行在 macOS Seatbelt (`workspace-write`) 内核沙箱内，禁止写入工作区外路径、`.git/hooks` 或 `.omcx` 配置，并严禁读取宿主机敏感凭据（`~/.ssh`、`~/.aws`、`~/.omcx/config.json`）。"
+    );
+  } else if (policy.id === "ask") {
+    lines.push(
+      "- 执行约束: 当前处于谨慎询问模式，每次调用 `write_file`、`edit_file` 或 `run_command` 均会请求用户确认，`run_command` 同时受工作区沙箱保护。请尽量合并同文件的修改以减少打扰。"
+    );
+  } else if (policy.id === "full-access") {
+    lines.push(
+      "- 执行约束: 当前已解除命令级 OS 沙箱限制，但高危破坏性命令与工作区外文件写入仍需用户确认，且宿主机高敏凭据路径仍受保护。"
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode = "auto-sandbox", agentMode = "code" }) {
+  const policy = getPermissionModePolicy(permissionMode);
   const lines = ["【环境信息】"];
+  lines.push(`- 工作模式: ${agentMode === "work" ? "通用工作 (work)" : "编程研发 (code)"}`);
   lines.push(`- 主工作目录: ${workDir || "未指定"}`);
 
   const extraFolders = matchedWorkspace?.folders
@@ -248,6 +391,7 @@ function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model }) 
     lines.push(`- 附加工作目录: ${extraFolders.join(", ")}`);
   }
 
+  lines.push(`- 权限与沙箱模式: ${policy.label} (${policy.id})`);
   lines.push(`- 是否 Git 仓库: ${gitInfo ? "true" : "false"}`);
   lines.push(`- 平台: ${process.platform} / Shell: ${process.env.SHELL || "unknown"} / 系统: ${process.platform} ${os.release()} ${os.arch()}`);
   lines.push(`- 当前日期: ${new Date().toISOString().slice(0, 10)}`);
@@ -284,6 +428,93 @@ function buildGitSection(gitInfo) {
   return parts.join("\n");
 }
 
+function buildCustomSystemPromptSection(customPrompt) {
+  if (!customPrompt || !String(customPrompt).trim()) return "";
+  return [
+    "【用户全局自定义系统指示 (User Custom Instructions)】",
+    "用户在全局设置中指定了以下专属行为偏好与研发要求，请与内置准则共同严格遵循：",
+    String(customPrompt).trim(),
+  ].join("\n");
+}
+
+function buildRepoMapSection(repoMap) {
+  if (!repoMap || !String(repoMap).trim()) return "";
+  return [
+    "【仓库符号地图 (Repo Map)】",
+    "以下地图由本地索引自动生成，按目录列出高价值源码文件及其符号与行号。请优先据此定位模块；需要精确符号位置时调用 `search_symbols`，需要全文检索时调用 `search_code`。",
+    String(repoMap).trim(),
+  ].join("\n");
+}
+
+function buildRepoWikiSection(repoWiki, repoWikiPath = "", repoWikiIsMulti = false) {
+  if (!repoWiki || !String(repoWiki).trim()) return "";
+  if (repoWikiIsMulti) {
+    return [
+      "【Repo Wiki（多目录工作空间架构文档摘要）】",
+      "以下内容按工作空间各仓库自动汇总（主目录优先分配摘要篇幅），如需某个仓库更细节的实现请按路径用 read_file 查看完整 wiki.md；如与代码事实冲突，以代码为准。",
+      String(repoWiki).trim(),
+    ].join("\n");
+  }
+  return [
+    "【Repo Wiki（仓库级架构文档摘要）】",
+    repoWikiPath ? `完整文档路径：${repoWikiPath}（需要细节时可用 read_file 查看）` : "",
+    "以下内容由仓库索引、README 与构建清单自动生成，适合快速理解模块职责与数据流；如与代码事实冲突，以代码为准。",
+    String(repoWiki).trim(),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildWorktreeSection(workDir) {
+  if (!isUnderWorktreesRoot(workDir)) return "";
+  return [
+    "【隔离工作树环境约束 (Isolated Worktree Mode)】",
+    "当前会话运行在独立的 Git Worktree 隔离目录中。为了避免多会话磁盘占用膨胀，系统未自动复制或安装项目的本地运行依赖环境。",
+    "- **禁止重型依赖安装**: 除非用户明确要求，不要在当前目录执行完整依赖安装或生成重型构建产物。",
+    "- **仅做基础语法验证**: 完成代码改动后，请根据当前项目的编程语言与已有环境自行判断，优先执行轻量级的基础语法/静态校验，不要假设完整运行时环境已就绪。",
+    "- **明确告知验证边界**: 在最终回复中必须明确说明：当前处于未复制依赖环境的隔离 Worktree，仅完成了基础语法校验；如需完整运行与功能验证，请先将代码合并到目标分支后在主工作区测试。",
+  ].join("\n");
+}
+
+function buildGitReminder(gitInfo) {
+  const section = buildGitSection(gitInfo);
+  if (!section) return "";
+  return `<system-reminder>\n${section}\n</system-reminder>`;
+}
+
+function buildTodoReminder(todos) {
+  const section = buildTodoSection(todos);
+  if (!section) return "";
+  return `<system-reminder>\n${section}\n</system-reminder>`;
+}
+
+function appendReminderToLastUserMessage(messages, reminderText) {
+  if (!Array.isArray(messages) || !reminderText || !String(reminderText).trim()) return false;
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx < 0) return false;
+  const target = messages[lastUserIdx];
+  const block = String(reminderText).trim();
+  if (Array.isArray(target.content)) {
+    messages[lastUserIdx] = {
+      ...target,
+      content: [...target.content, { type: "text", text: `\n\n${block}` }],
+    };
+  } else {
+    const base = typeof target.content === "string" ? target.content : String(target.content || "");
+    messages[lastUserIdx] = {
+      ...target,
+      content: base ? `${base}\n\n${block}` : block,
+    };
+  }
+  return true;
+}
+
 function buildSystemContext({
   workDir = null,
   matchedWorkspace = null,
@@ -291,12 +522,28 @@ function buildSystemContext({
   memories = [],
   memoryIndex = [],
   projectRules = [],
+  repoMap = "",
+  repoWiki = "",
+  repoWikiPath = "",
+  repoWikiIsMulti = false,
   todos = [],
   toolDocs = [],
   model = "",
   enableTools = true,
+  permissionMode = "auto-sandbox",
+  agentMode = "code",
+  customSystemPrompt = "",
+  gitInfo: providedGitInfo = undefined,
+  includeTodosInSystem = false,
+  includeGitInSystem = false,
 } = {}) {
-  const gitInfo = getGitSnapshot(workDir);
+  const normalizedMode = agentMode === "work" ? "work" : "code";
+  const gitInfo =
+    providedGitInfo !== undefined
+      ? providedGitInfo
+      : normalizedMode === "work"
+      ? null
+      : getGitSnapshot(workDir);
   const sections = [];
 
   const push = (name, content) => {
@@ -305,15 +552,41 @@ function buildSystemContext({
     sections.push({ name, content: text, chars: text.length, tokens: estimateTokens(text) });
   };
 
-  push("behavior", buildBehaviorSection());
+  push("behavior", buildBehaviorSection(normalizedMode));
+  push("sandbox", buildPermissionSandboxSection(permissionMode));
+  push("custom_prompt", buildCustomSystemPromptSection(customSystemPrompt));
   push("rules", buildRulesSection(projectRules));
+  if (normalizedMode !== "work") {
+    push("repo_map", buildRepoMapSection(repoMap));
+    push("repo_wiki", buildRepoWikiSection(repoWiki, repoWikiPath, repoWikiIsMulti));
+  }
   push("skills", buildSkillsSection(skills));
   push("memory", buildMemorySection(memories, memoryIndex));
-  push("todos", buildTodoSection(todos));
-  if (enableTools) push("tools", buildToolSection(toolDocs));
+  if (includeTodosInSystem) {
+    push("todos", buildTodoSection(todos));
+  }
+  if (enableTools) {
+    push("tools", buildToolSection(toolDocs));
+    push("subagents", buildSubagentSection(workDir));
+  }
   push("workspace", buildWorkspaceSection(matchedWorkspace, workDir));
-  push("environment", buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model }));
-  push("git", buildGitSection(gitInfo));
+  if (normalizedMode !== "work") {
+    push("worktree", buildWorktreeSection(workDir));
+  }
+  push(
+    "environment",
+    buildEnvironmentSection({
+      workDir,
+      matchedWorkspace,
+      gitInfo,
+      model,
+      permissionMode,
+      agentMode: normalizedMode,
+    })
+  );
+  if (includeGitInSystem && normalizedMode !== "work") {
+    push("git", buildGitSection(gitInfo));
+  }
 
   return {
     text: sections.map((section) => section.content).join("\n\n"),
@@ -323,6 +596,12 @@ function buildSystemContext({
 
 module.exports = {
   buildSystemContext,
+  buildGitSection,
+  buildTodoSection,
+  buildGitReminder,
+  buildTodoReminder,
+  appendReminderToLastUserMessage,
   getGitSnapshot,
+  getGitSnapshotAsync,
   truncate,
 };

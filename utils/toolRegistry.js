@@ -4,7 +4,7 @@
  * 设计原则：
  * 1. 松耦合：通过统一的 name/description/parameters/execute 四元组抽象
  * 2. 安全：工具执行带有效范围限制（cwd 限定在项目目录内）
- * 3. 增强：基于 LangChain StructuredTool 构建，支持 schema 校验、结构化输出
+ * 3. 增强：基于自研 StructuredTool 构建，支持 Zod schema 校验、结构化输出
  *
  * 所有工具的云原生定义、schema 校验、exec 逻辑均封装在 utils/tools/ 下。
  * 本模块负责集中注册并提供统一的 Function Calling 接口。
@@ -15,6 +15,23 @@ const { EditFileTool } = require("./tools/editFileTool");
 const { WebSearchTool, WebFetchTool } = require("./tools/webTools");
 const { RunCommandTool } = require("./tools/shellTools");
 const { TodoWriteTool } = require("./tools/todoTool");
+const { DispatchSubagentTool } = require("./tools/subagentTool");
+const { RepoMapTool, SearchSymbolsTool, FindReferencesTool } = require("./tools/repoIndexTools");
+const { RunSkillScriptTool } = require("./tools/skillTools");
+const { SpecWriteTool } = require("./tools/specTool");
+const { AskUserQuestionTool } = require("./tools/askUserTool");
+const { ReadDocumentTool, GenerateDocumentTool } = require("./tools/documentTools");
+const {
+  BrowserOpenTool,
+  BrowserInspectTool,
+  BrowserInteractTool,
+  BrowserLogsTool,
+  BrowserSnapshotTool,
+} = require("./tools/browserTools");
+const { getPermissionModePolicy } = require("../services/sandboxPolicyService");
+
+const WRITE_FILE_TOOL_NAMES = new Set(["write_file", "edit_file", "generate_document"]);
+const CODE_ONLY_TOOL_NAMES = new Set(["repo_map", "search_symbols", "find_references"]);
 
 class ToolRegistry {
   constructor() {
@@ -59,11 +76,30 @@ class ToolRegistry {
 
   /**
    * 获取 LLM Function Calling 所需的工具定义列表 (OpenAI-compatible)
+   * @param {Array<{name:string, description:string, parameters:object}>} [extraTools]
+   * @param {Set<string>|null} [allowedToolNames] 可选工具白名单（用于 Subagent 权限收敛）
+   * @param {object} [options] 可选过滤配置（如 permissionMode）
    * @returns {Array<{type:string, function:{name:string, description:string, parameters:object}}>}
    */
-  getToolDefinitions() {
+  getToolDefinitions(extraTools = [], allowedToolNames = null, options = {}) {
     const defs = [];
-    for (const tool of this._tools.values()) {
+    const policy = options?.permissionMode
+      ? getPermissionModePolicy(options.permissionMode)
+      : null;
+    const blockFileWrite = policy ? !policy.allowFileWrite : false;
+    const isWorkMode = options?.agentMode === "work";
+    const allTools = [...this._tools.values(), ...(Array.isArray(extraTools) ? extraTools : [])];
+    for (const tool of allTools) {
+      if (blockFileWrite && WRITE_FILE_TOOL_NAMES.has(tool.name)) {
+        continue;
+      }
+      if (isWorkMode && CODE_ONLY_TOOL_NAMES.has(tool.name)) {
+        continue;
+      }
+      // 白名单对内置工具与 MCP 工具一视同仁，Subagent 权限收敛不允许出现 mcp__ 旁路
+      if (allowedToolNames && !allowedToolNames.has(tool.name)) {
+        continue;
+      }
       defs.push({
         type: "function",
         function: {
@@ -74,6 +110,10 @@ class ToolRegistry {
       });
     }
     return defs;
+  }
+
+  getOpenAIToolDefinitions(extraTools = [], allowedToolNames = null, options = {}) {
+    return this.getToolDefinitions(extraTools, allowedToolNames, options);
   }
 
   /**
@@ -88,10 +128,24 @@ class ToolRegistry {
 
   /**
    * 生成紧凑的工具手册（参数签名 + 描述），用于 system prompt
+   * @param {Array<{name:string, description:string, parameters:object}>} [extraTools]
+   * @param {object} [options]
    */
-  getToolPromptDocs() {
+  getToolPromptDocs(extraTools = [], options = {}) {
     const docs = [];
-    for (const tool of this._tools.values()) {
+    const policy = options?.permissionMode
+      ? getPermissionModePolicy(options.permissionMode)
+      : null;
+    const blockFileWrite = policy ? !policy.allowFileWrite : false;
+    const isWorkMode = options?.agentMode === "work";
+    const allTools = [...this._tools.values(), ...(Array.isArray(extraTools) ? extraTools : [])];
+    for (const tool of allTools) {
+      if (blockFileWrite && WRITE_FILE_TOOL_NAMES.has(tool.name)) {
+        continue;
+      }
+      if (isWorkMode && CODE_ONLY_TOOL_NAMES.has(tool.name)) {
+        continue;
+      }
       const properties = tool.parameters?.properties || {};
       const required = new Set(tool.parameters?.required || []);
 
@@ -113,20 +167,33 @@ class ToolRegistry {
   }
 
   /**
-   * 执行指定工具
+   * 执行指定工具（支持会话级隔离上下文与动态扩展工具）
    * @param {string} name
    * @param {object} args
    * @param {object} [context]
+   * @param {Array<{name:string, execute:Function}>} [extraTools]
    * @returns {Promise<{success:boolean, data?:any, error?:string}>}
    */
-  async execute(name, args, context = {}) {
-    const tool = this._tools.get(name);
+  async execute(name, args, context = {}, extraTools = []) {
+    let tool = this._tools.get(name);
+    if (!tool && Array.isArray(extraTools)) {
+      tool = extraTools.find((t) => t && t.name === name);
+    }
     if (!tool) {
       return { success: false, error: `未找到工具: ${name}` };
     }
     try {
       const resolvedContext = { ...this.getContext(), ...context };
       const result = await tool.execute(args, resolvedContext);
+      if (result && typeof result === "object" && (result.success === false || result.ok === false)) {
+        const innerError =
+          typeof result.error === "string" && result.error.trim()
+            ? result.error
+            : typeof result.message === "string" && result.message.trim()
+            ? result.message
+            : `工具 ${name} 执行失败`;
+        return { success: false, error: innerError, data: result };
+      }
       return { success: true, data: result };
     } catch (err) {
       return { success: false, error: err.message || String(err) };
@@ -218,20 +285,23 @@ function zodShapeToJsonSchema(zodObj) {
   // StructuredTool.schema 是 @standard-schema/spec 兼容对象，有 toJSONSchema() 方法
   if (typeof zodObj?.toJSONSchema === "function") {
     const jsonSchema = zodObj.toJSONSchema();
+    const rawRequired = Array.isArray(jsonSchema.required) ? new Set(jsonSchema.required) : null;
     // 转换：将有 default 值的参数从 required 中移除（LLM 不填也会用默认值）
     const properties = {};
     const required = [];
     if (jsonSchema.properties) {
       for (const [key, prop] of Object.entries(jsonSchema.properties)) {
         properties[key] = {
+          ...prop,
           type: prop.type || "string",
           description: prop.description || "",
         };
         if (prop.default !== undefined) {
           properties[key].default = prop.default;
         }
-        // 只有没有 default 值的参数才标记为 required
-        if (prop.default === undefined) {
+        // 只有没有 default 值且原本为必填的参数才标记为 required
+        const isReq = rawRequired ? rawRequired.has(key) : prop.default === undefined;
+        if (isReq && prop.default === undefined) {
           required.push(key);
         }
       }
@@ -261,13 +331,13 @@ function zodShapeToJsonSchema(zodObj) {
 }
 
 /**
- * 从 LangChain StructuredTool 创建注册条目
+ * 从 StructuredTool 实例创建注册条目
  */
-function fromLangChainTool(lcTool) {
-  const parameters = zodShapeToJsonSchema(lcTool.schema);
+function registerStructuredTool(toolInstance) {
+  const parameters = zodShapeToJsonSchema(toolInstance.schema);
   return {
-    name: lcTool.name,
-    description: lcTool.description,
+    name: toolInstance.name,
+    description: toolInstance.description,
     parameters,
     execute: async (args, context = {}) => {
       // StructuredTool 的 _call 方法直接处理参数并返回 JSON string
@@ -275,12 +345,16 @@ function fromLangChainTool(lcTool) {
       const allowedFolders = context?.allowedFolders || [];
       const checkPermission = context?.checkPermission || null;
       const onTodosUpdate = context?.onTodosUpdate || null;
-      const resultStr = await lcTool._call({
+      const abortSignal = context?.abortSignal || null;
+      const resultStr = await toolInstance._call({
         ...args,
         __workDir: workDir,
         __allowedFolders: allowedFolders,
         __checkPermission: checkPermission,
         __onTodosUpdate: onTodosUpdate,
+        __abortSignal: abortSignal,
+        __toolContext: context,
+        __toolRegistry: toolRegistry,
       });
       try {
         return JSON.parse(resultStr);
@@ -294,18 +368,32 @@ function fromLangChainTool(lcTool) {
 // ─── 注册所有增强工具 ────────────────────────────────────────
 
 const ALL_TOOLS = [
-  fromLangChainTool(new ReadFileTool()),
-  fromLangChainTool(new EditFileTool()),
-  fromLangChainTool(new WriteFileTool()),
-  fromLangChainTool(new ListDirectoryTool()),
-  fromLangChainTool(new SearchCodeTool()),
-  fromLangChainTool(new RunCommandTool()),
-  fromLangChainTool(new WebFetchTool()),
-  fromLangChainTool(new TodoWriteTool()),
+  registerStructuredTool(new ReadFileTool()),
+  registerStructuredTool(new EditFileTool()),
+  registerStructuredTool(new WriteFileTool()),
+  registerStructuredTool(new ListDirectoryTool()),
+  registerStructuredTool(new SearchCodeTool()),
+  registerStructuredTool(new RunCommandTool()),
+  registerStructuredTool(new WebFetchTool()),
+  registerStructuredTool(new TodoWriteTool()),
+  registerStructuredTool(new DispatchSubagentTool({}, toolRegistry)),
+  registerStructuredTool(new RepoMapTool()),
+  registerStructuredTool(new SearchSymbolsTool()),
+  registerStructuredTool(new FindReferencesTool()),
+  registerStructuredTool(new SpecWriteTool()),
+  registerStructuredTool(new RunSkillScriptTool()),
+  registerStructuredTool(new AskUserQuestionTool()),
+  registerStructuredTool(new ReadDocumentTool()),
+  registerStructuredTool(new GenerateDocumentTool()),
+  registerStructuredTool(new BrowserOpenTool()),
+  registerStructuredTool(new BrowserInspectTool()),
+  registerStructuredTool(new BrowserInteractTool()),
+  registerStructuredTool(new BrowserLogsTool()),
+  registerStructuredTool(new BrowserSnapshotTool()),
 ];
 
 // web_search 需要一个可选的 searchConfig，注册时不传参使用默认配置
-ALL_TOOLS.push(fromLangChainTool(new WebSearchTool()));
+ALL_TOOLS.push(registerStructuredTool(new WebSearchTool()));
 
 for (const tool of ALL_TOOLS) {
   toolRegistry.register(tool);
