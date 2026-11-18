@@ -12,6 +12,8 @@ const {
   getGitCommitDetail,
   commitWorkspaceChanges,
   checkoutWorkspaceBranch,
+  gitCreateBranchAt,
+  gitPush,
 } = require("../services/workspaceGitService");
 
 function git(cwd, ...args) {
@@ -63,5 +65,54 @@ test("workspaceGitService 在真实临时仓库上的状态/提交/分支/图谱
     assert.match(detail.stat || "", /new\.txt/);
   } finally {
     fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("gitCreateBranchAt 与 gitPush 处理异名上游错绑场景", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-git-push-test-"));
+  const bareDir = path.join(rootDir, "remote.git");
+  const repoDir = path.join(rootDir, "local");
+  try {
+    git(rootDir, "init", "--bare", "-b", "main", bareDir);
+    git(rootDir, "clone", bareDir, repoDir);
+    git(repoDir, "config", "user.email", "test@omcx.local");
+    git(repoDir, "config", "user.name", "OMCX Tester");
+
+    // 初始化 main 并推至远端
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Init\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "chore: init main");
+    git(repoDir, "branch", "-M", "main");
+    git(repoDir, "push", "-u", "origin", "main");
+    const mainHead = git(repoDir, "rev-parse", "HEAD");
+
+    // 1. 从 origin/main 创建新分支不应追踪 origin/main
+    const createRes = await gitCreateBranchAt(repoDir, "feature/clean", "origin/main");
+    assert.equal(createRes.success, true);
+    assert.throws(() => git(repoDir, "rev-parse", "--abbrev-ref", "@{u}"));
+
+    // 2. 人为制造历史遗留的异名追踪错绑：zhoushijie 错绑为 origin/main
+    git(repoDir, "checkout", "-b", "zhoushijie", "origin/main");
+    git(repoDir, "branch", "--set-upstream-to=origin/main", "zhoushijie");
+    fs.writeFileSync(path.join(repoDir, "work.txt"), "feature change\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "feat: local work");
+
+    // 触发推送：应自动推送到 origin/zhoushijie 并修正上游追踪，而不报错也不污染 origin/main
+    const pushRes = await gitPush(repoDir);
+    assert.equal(pushRes.success, true, pushRes.error);
+    assert.match(pushRes.message || "", /origin\/zhoushijie/);
+    assert.equal(git(repoDir, "rev-parse", "--abbrev-ref", "@{u}"), "origin/zhoushijie");
+    assert.equal(git(bareDir, "rev-parse", "refs/heads/main"), mainHead);
+    assert.equal(git(bareDir, "rev-parse", "refs/heads/zhoushijie"), git(repoDir, "rev-parse", "HEAD"));
+
+    // 3. 修正上游后的后续再次提交推送正常走普通 push
+    fs.writeFileSync(path.join(repoDir, "work.txt"), "feature change 2\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "feat: follow up");
+    const pushRes2 = await gitPush(repoDir);
+    assert.equal(pushRes2.success, true, pushRes2.error);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
   }
 });
