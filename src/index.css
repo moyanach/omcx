@@ -1,9 +1,18 @@
+@import "katex/dist/katex.min.css";
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  --omcx-ui-font: Inter, system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", Avenir, Helvetica, Arial, sans-serif;
+  --omcx-terminal-font: "SFMono-Regular", "JetBrains Mono", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Maple Mono NF", "MesloLGS NF", "JetBrainsMono Nerd Font",
+    "Hack Nerd Font", "FiraCode Nerd Font", "CaskaydiaCove Nerd Font",
+    "Symbols Nerd Font", "Apple Symbols", "Arial Unicode MS", "Apple Color Emoji",
+    monospace;
+  --omcx-terminal-font-size: 12px;
+  font-family: var(--omcx-ui-font);
   line-height: 1.5;
   font-weight: 400;
 
@@ -13,18 +22,24 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* 让 Tailwind 的 font-sans 工具类跟随「界面字体」设置 */
+.font-sans {
+  font-family: var(--omcx-ui-font);
+}
+
 /* ─── 暗色主题（默认） ─── */
-html[data-theme="dark"] {
+html[data-theme="dark"],
+:root {
   color-scheme: dark;
   color: rgba(255, 255, 255, 0.87);
-  background-color: #1a1a1a;
+  background-color: #141414;
 
-  --app-bg: #1a1a1a;
+  --app-bg: #141414;
   --surface: #202020;
   --surface-muted: #151515;
   --assistant-bubble: #2a2a2a;
-  --border: rgba(148, 163, 184, 0.22);
-  --border-strong: rgba(148, 163, 184, 0.32);
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.10);
   --text-primary: #f3f4f6;
   --text-secondary: #9ca3af;
   --text-muted: #6b7280;
@@ -42,13 +57,232 @@ html[data-theme="dark"] {
   /* Sidebar */
   --sidebar-bg: #111111;
   --sidebar-hover: rgba(255, 255, 255, 0.08);
+
+  /* 语义化分层表面（会话区 / 监控栏 / 代码块 / Diff 浮层，暗色半透明毛玻璃） */
+  --ui-app-bg: #121212;
+  --ui-panel-bg: rgba(20, 20, 23, 0.78);
+  --ui-stage-wrap-bg: #131313;
+  --ui-stage-bg: rgba(23, 23, 26, 0.82);
+  --ui-card-bg: rgba(255, 255, 255, 0.04);
+  --ui-card-hover-bg: rgba(255, 255, 255, 0.068);
+  --ui-card-header-bg: rgba(255, 255, 255, 0.035);
+  --ui-card-inner-bg: rgba(0, 0, 0, 0.16);
+  --ui-block-bg: rgba(255, 255, 255, 0.035);
+  --ui-block-hover-bg: rgba(255, 255, 255, 0.075);
+  --ui-block-body-bg: rgba(0, 0, 0, 0.16);
+  --ui-bubble-assistant-bg: rgba(255, 255, 255, 0.024);
+  --ui-bubble-user-bg: rgba(255, 255, 255, 0.065);
+  --ui-input-bg: rgba(255, 255, 255, 0.045);
+  --ui-input-hover-bg: rgba(255, 255, 255, 0.068);
+  --ui-composer-bg: rgba(255, 255, 255, 0.045);
+  --ui-composer-hover-bg: rgba(255, 255, 255, 0.068);
+  --ui-chip-bg: rgba(255, 255, 255, 0.07);
+  --ui-chip-hover-bg: rgba(255, 255, 255, 0.12);
+  --ui-popover-bg: rgba(24, 24, 28, 0.88);
+  --ui-dropdown-solid-bg: #1c1c21;
+  --ui-dropdown-solid-border: rgba(255, 255, 255, 0.14);
+  --ui-livebar-bg: rgba(22, 22, 22, 0.94);
+  --ui-code-bg: rgba(0, 0, 0, 0.22);
+  --ui-code-header-bg: rgba(255, 255, 255, 0.04);
+  --ui-code-subheader-bg: rgba(255, 255, 255, 0.025);
+  --ui-terminal-bg: #0f0f10;
+
+  /* 隐约可见的发丝级边框与分割线 */
+  --ui-border-hairline: rgba(255, 255, 255, 0.07);
+  --ui-border-subtle: rgba(255, 255, 255, 0.11);
+  --ui-divider-hairline: rgba(255, 255, 255, 0.06);
+
+  /* 阴影 */
+  --ui-stage-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.45);
+  --ui-popover-shadow: 0 24px 56px -12px rgba(0, 0, 0, 0.8);
+
+  /* 文字与语义色 */
+  --ui-text-primary: #f3f4f6;
+  --ui-text-secondary: #d4d4d8;
+  --ui-text-muted: #9ca3af;
+  --ui-text-faint: #71717a;
+
+  --ui-accent-blue: #60a5fa;
+  --ui-accent-blue-soft: rgba(59, 130, 246, 0.12);
+  --ui-accent-blue-border: rgba(59, 130, 246, 0.25);
+  --ui-btn-primary-bg: rgba(59, 130, 246, 0.22);
+  --ui-btn-primary-hover-bg: rgba(59, 130, 246, 0.32);
+  --ui-btn-primary-border: rgba(96, 165, 250, 0.36);
+  --ui-btn-primary-text: #93c5fd;
+  --ui-btn-emerald-bg: rgba(16, 185, 129, 0.20);
+  --ui-btn-emerald-hover-bg: rgba(16, 185, 129, 0.30);
+  --ui-btn-emerald-border: rgba(52, 211, 153, 0.34);
+  --ui-btn-emerald-text: #6ee7b7;
+  /* 输入框聚焦光晕：柔和不描边，深浅主题都清晰可见 */
+  --ui-focus-ring: rgba(96, 165, 250, 0.42);
+  --ui-modal-overlay: rgba(0, 0, 0, 0.60);
+  /* 模态浮层底色：高不透明度毛玻璃，避免壁纸/页面内容透出成"鬼影" */
+  --ui-modal-bg: rgba(24, 24, 28, 0.94);
+
+  --ui-accent-emerald: #34d399;
+  --ui-accent-emerald-soft: rgba(16, 185, 129, 0.12);
+  --ui-accent-emerald-border: rgba(16, 185, 129, 0.22);
+
+  --ui-accent-rose: #fb7185;
+  --ui-accent-rose-soft: rgba(244, 63, 94, 0.12);
+  --ui-accent-rose-border: rgba(244, 63, 94, 0.22);
+
+  --ui-accent-amber: #fbbf24;
+  --ui-accent-amber-soft: rgba(245, 158, 11, 0.12);
+  --ui-accent-amber-border: rgba(245, 158, 11, 0.22);
+
+  --ui-accent-purple: #c084fc;
+  --ui-accent-sky: #38bdf8;
+  --ui-accent-sky-soft: rgba(14, 165, 233, 0.12);
+  --ui-accent-sky-border: rgba(14, 165, 233, 0.24);
+
+  /* Diff 语义 */
+  --ui-diff-add-bg: rgba(16, 185, 129, 0.12);
+  --ui-diff-add-text: #d1fae5;
+  --ui-diff-del-bg: rgba(244, 63, 94, 0.12);
+  --ui-diff-del-text: #ffe4e6;
+  --ui-diff-empty-bg: rgba(255, 255, 255, 0.015);
+  --ui-diff-hunk-bg: rgba(59, 130, 246, 0.10);
+  --ui-diff-hunk-text: #93c5fd;
+
+  /* Markdown 细节 */
+  --md-link: #818cf8;
+  --md-link-hover: #6366f1;
+  --md-code-bg: rgba(255, 255, 255, 0.07);
+  --md-code-border: rgba(255, 255, 255, 0.07);
+  --md-code-text: #a5b4fc;
+  --md-blockquote-border: rgba(255, 255, 255, 0.14);
+}
+
+/* ─── 亮色主题 ─── */
+html[data-theme="light"] {
+  color-scheme: light;
+  color: #0f172a;
+  background-color: #f5f7fa;
+
+  --app-bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --assistant-bubble: #ffffff;
+  --border: rgba(15, 23, 42, 0.055);
+  --border-strong: rgba(15, 23, 42, 0.09);
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --accent-indigo: #4f46e5;
+  --accent-indigo-soft: rgba(79, 70, 229, 0.09);
+  --accent-violet: #7c3aed;
+  --accent-violet-soft: rgba(124, 58, 237, 0.09);
+  --accent-cyan: #0891b2;
+  --accent-cyan-soft: rgba(8, 145, 178, 0.09);
+  --accent-emerald: #059669;
+  --accent-emerald-soft: rgba(5, 150, 105, 0.09);
+  --accent-red: #dc2626;
+  --accent-red-soft: rgba(220, 38, 38, 0.09);
+
+  /* Sidebar */
+  --sidebar-bg: #f1f5f9;
+  --sidebar-hover: rgba(15, 23, 42, 0.05);
+
+  /* 语义化分层表面（亮色半透明毛玻璃，纯净透亮，绝无灰蒙感） */
+  --ui-app-bg: #eef2f7;
+  --ui-panel-bg: rgba(255, 255, 255, 0.86);
+  --ui-stage-wrap-bg: #f1f5f9;
+  --ui-stage-bg: rgba(255, 255, 255, 0.92);
+  --ui-card-bg: rgba(255, 255, 255, 0.42);
+  --ui-card-hover-bg: rgba(255, 255, 255, 0.58);
+  --ui-card-header-bg: rgba(15, 23, 42, 0.028);
+  --ui-card-inner-bg: rgba(15, 23, 42, 0.035);
+  --ui-block-bg: rgba(15, 23, 42, 0.035);
+  --ui-block-hover-bg: rgba(15, 23, 42, 0.07);
+  --ui-block-body-bg: rgba(255, 255, 255, 0.85);
+  --ui-bubble-assistant-bg: rgba(255, 255, 255, 0.84);
+  --ui-bubble-user-bg: rgba(15, 23, 42, 0.048);
+  --ui-input-bg: rgba(15, 23, 42, 0.024);
+  --ui-input-hover-bg: rgba(15, 23, 42, 0.042);
+  --ui-composer-bg: rgba(255, 255, 255, 0.68);
+  --ui-composer-hover-bg: rgba(255, 255, 255, 0.82);
+  --ui-chip-bg: rgba(15, 23, 42, 0.055);
+  --ui-chip-hover-bg: rgba(15, 23, 42, 0.10);
+  --ui-popover-bg: rgba(255, 255, 255, 0.88);
+  --ui-dropdown-solid-bg: #ffffff;
+  --ui-dropdown-solid-border: rgba(15, 23, 42, 0.14);
+  --ui-livebar-bg: rgba(255, 255, 255, 0.95);
+  --ui-code-bg: rgba(15, 23, 42, 0.028);
+  --ui-code-header-bg: rgba(15, 23, 42, 0.052);
+  --ui-code-subheader-bg: rgba(15, 23, 42, 0.036);
+  --ui-terminal-bg: #f8fafc;
+
+  /* 隐约可见的发丝级边框与分割线 */
+  --ui-border-hairline: rgba(15, 23, 42, 0.07);
+  --ui-border-subtle: rgba(15, 23, 42, 0.11);
+  --ui-divider-hairline: rgba(15, 23, 42, 0.06);
+
+  /* 阴影 */
+  --ui-stage-shadow: 0 4px 20px -6px rgba(15, 23, 42, 0.06);
+  --ui-popover-shadow: 0 18px 46px -12px rgba(15, 23, 42, 0.16);
+
+  /* 文字与语义色（亮色下确保深色高对比可读性） */
+  --ui-text-primary: #0f172a;
+  --ui-text-secondary: #334155;
+  --ui-text-muted: #64748b;
+  --ui-text-faint: #94a3b8;
+
+  --ui-accent-blue: #1d4ed8;
+  --ui-accent-blue-soft: rgba(37, 99, 235, 0.08);
+  --ui-accent-blue-border: rgba(37, 99, 235, 0.18);
+  --ui-btn-primary-bg: rgba(59, 130, 246, 0.12);
+  --ui-btn-primary-hover-bg: rgba(59, 130, 246, 0.19);
+  --ui-btn-primary-border: rgba(37, 99, 235, 0.24);
+  --ui-btn-primary-text: #2563eb;
+  --ui-btn-emerald-bg: rgba(16, 185, 129, 0.12);
+  --ui-btn-emerald-hover-bg: rgba(16, 185, 129, 0.20);
+  --ui-btn-emerald-border: rgba(5, 150, 105, 0.24);
+  --ui-btn-emerald-text: #047857;
+  --ui-focus-ring: rgba(37, 99, 235, 0.30);
+  --ui-modal-overlay: rgba(15, 23, 42, 0.28);
+  --ui-modal-bg: rgba(255, 255, 255, 0.96);
+
+  --ui-accent-emerald: #047857;
+  --ui-accent-emerald-soft: rgba(16, 185, 129, 0.10);
+  --ui-accent-emerald-border: rgba(5, 150, 105, 0.20);
+
+  --ui-accent-rose: #be123c;
+  --ui-accent-rose-soft: rgba(225, 29, 72, 0.08);
+  --ui-accent-rose-border: rgba(225, 29, 72, 0.18);
+
+  --ui-accent-amber: #b45309;
+  --ui-accent-amber-soft: rgba(217, 119, 6, 0.09);
+  --ui-accent-amber-border: rgba(217, 119, 6, 0.18);
+
+  --ui-accent-purple: #7e22ce;
+  --ui-accent-sky: #0369a1;
+  --ui-accent-sky-soft: rgba(2, 132, 199, 0.09);
+  --ui-accent-sky-border: rgba(2, 132, 199, 0.20);
+
+  /* Diff 语义（浅底深字，鲜明可读） */
+  --ui-diff-add-bg: rgba(16, 185, 129, 0.10);
+  --ui-diff-add-text: #065f46;
+  --ui-diff-del-bg: rgba(239, 68, 68, 0.085);
+  --ui-diff-del-text: #9f1239;
+  --ui-diff-empty-bg: rgba(15, 23, 42, 0.02);
+  --ui-diff-hunk-bg: rgba(37, 99, 235, 0.07);
+  --ui-diff-hunk-text: #1d4ed8;
+
+  /* Markdown 细节 */
+  --md-link: #4338ca;
+  --md-link-hover: #3730a3;
+  --md-code-bg: rgba(15, 23, 42, 0.055);
+  --md-code-border: rgba(15, 23, 42, 0.09);
+  --md-code-text: #1e40af;
+  --md-blockquote-border: rgba(15, 23, 42, 0.12);
 }
 
 body {
   margin: 0;
   overflow: hidden;
-  background-color: #111111;
-  color: #f3f4f6;
+  background-color: var(--ui-app-bg);
+  color: var(--ui-text-primary);
 }
 
 /* ─── 主题变量工具类 ─── */
@@ -71,6 +305,32 @@ body {
 .theme-accent-emerald-soft { background-color: var(--accent-emerald-soft); }
 .theme-accent-red { color: var(--accent-red); }
 .theme-accent-red-soft { background-color: var(--accent-red-soft); }
+
+/* 工作台与全局 UI 语义别名类（自动跟随暗色/亮色主题） */
+.bg-ui-bg { background-color: var(--ui-stage-bg); }
+.bg-ui-panel { background-color: var(--ui-panel-bg); }
+.bg-ui-panel-2 { background-color: var(--ui-card-inner-bg); }
+.text-ui-text { color: var(--ui-text-primary); }
+.text-ui-muted { color: var(--ui-text-muted); }
+.text-ui-subtle { color: var(--ui-text-faint); }
+
+/* 随主题自适应的柔和语义按钮 */
+.ui-btn-primary {
+  background-color: var(--ui-btn-primary-bg);
+  color: var(--ui-btn-primary-text);
+  border: 1px solid var(--ui-btn-primary-border);
+}
+.ui-btn-primary:hover:not(:disabled) {
+  background-color: var(--ui-btn-primary-hover-bg);
+}
+.ui-btn-emerald {
+  background-color: var(--ui-btn-emerald-bg);
+  color: var(--ui-btn-emerald-text);
+  border: 1px solid var(--ui-btn-emerald-border);
+}
+.ui-btn-emerald:hover:not(:disabled) {
+  background-color: var(--ui-btn-emerald-hover-bg);
+}
 
 /* ─── 侧边栏容器 ─── */
 .sidebar-container {
@@ -139,7 +399,7 @@ body {
   line-height: 1.25;
   margin-top: 1.25rem;
   margin-bottom: 0.5rem;
-  color: #f3f4f6;
+  color: var(--ui-text-primary);
 }
 
 .markdown-body h1 { font-size: 1.4rem; }
@@ -147,39 +407,40 @@ body {
 .markdown-body h3 { font-size: 1.1rem; }
 
 .markdown-body a {
-  color: #818cf8;
+  color: var(--md-link);
   text-decoration: underline;
 }
 
 .markdown-body a:hover {
-  color: #6366f1;
+  color: var(--md-link-hover);
 }
 
-.markdown-body pre {
-  background-color: #121212;
+.markdown-body > pre {
+  background-color: var(--ui-code-bg);
   padding: 0.85rem;
   border-radius: 0.5rem;
   overflow-x: auto;
   margin-top: 0.75rem;
   margin-bottom: 0.75rem;
-  border: 1px solid rgba(75, 85, 99, 0.4);
+  border: 1px solid var(--ui-border-hairline);
 }
 
-.markdown-body code {
+.markdown-body :not(pre) > code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.85em;
-  background-color: rgba(255, 255, 255, 0.1);
-  padding: 0.15rem 0.35rem;
-  border-radius: 0.25rem;
-  color: #a5b4fc;
+  background-color: var(--md-code-bg);
+  border: 1px solid var(--md-code-border);
+  padding: 0.12rem 0.35rem;
+  border-radius: 0.3rem;
+  color: var(--md-code-text);
 }
 
-.markdown-body pre code {
-  background-color: transparent;
+.markdown-body pre code,
+.markdown-body pre span {
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
   padding: 0;
-  border-radius: 0;
-  color: #e5e7eb;
-  font-size: 0.9em;
 }
 
 .markdown-body ul {
@@ -202,9 +463,9 @@ body {
 }
 
 .markdown-body blockquote {
-  border-left: 4px solid #4b5563;
+  border-left: 3px solid var(--md-blockquote-border);
   padding-left: 1rem;
-  color: #9ca3af;
+  color: var(--ui-text-muted);
   margin-top: 0.75rem;
   margin-bottom: 0.75rem;
   font-style: italic;
@@ -219,21 +480,25 @@ body {
 
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid rgba(75, 85, 99, 0.4);
+  border: 1px solid var(--ui-divider-hairline);
   padding: 0.5rem 0.75rem;
 }
 
 .markdown-body th {
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: var(--ui-chip-bg);
   font-weight: 600;
   text-align: left;
 }
 
 .markdown-body hr {
   border: 0;
-  border-top: 1px solid rgba(75, 85, 99, 0.4);
+  border-top: 1px solid var(--ui-divider-hairline);
   margin-top: 1.25rem;
   margin-bottom: 1.25rem;
+}
+
+.ui-divide-hairline > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--ui-divider-hairline);
 }
 
 /* ─── 全局精致高对比滚动条 (确保可见且支持拖拽) ─── */
@@ -272,5 +537,76 @@ html[data-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb {
 }
 html[data-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #64748b !important;
+}
+
+/* ─── 实时状态条：会话进行中顺时针周长环绕边框流光特效 (Border Beam) ─── */
+@keyframes omcx-border-beam-flow {
+  0% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: -100;
+  }
+}
+
+.omcx-border-beam-core {
+  stroke-dasharray: 20 80;
+  animation: omcx-border-beam-flow 3.2s linear infinite;
+}
+
+.omcx-border-beam-glow {
+  stroke-dasharray: 22 78;
+  animation: omcx-border-beam-flow 3.2s linear infinite;
+  filter: drop-shadow(0 0 6px rgba(96, 165, 250, 0.8)) drop-shadow(0 0 12px rgba(59, 130, 246, 0.5));
+}
+
+html[data-theme="light"] .omcx-border-beam-glow {
+  filter: drop-shadow(0 0 5px rgba(37, 99, 235, 0.65)) drop-shadow(0 0 10px rgba(59, 130, 246, 0.4));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .omcx-border-beam-core,
+  .omcx-border-beam-glow {
+    animation: none;
+    stroke-dasharray: none;
+  }
+}
+
+/* 呼吸微光图标特效 (替代雷达式扩散) */
+@keyframes omcx-pulse-glow {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+    filter: drop-shadow(0 0 6px rgba(96, 165, 250, 0.85));
+  }
+}
+
+.omcx-icon-pulse-glow {
+  animation: omcx-pulse-glow 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ─── 表单控件聚焦态统一 ───
+ * Chromium 原生 focus ring 是方形亮蓝描边，落在圆角输入容器内部会显得割裂；
+ * 这里统一屏蔽，聚焦反馈交给外层容器的 focus-within 或输入框自身的边框过渡。
+ */
+input:not([type="checkbox"]):not([type="radio"]):focus,
+input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+textarea:focus,
+textarea:focus-visible,
+select:focus,
+select:focus-visible {
+  outline: none !important;
+}
+
+/* 统一输入框聚焦光晕：外扩 2px 柔和光圈，代替生硬描边；
+   亮色主题下 --ui-input-hover-bg 与 --ui-input-bg 接近，必须有这层可见反馈 */
+.ui-focus-ring:focus-within,
+.ui-focus-ring:focus {
+  outline: none !important;
+  box-shadow: 0 0 0 2px var(--ui-focus-ring);
 }
 

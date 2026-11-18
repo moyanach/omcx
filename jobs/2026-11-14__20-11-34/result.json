@@ -1,0 +1,40 @@
+{
+    "schema_version": 1,
+    "id": "4b2fec6c-3b92-4d10-a0ae-59f02fcd754a",
+    "started_at": "2026-11-14T20:11:41.080056",
+    "updated_at": "2026-11-14T20:12:51.340694",
+    "finished_at": "2026-11-14T20:12:51.340694",
+    "n_total_trials": 1,
+    "stats": {
+        "n_completed_trials": 1,
+        "n_errored_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "omcx__deepseek/deepseek-chat__frontier-harness-eval/frontier-harness-eval": {
+                "n_trials": 1,
+                "n_errors": 0,
+                "metrics": [
+                    {
+                        "mean": 0.0
+                    }
+                ],
+                "pass_at_k": {},
+                "reward_stats": {
+                    "reward": {
+                        "0.0": [
+                            "schemelike-metacircular-eval__mbV4uz7"
+                        ]
+                    }
+                },
+                "exception_stats": {}
+            }
+        },
+        "n_input_tokens": 0,
+        "n_cache_tokens": 0,
+        "n_output_tokens": 0,
+        "cost_usd": 0.0
+    }
+}

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { MessageSquare, Wrench, FolderGit2, Settings } from 'lucide-react';
 import { useAppStore, NavTab } from '@/stores/appStore';
 
@@ -9,7 +10,12 @@ interface NavItemProps {
 }
 
 const NavItem: React.FC<NavItemProps> = ({ tab, label, icon: Icon }) => {
-  const { activeNavTab, setActiveNavTab } = useAppStore();
+  const { activeNavTab, setActiveNavTab } = useAppStore(
+    useShallow((s) => ({
+      activeNavTab: s.activeNavTab,
+      setActiveNavTab: s.setActiveNavTab,
+    }))
+  );
   const isActive = activeNavTab === tab;
 
   return (
@@ -30,7 +36,7 @@ const NavItem: React.FC<NavItemProps> = ({ tab, label, icon: Icon }) => {
 
 export const Sidebar: React.FC = () => {
   return (
-    <div className='w-[66px] h-full flex flex-col items-center pt-8 pb-4 flex-shrink-0 titlebar-drag sidebar-container border-r border-[#202020] bg-[#111111] z-30 select-none'>
+    <div className='w-[66px] h-full flex flex-col items-center pt-8 pb-4 flex-shrink-0 titlebar-drag sidebar-container border-r border-[color:var(--ui-divider-hairline)] bg-[var(--sidebar-bg)] z-30 select-none'>
       {/* 顶部留出 macOS 原生红绿灯安全间距 (已按用户要求移除星星图标) */}
       <div className='h-8 w-full' />
 

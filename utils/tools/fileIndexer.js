@@ -1,9 +1,11 @@
 const fs = require("fs");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFileSync, execFile } = require("child_process");
 
 const MAX_ENTRIES = 20000;
 const CACHE_TTL = 30000;
+const inFlightBuilds = new Map();
+let cacheEpoch = 0;
 
 const IGNORED_DIRS = new Set([
   ".git",
@@ -83,6 +85,36 @@ function listWithGit(root) {
   }
 }
 
+function listWithGitAsync(root) {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      ["ls-files", "-z", "-co", "--exclude-standard"],
+      {
+        cwd: root,
+        timeout: 5000,
+        maxBuffer: 32 * 1024 * 1024,
+        encoding: "utf8",
+      },
+      (err, stdout) => {
+        if (err || typeof stdout !== "string") {
+          resolve(null);
+          return;
+        }
+        const files = [];
+        for (const raw of stdout.split("\0")) {
+          if (!raw) continue;
+          const rel = raw.replace(/\\/g, "/");
+          if (hasIgnoredSegment(rel)) continue;
+          files.push(rel);
+          if (files.length >= MAX_ENTRIES) break;
+        }
+        resolve(files);
+      }
+    );
+  });
+}
+
 function listWithWalk(root) {
   const files = [];
   const stack = [""];
@@ -92,6 +124,33 @@ function listWithWalk(root) {
     let entries;
     try {
       entries = fs.readdirSync(absDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (files.length >= MAX_ENTRIES) break;
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (isIgnoredName(entry.name, true)) continue;
+        stack.push(rel);
+      } else if (entry.isFile()) {
+        if (isIgnoredName(entry.name, false)) continue;
+        files.push(rel);
+      }
+    }
+  }
+  return files;
+}
+
+async function listWithWalkAsync(root) {
+  const files = [];
+  const stack = [""];
+  while (stack.length > 0 && files.length < MAX_ENTRIES) {
+    const relDir = stack.pop();
+    const absDir = relDir ? path.join(root, relDir) : root;
+    let entries;
+    try {
+      entries = await fs.promises.readdir(absDir, { withFileTypes: true });
     } catch {
       continue;
     }
@@ -145,6 +204,98 @@ function normalizeFolders(workDir, allowedFolders) {
     for (const folder of allowedFolders) push(folder);
   }
   return folders;
+}
+
+async function normalizeFoldersAsync(workDir, allowedFolders) {
+  const folders = [];
+  const seen = new Set();
+  const push = async (folderPath, name) => {
+    if (!folderPath) return;
+    let resolved;
+    try {
+      resolved = path.resolve(folderPath);
+    } catch {
+      return;
+    }
+    if (seen.has(resolved)) return;
+    try {
+      const stat = await fs.promises.stat(resolved);
+      if (!stat.isDirectory()) return;
+    } catch {
+      return;
+    }
+    seen.add(resolved);
+    folders.push({ path: resolved, name: name || path.basename(resolved) || resolved });
+  };
+  await push(workDir);
+  if (Array.isArray(allowedFolders)) {
+    for (const folder of allowedFolders) await push(folder);
+  }
+  return folders;
+}
+
+function finalizeEntries(folders, perFolderFiles, source) {
+  const multiFolder = folders.length > 1;
+  const entries = [];
+  const seenPaths = new Set();
+  let truncated = false;
+
+  for (let idx = 0; idx < folders.length; idx++) {
+    const folder = folders[idx];
+    const relFiles = perFolderFiles[idx] || [];
+    if (relFiles.length >= MAX_ENTRIES) truncated = true;
+
+    for (const rel of relFiles) {
+      const displayPath = multiFolder ? `${folder.name}/${rel}` : rel;
+      if (seenPaths.has(displayPath)) continue;
+      seenPaths.add(displayPath);
+      entries.push({ path: displayPath, isDir: false });
+      if (entries.length >= MAX_ENTRIES) {
+        truncated = true;
+        break;
+      }
+    }
+    if (entries.length >= MAX_ENTRIES) break;
+  }
+
+  if (multiFolder) {
+    for (const folder of folders) {
+      if (seenPaths.has(folder.name)) continue;
+      seenPaths.add(folder.name);
+      entries.push({ path: folder.name, isDir: true });
+    }
+  }
+
+  for (const dir of collectDirectoryEntries(entries.filter((e) => !e.isDir).map((e) => e.path))) {
+    if (seenPaths.has(dir)) continue;
+    seenPaths.add(dir);
+    entries.push({ path: dir, isDir: true });
+    if (entries.length >= MAX_ENTRIES * 2) {
+      truncated = true;
+      break;
+    }
+  }
+
+  entries.sort((a, b) => a.path.localeCompare(b.path));
+  return { files: entries, source, truncated };
+}
+
+async function buildIndexAsync(workDir, allowedFolders) {
+  const folders = await normalizeFoldersAsync(workDir, allowedFolders);
+  if (folders.length === 0) {
+    return { files: [], source: "none", truncated: false };
+  }
+  let source = "git";
+  const perFolderFiles = [];
+  for (const folder of folders) {
+    let relFiles = await listWithGitAsync(folder.path);
+    if (relFiles === null) {
+      source = "walk";
+      relFiles = await listWithWalkAsync(folder.path);
+    }
+    perFolderFiles.push(relFiles);
+  }
+  return finalizeEntries(folders, perFolderFiles, source);
 }
 
 function buildIndex(workDir, allowedFolders) {
@@ -219,12 +370,84 @@ function listWorkspaceFiles(workDir, allowedFolders = []) {
   return value;
 }
 
-function clearFileIndexCache() {
-  cache.clear();
+async function listWorkspaceFilesAsync(workDir, allowedFolders = []) {
+  const key = `${workDir || ""}|${(allowedFolders || []).join("|")}`;
+  const now = Date.now();
+  const cached = cache.get(key);
+  if (cached && now - cached.at < CACHE_TTL) {
+    return cached.value;
+  }
+  if (inFlightBuilds.has(key)) {
+    return inFlightBuilds.get(key);
+  }
+  const startEpoch = cacheEpoch;
+  const promise = (async () => {
+    const value = await buildIndexAsync(workDir, allowedFolders);
+    // 若构建期间缓存已被主动失效，禁止将旧扫描结果重新写回缓存
+    if (cacheEpoch === startEpoch) {
+      cache.set(key, { at: Date.now(), value });
+      if (cache.size > 50) {
+        const oldest = Array.from(cache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) cache.delete(oldest[0]);
+      }
+    }
+    return value;
+  })().finally(() => {
+    if (inFlightBuilds.get(key) === promise) {
+      inFlightBuilds.delete(key);
+    }
+  });
+  inFlightBuilds.set(key, promise);
+  return promise;
+}
+
+function clearFileIndexCache(workDir) {
+  cacheEpoch += 1;
+  if (!workDir || typeof workDir !== "string" || !workDir.trim()) {
+    cache.clear();
+    inFlightBuilds.clear();
+    return;
+  }
+  const resolved = path.resolve(workDir.trim());
+  for (const key of Array.from(cache.keys())) {
+    const segments = key.split("|").filter(Boolean);
+    const hit = segments.some((seg) => {
+      try {
+        const norm = path.resolve(seg);
+        return (
+          norm === resolved ||
+          resolved.startsWith(norm + path.sep) ||
+          norm.startsWith(resolved + path.sep)
+        );
+      } catch {
+        return seg === workDir;
+      }
+    });
+    if (hit || segments.length === 0) {
+      cache.delete(key);
+    }
+  }
+  for (const key of Array.from(inFlightBuilds.keys())) {
+    const segments = key.split("|").filter(Boolean);
+    const hit = segments.some((seg) => {
+      try {
+        const norm = path.resolve(seg);
+        return (
+          norm === resolved ||
+          resolved.startsWith(norm + path.sep) ||
+          norm.startsWith(resolved + path.sep)
+        );
+      } catch {
+        return seg === workDir;
+      }
+    });
+    if (hit) inFlightBuilds.delete(key);
+  }
 }
 
 module.exports = {
   listWorkspaceFiles,
+  listWorkspaceFilesAsync,
   clearFileIndexCache,
   isIgnoredName,
   IGNORED_DIRS,

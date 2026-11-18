@@ -1,473 +1,16 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
+import { ArrowDown } from 'lucide-react';
+import { Message } from '../../stores/chatStore';
+import BtwSelectionMenu, { BtwSelectionPayload } from '@/pages/chat/BtwSelectionMenu';
+import { MessageListProps } from './messageList/types';
 import {
-  Copy,
-  RotateCw,
-  CheckCircle2,
-  XCircle,
-  Clock,
-  ChevronRight,
-  ChevronDown,
-  Globe,
-  FileCode,
-  FolderTree,
-  Terminal,
-  Edit3,
-  Search,
-  Check,
-  Loader2,
-} from 'lucide-react';
-import { Message, useChatStore } from '../../stores/chatStore';
-import MarkdownContent from '@/components/common/MarkdownContent';
-import TodoListCard, { TodoItem } from '@/components/agent/TodoListCard';
+  AgentLiveStatusBar,
+  MessageBubble,
+  MessageNavigator,
+} from './messageList/MessageBubble';
+import EmptySessionWelcome from './EmptySessionWelcome';
 
-interface ToolStatusEvent {
-  tool: string;
-  status: 'running' | 'done';
-  args: any;
-  result?: any;
-  callId?: string;
-}
-
-interface Props {
-  messages: Message[];
-  isGenerating: boolean;
-  activeSearchProgress: any;
-  activeToolCalls: ToolStatusEvent[];
-  activeTodos?: TodoItem[];
-  onCopy: (text: string) => void;
-  onRetry: (msg: Message) => void;
-}
-
-const WaitingMessage: React.FC = () => (
-  <div className='flex items-center gap-2 text-xs text-neutral-400 py-1'>
-    <div className='h-3.5 w-3.5 border-2 border-blue-400/30 border-t-blue-400 rounded-full animate-spin' />
-    <span>正在深入思考并组织方案...</span>
-  </div>
-);
-
-/**
- * 提取工具调用的自然语言关键语义 (入参提取)
- */
-function getToolStepSummary(tool: string, args: any) {
-  if (!args) return { title: tool, subtitle: '' };
-
-  switch (tool) {
-    case 'read_file':
-      return {
-        title: `读取文件 ${args.path ? args.path.split(/[\\/]/).pop() : ''}`,
-        subtitle: args.path || '',
-        icon: FileCode,
-      };
-    case 'edit_file':
-      return {
-        title: `修改代码 ${args.path ? args.path.split(/[\\/]/).pop() : ''}`,
-        subtitle: args.path || '',
-        icon: Edit3,
-      };
-    case 'write_file':
-      return {
-        title: `创建文件 ${args.path ? args.path.split(/[\\/]/).pop() : ''}`,
-        subtitle: args.path || '',
-        icon: FileCode,
-      };
-    case 'search_code':
-      return {
-        title: `搜索代码 "${args.query || args.pattern || ''}"`,
-        subtitle: args.path ? `在 ${args.path} 中` : '',
-        icon: Search,
-      };
-    case 'list_directory':
-      return {
-        title: `浏览项目目录`,
-        subtitle: args.path || '.',
-        icon: FolderTree,
-      };
-    case 'run_command':
-      return {
-        title: `执行命令`,
-        subtitle: args.command ? args.command.slice(0, 80) : '',
-        icon: Terminal,
-      };
-    case 'web_search':
-      return {
-        title: `联网检索`,
-        subtitle: args.query || '',
-        icon: Globe,
-      };
-    case 'web_fetch':
-      return {
-        title: `抓取网页正文`,
-        subtitle: args.url ? args.url.replace(/^https?:\/\//, '').slice(0, 60) : '',
-        icon: Globe,
-      };
-    default:
-      return {
-        title: `调用工具 ${tool}`,
-        subtitle: '',
-        icon: Terminal,
-      };
-  }
-}
-
-/**
- * 提取工具返回的关键输出摘要 (不展示裸长 JSON)
- */
-function getToolOutputSummary(result: any) {
-  if (!result) return '';
-  if (result.error) return `失败: ${result.error}`;
-  if (result.data) {
-    const d = result.data;
-    if (d.replacedOccurrences) return `成功替换 ${d.replacedOccurrences} 处代码片段 (${d.lineDelta || '0'})`;
-    if (d.totalLines) return `共 ${d.totalLines} 行`;
-    if (d.matchesCount !== undefined) return `找到 ${d.matchesCount} 处匹配`;
-    if (d.entries) return `共 ${d.entries.length} 个文件/子目录`;
-    if (d.stdout) return d.stdout.trim().split('\n').pop() || '执行完成';
-    if (typeof d === 'string') return d.slice(0, 100);
-  }
-  if (result.success) return '执行完成';
-  return '';
-}
-
-/**
- * 现代化可折叠 Step List (默认展开，支持详细/简略双模式设置)
- */
-const ToolStepList: React.FC<{ events: ToolStatusEvent[] }> = ({ events }) => {
-  const [isExpanded, setIsExpanded] = useState(true); // 默认整体展开
-  const stepDisplayStyle = useChatStore((s) => s.stepDisplayStyle) || 'detailed';
-
-  // 记录用户手动折叠的步骤下标 (当为 detailed 模式时默认不折叠)
-  const [toggledStepMap, setToggledStepMap] = useState<Record<number, boolean>>({});
-
-  if (events.length === 0) return null;
-
-  const runningCount = events.filter((e) => e.status === 'running').length;
-
-  const toggleStep = (idx: number) => {
-    setToggledStepMap((prev) => ({
-      ...prev,
-      [idx]: !prev[idx],
-    }));
-  };
-
-  return (
-    <div className='mb-3 w-full max-w-full bg-[#1a1a1a] border border-[#2b2b2b] rounded-xl overflow-hidden select-none shadow-sm'>
-      {/* 步进列表总状态栏 (默认展开，可一键全收起/全展开) */}
-      <div
-        onClick={() => setIsExpanded(!isExpanded)}
-        className='px-3.5 py-2 flex items-center justify-between cursor-pointer hover:bg-white/[0.02] transition-colors border-b border-[#242424]'
-      >
-        <div className='flex items-center gap-2'>
-          {runningCount > 0 ? (
-            <Loader2 size={13} className='text-blue-400 animate-spin' />
-          ) : (
-            <CheckCircle2 size={13} className='text-emerald-400' />
-          )}
-          <span className='text-xs font-semibold text-neutral-300'>
-            {runningCount > 0 ? `正在执行工具操作 (${events.length} 步)...` : `已执行 ${events.length} 个步骤`}
-          </span>
-          <span className='text-[10px] px-1.5 py-0.2 rounded bg-[#252525] text-neutral-400 border border-[#333] font-mono'>
-            {stepDisplayStyle === 'detailed' ? '详细模式' : '简略模式'}
-          </span>
-        </div>
-
-        <div className='flex items-center gap-1 text-[11px] text-neutral-500 font-mono'>
-          <span>{isExpanded ? '收起全部' : '展开全部'}</span>
-          {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        </div>
-      </div>
-
-      {/* 展开的精巧步骤列表 (默认展开全部步骤详细信息) */}
-      {isExpanded && (
-        <div className='p-2 flex flex-col gap-1.5 divide-y divide-[#242424]'>
-          {events.map((ev, idx) => {
-            const isRunning = ev.status === 'running';
-            const isDone = ev.status === 'done';
-            const isSuccess = ev.result?.success !== false;
-            const { title, subtitle, icon: StepIcon } = getToolStepSummary(ev.tool, ev.args);
-            const outputSummary = getToolOutputSummary(ev.result);
-
-            // 用户要求：每一步调用信息展示先默认折叠起来，点击该步骤才展开详情
-            const isStepOpen = Boolean(toggledStepMap[idx]);
-
-            return (
-              <div key={`${ev.tool}-${ev.callId || idx}`} className='pt-1.5 first:pt-0'>
-                <div
-                  onClick={() => toggleStep(idx)}
-                  className='flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/[0.03] cursor-pointer transition-colors text-xs'
-                >
-                  {/* 左侧图标与主要意图标题 */}
-                  <div className='flex items-center gap-2.5 min-w-0 pr-2'>
-                    {isRunning ? (
-                      <Loader2 size={12} className='text-blue-400 animate-spin flex-shrink-0' />
-                    ) : isSuccess ? (
-                      <CheckCircle2 size={12} className='text-emerald-400 flex-shrink-0' />
-                    ) : (
-                      <XCircle size={12} className='text-rose-400 flex-shrink-0' />
-                    )}
-
-                    <div className='flex items-center gap-2 min-w-0'>
-                      <span className='font-medium text-neutral-200 truncate'>{title}</span>
-                      {subtitle && (
-                        <span className='text-[10px] text-neutral-500 font-mono truncate max-w-[220px]'>
-                          {subtitle}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* 右侧输出摘要与折叠箭头 */}
-                  <div className='flex items-center gap-2 flex-shrink-0'>
-                    {outputSummary && !isStepOpen && (
-                      <span className='text-[10px] font-mono text-neutral-400 bg-[#222] px-1.5 py-0.5 rounded border border-[#2e2e2e] truncate max-w-[160px]'>
-                        {outputSummary}
-                      </span>
-                    )}
-                    <div className='text-neutral-500'>
-                      {isStepOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                    </div>
-                  </div>
-                </div>
-
-                {/* 每一步调用的详细信息 (默认展示，详尽参数与输出结果) */}
-                {isStepOpen && (
-                  <div className='mt-1 mb-2 mx-2 p-2.5 rounded-xl bg-[#141414] border border-[#282828] text-[11px] font-mono text-neutral-300 flex flex-col gap-2'>
-                    {/* 输入参数详情 */}
-                    {ev.args && (
-                      <div className='flex flex-col gap-1'>
-                        <span className='text-neutral-500 font-sans text-[10px] font-semibold uppercase tracking-wider'>
-                          输入参数 (Arguments):
-                        </span>
-                        <pre className='p-2 rounded-lg bg-[#0e0e0e] border border-[#222] text-neutral-300 text-[10.5px] leading-relaxed max-h-32 overflow-y-auto custom-scrollbar whitespace-pre-wrap break-all'>
-                          {typeof ev.args === 'object'
-                            ? JSON.stringify(ev.args, null, 2)
-                            : String(ev.args)}
-                        </pre>
-                      </div>
-                    )}
-
-                    {/* 执行输出结果 */}
-                    {ev.result && (
-                      <div className='flex flex-col gap-1 pt-1 border-t border-[#222]'>
-                        <span className='text-neutral-500 font-sans text-[10px] font-semibold uppercase tracking-wider'>
-                          执行反馈 (Result):
-                        </span>
-                        <div
-                          className={`p-2 rounded-lg bg-[#0e0e0e] border border-[#222] text-[10.5px] leading-relaxed max-h-32 overflow-y-auto custom-scrollbar break-all ${
-                            isSuccess ? 'text-neutral-300' : 'text-rose-400'
-                          }`}
-                        >
-                          {ev.result.error ? (
-                            <span className='text-rose-400 font-medium'>{ev.result.error}</span>
-                          ) : typeof ev.result.data === 'object' ? (
-                            <pre className='whitespace-pre-wrap'>
-                              {JSON.stringify(ev.result.data, null, 2)}
-                            </pre>
-                          ) : (
-                            String(ev.result.data || outputSummary || '成功完成')
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-};
-
-/**
- * 网页引用来源折叠卡片
- */
-const ReferenceLinks: React.FC<{ metadata: any[] }> = ({ metadata }) => (
-  <div className='mb-3 w-full max-w-full'>
-    <details className='group bg-[#1c1c1c] rounded-xl border border-[#2a2a2a] text-xs overflow-hidden transition-all'>
-      <summary className='flex items-center justify-between p-2.5 font-medium text-neutral-400 cursor-pointer hover:bg-white/[0.02] outline-none select-none transition-colors'>
-        <div className='flex items-center gap-1.5'>
-          <Globe size={13} className='text-blue-400' />
-          <span>参考权威来源 ({metadata.length})</span>
-        </div>
-        <span className='text-[10px] text-neutral-500 transition-transform duration-200 group-open:rotate-180'>
-          ▼
-        </span>
-      </summary>
-      <div className='p-2.5 border-t border-[#262626] space-y-1.5 bg-[#171717]'>
-        {metadata.map((ref: any, idx: number) => {
-          let hostname = '';
-          try {
-            hostname = new URL(ref.url).hostname;
-          } catch {
-            hostname = 'link';
-          }
-          return (
-            <a
-              key={idx}
-              href={ref.url}
-              target='_blank'
-              rel='noopener noreferrer'
-              className='flex items-center justify-between hover:bg-blue-500/10 p-1.5 rounded-lg text-neutral-300 hover:text-blue-400 transition-all font-medium border border-transparent hover:border-blue-500/20 group/link'
-            >
-              <span className='truncate max-w-[80%] flex items-center gap-1.5'>
-                <span className='w-4 h-4 rounded-full bg-[#202020] text-[10px] flex items-center justify-center font-bold text-blue-400 flex-shrink-0'>
-                  {idx + 1}
-                </span>
-                <span className='truncate font-sans text-xs'>{ref.title || ref.url}</span>
-              </span>
-              <span className='text-[10px] text-neutral-500 font-mono group-hover/link:text-blue-400'>
-                {hostname} ↗
-              </span>
-            </a>
-          );
-        })}
-      </div>
-    </details>
-  </div>
-);
-
-const MessageBubble: React.FC<{
-  msg: Message;
-  isLast: boolean;
-  activeToolCalls: ToolStatusEvent[];
-  activeTodos?: TodoItem[];
-  containerWidth: number;
-  onCopy: (text: string) => void;
-  onRetry: (msg: Message) => void;
-  isGenerating: boolean;
-}> = ({
-  msg,
-  isLast,
-  activeToolCalls,
-  activeTodos,
-  containerWidth,
-  onCopy,
-  onRetry,
-  isGenerating,
-}) => {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopyText = () => {
-    onCopy(msg.content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const isUser = msg.role === 'user';
-  const durationFormatted = msg.metadata?.durationFormatted;
-  const hasContent = Boolean(msg.content && msg.content.trim().length > 0);
-
-  // 既支持正在执行的活跃步骤，也支持切菜单或重启后从持久化 metadata.toolSteps 还原的历史步骤
-  const displayToolEvents =
-    !isUser && activeToolCalls.length > 0 && isLast
-      ? activeToolCalls
-      : Array.isArray(msg.metadata?.toolSteps)
-      ? msg.metadata.toolSteps
-      : [];
-
-  // 待办任务规划清单：支持实时生成流转与历史从 metadata.todos 还原
-  const displayTodos: TodoItem[] =
-    !isUser && activeTodos && activeTodos.length > 0 && isLast
-      ? activeTodos
-      : Array.isArray(msg.metadata?.todos)
-      ? msg.metadata.todos
-      : [];
-
-  return (
-    <div className={`group flex w-full ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} w-full max-w-full min-w-0`}>
-        {/* Assistant 回复顶端：用时展示指示条 (100% 还原图 15 的 "用时 1m 23s >") */}
-        {!isUser && durationFormatted && (
-          <div className='flex items-center gap-1 text-[11px] text-neutral-500 font-mono mb-1.5 px-1 select-none hover:text-neutral-400 transition-colors'>
-            <Clock size={11} className='text-neutral-500' />
-            <span>用时 {durationFormatted}</span>
-            <ChevronRight size={11} className='text-neutral-600' />
-          </div>
-        )}
-
-        {/* 等待中动画 (仅在工具尚未执行且无文字时显示) */}
-        {!isUser && isGenerating && isLast && !hasContent && displayToolEvents.length === 0 && (
-          <div className='mb-2'>
-            <WaitingMessage />
-          </div>
-        )}
-
-        {/* 工具执行步进可折叠列表 (实时与历史全量留存还原) */}
-        {!isUser && displayToolEvents.length > 0 && (
-          <ToolStepList events={displayToolEvents} />
-        )}
-
-        {/* 任务规划待办清单 (TodoListCard) 始终严格锚定在步骤列表正下方！ */}
-        {!isUser && displayTodos.length > 0 && (
-          <TodoListCard todos={displayTodos} />
-        )}
-
-        {/* 网页权威引用来源 */}
-        {!isUser && Array.isArray(msg.metadata?.sources) && msg.metadata.sources.length > 0 && (
-          <ReferenceLinks metadata={msg.metadata.sources} />
-        )}
-
-        {/* 用户消息附带的图片缩略图 */}
-        {isUser && Array.isArray(msg.metadata?.attachments) && msg.metadata.attachments.length > 0 && (
-          <div className='flex flex-wrap gap-2 justify-end mb-2 max-w-[85%]'>
-            {msg.metadata.attachments.map((att: any) => (
-              <button
-                key={att.id || att.path}
-                onClick={() => window.electronAPI?.showInFolder?.(att.path)}
-                className='w-24 h-24 rounded-xl overflow-hidden border border-[#353535] bg-[#1a1a1a] hover:border-blue-500/50 transition-colors cursor-pointer'
-                title={`${att.name || "图片"} · 点击在 Finder 中显示`}
-              >
-                <img
-                  src={`local-media://${encodeURI(att.path)}`}
-                  alt={att.name || "图片"}
-                  className='w-full h-full object-cover'
-                />
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* 气泡本体（胶囊包裹）：
-            - 用户气泡：全圆角质感胶囊（rounded-2xl），靠右停靠，max-w-[85%]
-            - 助手气泡：圆润大卡片（rounded-2xl），宽度 w-full 自然占满，内边距丰满舒适
-        */}
-        {isUser ? (
-          <div className='px-4 py-2.5 text-sm leading-relaxed shadow-sm break-words bg-[#282828] text-neutral-200 border border-[#383838] rounded-2xl whitespace-pre-wrap font-sans max-w-[85%]'>
-            {msg.content}
-          </div>
-        ) : hasContent ? (
-          <div className='px-5 py-3.5 text-sm leading-relaxed shadow-sm break-words bg-[#1e1e1e] text-neutral-100 border border-[#2c2c2c] rounded-2xl w-full'>
-            <MarkdownContent content={msg.content} />
-          </div>
-        ) : null}
-
-        {/* 悬浮操作栏 (仅在有内容时展现) */}
-        {(hasContent || isUser) && (
-          <div className='flex gap-1.5 mt-1 px-1 opacity-0 group-hover:opacity-100 transition-opacity'>
-            <button
-              onClick={handleCopyText}
-              className='p-1 hover:bg-white/[0.06] rounded-md text-neutral-500 hover:text-neutral-300 transition-colors flex items-center gap-1 text-[11px]'
-              title='复制内容'
-            >
-              {copied ? <Check size={11} className='text-emerald-400' /> : <Copy size={11} />}
-              {copied && <span className='text-[10px] text-emerald-400'>已复制</span>}
-            </button>
-            {!isUser && (
-              <button
-                onClick={() => onRetry(msg)}
-                className='p-1 hover:bg-white/[0.06] rounded-md text-neutral-500 hover:text-neutral-300 transition-colors'
-                title='重新生成'
-              >
-                <RotateCw size={11} />
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
+type Props = MessageListProps;
 
 export const MessageList: React.FC<Props> = ({
   messages,
@@ -476,15 +19,325 @@ export const MessageList: React.FC<Props> = ({
   activeTodos = [],
   onCopy,
   onRetry,
+  onSideChatSelection,
+  onPrefillPrompt,
+  onOpenInspector,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
 
+  // ─── 选中文本 → 右键「旁路会话」 ───
+  const selectionCacheRef = useRef<{ text: string; messageId?: string; at: number } | null>(null);
+  const [selectionMenu, setSelectionMenu] = useState<{
+    x: number;
+    y: number;
+    text: string;
+    messageId?: string;
+  } | null>(null);
+
+  const captureSelection = useCallback((): { text: string; messageId?: string } | null => {
+    const container = scrollRef.current;
+    if (!container) return null;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+    const text = selection.toString().replace(/\r\n/g, '\n').trim();
+    if (!text) return null;
+
+    const range = selection.getRangeAt(0);
+    const common = range.commonAncestorContainer;
+    const node =
+      common.nodeType === Node.ELEMENT_NODE
+        ? (common as HTMLElement)
+        : common.parentElement;
+    if (!node || !container.contains(node)) return null;
+
+    // 跨消息选择时 commonAncestor 是滚动容器本身，此时不归属单条消息
+    const bubble = node.closest('[id^="msg-bubble-"]') as HTMLElement | null;
+    const messageId = bubble?.id.replace('msg-bubble-', '') || undefined;
+    return { text, messageId };
+  }, []);
+
+  const rememberSelection = useCallback(() => {
+    const captured = captureSelection();
+    if (captured) selectionCacheRef.current = { ...captured, at: Date.now() };
+  }, [captureSelection]);
+
+  const handleContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!onSideChatSelection) return;
+      const fresh = captureSelection();
+      const cached = selectionCacheRef.current;
+      const targetBubble = (event.target as HTMLElement)?.closest?.(
+        '[id^="msg-bubble-"]'
+      ) as HTMLElement | null;
+      const targetMessageId = targetBubble?.id.replace('msg-bubble-', '') || undefined;
+      // 部分平台右键会清空选区：5 秒内且仍落在同一消息上时复用缓存的选区
+      const usableCache =
+        cached && Date.now() - cached.at < 5000 && (!cached.messageId || cached.messageId === targetMessageId)
+          ? cached
+          : null;
+      const selection = fresh || usableCache;
+      if (!selection) return;
+
+      event.preventDefault();
+      selectionCacheRef.current = { ...selection, at: Date.now() };
+      setSelectionMenu({
+        x: event.clientX,
+        y: event.clientY,
+        text: selection.text,
+        messageId: selection.messageId,
+      });
+    },
+    [captureSelection, onSideChatSelection]
+  );
+
+  const handleSideChat = useCallback(
+    (payload: BtwSelectionPayload) => {
+      window.getSelection()?.removeAllRanges();
+      onSideChatSelection?.(payload);
+    },
+    [onSideChatSelection]
+  );
+
+  // 智能防抢焦滚动：用户是否处于底部偏差范围内
+  const [isPinnedToBottom, setIsPinnedToBottom] = useState(true);
+  const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
+  const [activeNavMsgId, setActiveNavMsgId] = useState<string | null>(null);
+  const navCalcRafRef = useRef<number | null>(null);
+
+  // ─── 视口动态虚拟窗口化 (Virtual Message Windowing) ───
+  // 当会话历史消息突破 20 条时自动启用，将非视口历史消息卸载为轻量等高占位节点
+  // 无论会话对话 50 轮还是 1000 轮，真实 DOM 节点数恒定保持在 2000 个以内，杜绝内存与合成层雪崩
+  const VIRTUAL_THRESHOLD = 20;
+  const heightMapRef = useRef<Map<string, number>>(new Map());
+
+  // 实测高度必须回灌 offset 计算，否则长历史会一直使用估算值，滚动窗口与真实内容错位
+  const [heightVersion, setHeightVersion] = useState(0);
+  const heightRafRef = useRef<number | null>(null);
+  const handleReportHeight = useCallback((id: string, h: number) => {
+    const prev = heightMapRef.current.get(id);
+    if (prev !== undefined && Math.abs(prev - h) < 2) return;
+    heightMapRef.current.set(id, h);
+    if (heightRafRef.current === null) {
+      heightRafRef.current = requestAnimationFrame(() => {
+        heightRafRef.current = null;
+        setHeightVersion((v) => v + 1);
+      });
+    }
+  }, []);
+
+  const estimateHeight = useCallback((m: Message) => {
+    const cached = heightMapRef.current.get(m.id);
+    if (cached) return cached;
+    if (m.role === 'user') {
+      const hasAtt = Array.isArray(m.metadata?.attachments) && m.metadata.attachments.length > 0;
+      return hasAtt ? 140 : 54;
+    }
+    // 思考内容与正文已物理分离，正文长度可直接用于估算；折叠思考条按固定高度计
+    const rawContent = String(m.content || '');
+    const visibleLen = rawContent.length;
+    const reasoningChars = Number(m.reasoningChars || m.metadata?.reasoningChars) || 0;
+    const thinkingHeight = reasoningChars > 0 ? 40 : 0;
+    const toolCount = Array.isArray(m.metadata?.toolSteps) ? m.metadata.toolSteps.length : 0;
+    return Math.min(
+      800,
+      Math.max(80, Math.round(visibleLen * 0.4) + thinkingHeight + toolCount * 36)
+    );
+  }, []);
+
+  const [visibleIndices, setVisibleIndices] = useState<{ start: number; end: number }>(() => ({
+    start: Math.max(0, messages.length - 15),
+    end: Math.max(0, messages.length - 1),
+  }));
+
+  // 预计算每条消息的累计顶部/底部偏移，滚动时用二分查找替代 O(n) 全量遍历
+  const virtualOffsets = useMemo(() => {
+    const tops = new Array<number>(messages.length);
+    const bottoms = new Array<number>(messages.length);
+    let accumulatedY = 0;
+    for (let i = 0; i < messages.length; i++) {
+      tops[i] = accumulatedY;
+      accumulatedY += estimateHeight(messages[i]) + 14;
+      bottoms[i] = accumulatedY;
+    }
+    return { tops, bottoms };
+    // heightVersion 仅用于在实测高度变化时使缓存失效
+  }, [messages, estimateHeight, heightVersion]);
+
+  const lowerBound = (arr: number[], value: number, length: number): number => {
+    let lo = 0;
+    let hi = length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid] < value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
+  const virtualRafRef = useRef<number | null>(null);
+
+  const updateVirtualRange = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || messages.length <= VIRTUAL_THRESHOLD) return;
+
+    const scrollTop = el.scrollTop;
+    const clientHeight = el.clientHeight;
+    const viewTop = Math.max(0, scrollTop - 700);
+    const viewBottom = scrollTop + clientHeight + 700;
+    const { tops, bottoms } = virtualOffsets;
+    const len = messages.length;
+
+    const firstVisible = lowerBound(bottoms, viewTop, len);
+    const start = Math.max(0, firstVisible - 2);
+
+    const firstAfter = lowerBound(tops, viewBottom, len);
+    let end = firstAfter >= len ? len - 1 : Math.min(len - 1, firstAfter + 2);
+
+    // 生成中或粘底状态下，末尾活跃消息永久处于挂载窗口内
+    if (isGenerating || isPinnedToBottom) {
+      end = len - 1;
+    }
+
+    setVisibleIndices((prev) => {
+      if (prev.start === start && prev.end === end) return prev;
+      return { start, end };
+    });
+  }, [messages.length, virtualOffsets, isGenerating, isPinnedToBottom]);
+
+  const scheduleVirtualRange = useCallback(() => {
+    if (virtualRafRef.current !== null) return;
+    virtualRafRef.current = requestAnimationFrame(() => {
+      virtualRafRef.current = null;
+      updateVirtualRange();
+    });
+  }, [updateVirtualRange]);
+
+  // 监听滚动位置：判定是否吸底，并计算当前视口展示的消息节点
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = distanceToBottom <= 70;
+    setIsPinnedToBottom(atBottom);
+    setShowScrollBottomBtn(!atBottom && el.scrollHeight > el.clientHeight + 120);
+
+    if (messages.length > VIRTUAL_THRESHOLD) {
+      scheduleVirtualRange();
+    }
+
+    // 性能优化：当处于吸底状态时（如流式生成期间），当前活跃节点必然是最后一条消息，
+    // 严禁在此高频路径下对整个消息列表做 getBoundingClientRect 循环测量，消除强制同步回流风暴
+    if (atBottom) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg) {
+        setActiveNavMsgId((prev) => (prev === lastMsg.id ? prev : lastMsg.id));
+      }
+      return;
+    }
+
+    // 用户向上翻阅时，通过 rAF 节流单帧计算视口顶部节点
+    if (navCalcRafRef.current === null) {
+      navCalcRafRef.current = requestAnimationFrame(() => {
+        navCalcRafRef.current = null;
+        if (!scrollRef.current) return;
+        const containerTop = scrollRef.current.getBoundingClientRect().top;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const msg = messages[i];
+          const bubbleEl = document.getElementById(`msg-bubble-${msg.id}`);
+          if (bubbleEl) {
+            const rect = bubbleEl.getBoundingClientRect();
+            if (rect.top <= containerTop + 240) {
+              setActiveNavMsgId((prev) => (prev === msg.id ? prev : msg.id));
+              break;
+            }
+          }
+        }
+      });
+    }
+  }, [messages, scheduleVirtualRange]);
+
+  // 监听用户向上滚轮：明确意图向上阅读，立即解除吸底锁定！
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY < 0) {
+      setIsPinnedToBottom(false);
+    }
+  }, []);
+
+  // 仅在粘底状态下，模型吐字或工具执行才跟随滚动到最后；用户向上翻阅时绝对不自动滚到底部！
   useEffect(() => {
-    if (scrollRef.current) {
+    // 用户正在选中文本、或右键菜单已打开时暂停吸底：
+    // 否则流式输出的程序化滚动会把选区滚走，并让菜单看起来“自己消失了”。
+    const selection = window.getSelection();
+    const hasSelection = Boolean(
+      selection && !selection.isCollapsed && selection.rangeCount > 0
+    );
+    if (isPinnedToBottom && scrollRef.current && !hasSelection && !selectionMenu) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, isGenerating, activeToolCalls]);
+  }, [messages, isGenerating, activeToolCalls, isPinnedToBottom, selectionMenu]);
+
+  // 会话切换或消息数量变动时，重新计算视口虚拟范围
+  useEffect(() => {
+    if (messages.length > VIRTUAL_THRESHOLD) {
+      updateVirtualRange();
+    }
+  }, [messages.length, updateVirtualRange]);
+
+  // 架构对齐：切换会话时重置虚拟窗口至最新底部，杜绝前序会话滚动区间残留引发的画面闪跳
+  const firstMsgId = messages[0]?.id;
+  useEffect(() => {
+    setVisibleIndices({
+      start: Math.max(0, messages.length - 15),
+      end: Math.max(0, messages.length - 1),
+    });
+    setIsPinnedToBottom(true);
+  }, [firstMsgId]);
+
+  // 点击回到底部
+  const handleScrollToBottom = () => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior: 'smooth',
+      });
+      setIsPinnedToBottom(true);
+      setShowScrollBottomBtn(false);
+    }
+  };
+
+  // 左侧点位导航点击跳转
+  const handleNavigateToMessage = (id: string) => {
+    const targetIdx = messages.findIndex((m) => m.id === id);
+    if (messages.length > VIRTUAL_THRESHOLD && targetIdx >= 0) {
+      // 虚拟窗口下目标消息可能尚未挂载，先扩展窗口再在下一帧定位
+      setVisibleIndices({
+        start: Math.max(0, targetIdx - 3),
+        end: Math.min(messages.length - 1, targetIdx + 3),
+      });
+      requestAnimationFrame(() => {
+        document
+          .getElementById(`msg-bubble-${id}`)
+          ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } else {
+      const el = document.getElementById(`msg-bubble-${id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+    setActiveNavMsgId(id);
+    setIsPinnedToBottom(false);
+  };
+
+  // 卸载时取消尚未执行的滚动调度帧，避免对已卸载组件 setState
+  useEffect(() => {
+    return () => {
+      if (virtualRafRef.current !== null) cancelAnimationFrame(virtualRafRef.current);
+      if (navCalcRafRef.current !== null) cancelAnimationFrame(navCalcRafRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -497,24 +350,151 @@ export const MessageList: React.FC<Props> = ({
     return () => observer.disconnect();
   }, []);
 
+  // 当前正在推进的 assistant 回合：以「最后一条 assistant 消息」为准，而不是「数组最后一条」。
+  // 用户中途 steer 追加的 user 消息会排在 assistant 占位气泡之后；若仍按最后一条判定，
+  // 会让仍在执行工具循环的回合失去活跃身份，误渲染"本次请求未收到模型返回内容"。
+  const activeAssistantMessage = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i];
+    }
+    return null;
+  }, [messages]);
+  const activeAssistantId = isGenerating ? activeAssistantMessage?.id ?? null : null;
+
+  const hasStreamingText = Boolean(
+    isGenerating && activeAssistantMessage?.content?.trim()
+  );
+  const showEmptyWelcome = messages.length === 0 && !isGenerating;
+
   return (
-    <div
-      ref={scrollRef}
-      className='flex-1 overflow-y-auto px-5 py-5 flex flex-col gap-5 custom-scrollbar min-h-0'
-    >
-      {messages.map((msg, idx) => (
-        <MessageBubble
-          key={msg.id}
-          msg={msg}
-          isLast={idx === messages.length - 1}
-          activeToolCalls={idx === messages.length - 1 ? activeToolCalls : []}
-          activeTodos={idx === messages.length - 1 ? activeTodos : []}
-          containerWidth={containerWidth}
-          onCopy={onCopy}
-          onRetry={onRetry}
-          isGenerating={isGenerating}
+    <div className='flex-1 min-h-0 relative flex flex-col overflow-hidden'>
+      {/* 1. 左侧垂直消息定位轨 (对标截图快速点位) */}
+      {!showEmptyWelcome && (
+        <MessageNavigator
+          messages={messages}
+          activeId={activeNavMsgId}
+          onNavigate={handleNavigateToMessage}
         />
-      ))}
+      )}
+
+      {/* 2. 聊天正文主滚动容器 (边距收紧优化，左侧留出 24px 供超窄胶囊悬浮) */}
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        onWheel={handleWheel}
+        onMouseUp={rememberSelection}
+        onContextMenu={handleContextMenu}
+        className='flex-1 overflow-y-auto pl-8 pr-7 pt-3 pb-3.5 flex flex-col gap-3.5 custom-scrollbar min-h-0 relative'
+      >
+        {showEmptyWelcome ? (
+          <EmptySessionWelcome
+            onPrefillPrompt={(text, options) => onPrefillPrompt?.(text, options)}
+            onOpenInspector={onOpenInspector}
+          />
+        ) : (() => {
+          const virtualActive = messages.length > VIRTUAL_THRESHOLD;
+          const clampedStart = virtualActive
+            ? Math.max(0, Math.min(visibleIndices.start, messages.length - 1))
+            : 0;
+          const clampedEnd = virtualActive
+            ? Math.max(clampedStart, Math.min(visibleIndices.end, messages.length - 1))
+            : messages.length - 1;
+
+          // 仅挂载视口附近的消息，上下各用一个 spacer 撑起被卸载区域的总高度，
+          // 避免为全量历史消息创建占位 DOM 节点（长会话下是主要渲染开销）。
+          const leadingHeight =
+            virtualActive && clampedStart > 0
+              ? Math.max(0, virtualOffsets.tops[clampedStart] - 14)
+              : 0;
+          const trailingHeight =
+            virtualActive && clampedEnd < messages.length - 1
+              ? Math.max(
+                  0,
+                  virtualOffsets.bottoms[messages.length - 1] -
+                    virtualOffsets.bottoms[clampedEnd] -
+                    28
+                )
+              : 0;
+
+          const renderedMessages = virtualActive
+            ? messages.slice(clampedStart, clampedEnd + 1)
+            : messages;
+
+          return (
+            <>
+              {leadingHeight > 0 && (
+                <div
+                  style={{ height: leadingHeight, contain: 'strict' }}
+                  className='w-full flex-shrink-0 pointer-events-none'
+                  aria-hidden='true'
+                />
+              )}
+              {renderedMessages.map((msg) => (
+                <MessageBubble
+                  key={msg.id}
+                  msg={msg}
+                  isActiveTurn={Boolean(activeAssistantId && msg.id === activeAssistantId)}
+                  activeToolCalls={
+                    activeAssistantId && msg.id === activeAssistantId ? activeToolCalls : []
+                  }
+                  activeTodos={activeAssistantId && msg.id === activeAssistantId ? activeTodos : []}
+                  containerWidth={containerWidth}
+                  onCopy={onCopy}
+                  onRetry={onRetry}
+                  isGenerating={isGenerating}
+                  onReportHeight={handleReportHeight}
+                />
+              ))}
+              {trailingHeight > 0 && (
+                <div
+                  style={{ height: trailingHeight, contain: 'strict' }}
+                  className='w-full flex-shrink-0 pointer-events-none'
+                  aria-hidden='true'
+                />
+              )}
+            </>
+          );
+        })()}
+      </div>
+
+      {/* 会话最下方固定区（置于滚动容器外，避免重复叠加 backdrop-filter 导致 Chromium 泛白及消息透字） */}
+      {isGenerating && (
+        <div className='pl-8 pr-7 pt-1 pb-1.5 flex-shrink-0'>
+          <AgentLiveStatusBar
+            activeToolCalls={activeToolCalls}
+            activeTodos={activeTodos}
+            hasStreamingText={hasStreamingText}
+          />
+        </div>
+      )}
+
+      {/* 2.5 选中文本后的自定义右键菜单（旁路会话 / 复制） */}
+      {selectionMenu && (
+        <BtwSelectionMenu
+          x={selectionMenu.x}
+          y={selectionMenu.y}
+          text={selectionMenu.text}
+          messageId={selectionMenu.messageId}
+          onClose={() => setSelectionMenu(null)}
+          onSideChat={handleSideChat}
+        />
+      )}
+
+      {/* 3. 智能平滑回到底部悬浮小按钮 (当用户向上查看且离开底部时浮现) */}
+      {showScrollBottomBtn && (
+        <button
+          type='button'
+          onClick={handleScrollToBottom}
+          className={`absolute right-6 ${isGenerating ? 'bottom-14' : 'bottom-5'} z-20 px-3 py-1.5 rounded-full bg-[var(--ui-card-bg)] hover:bg-[var(--ui-card-hover-bg)] text-[var(--ui-text-primary)] border border-[color:var(--ui-border-subtle)] shadow-sm flex items-center gap-1.5 text-xs font-medium cursor-pointer transition-all active:scale-95 animate-in fade-in zoom-in-95 duration-150 select-none`}
+          title='回到底部'
+        >
+          <ArrowDown size={13} className='text-[var(--ui-accent-blue,#3b82f6)]' />
+          <span>回到底部</span>
+          {isGenerating && (
+            <span className='w-1.5 h-1.5 rounded-full bg-blue-400 animate-ping' />
+          )}
+        </button>
+      )}
     </div>
   );
 };

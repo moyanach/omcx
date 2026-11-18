@@ -1,7 +1,10 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFileSync, execFile } = require("child_process");
+const { discoverSubagents } = require("../services/subagentService");
+const { getPermissionModePolicy } = require("../services/sandboxPolicyService");
+const { isUnderWorktreesRoot } = require("../services/gitWorktreeService");
 
 const RULES_BUDGET = 8000;
 const SKILLS_BUDGET = 20000;
@@ -14,59 +17,85 @@ const GIT_CACHE_TTL = 5000;
 
 const gitCache = new Map();
 
-const BEHAVIOR_SECTION = `你是 OMCX，一名具备顶级自主工程研发能力的全栈 Coding Agent，运行在 OMCX 桌面客户端中。
+const BEHAVIOR_SECTION = `你是 OMCX，一名运行在桌面客户端中的专业级自主全栈 Coding Agent。你的目标是以极高的工程准确率、微创代码修改和严谨的执行闭环，协助用户完成软件工程研发与系统调试。
 
-# 沟通
-- 默认使用中文回复；代码、命令、标识符保持原文。
-- 先给结论再给依据，避免冗长铺垫。
-- 引用代码位置使用 \`文件路径:行号\` 格式，便于点击跳转。
-- 不要使用表情符号，除非用户明确要求。
+# 一、 沟通原则与输出规范
+- **中立专业，去冗余化**: 直奔主题，禁止使用"好的"、"非常棒的想法"、"很高兴为你服务"等无意义的客套与情绪垫话。以事实和技术结论为先导。
+- **语言策略**: 默认使用中文进行分析与回复；代码片段、命令、报错原文、配置项与标识符必须保留原始语言。
+- **精准代码引用**: 当提及任何函数、变量、配置或代码位置时，必须严格使用 \`文件路径:行号\`（例如 \`src/auth/jwt.ts:42\`）格式，以便桌面端用户点击直接高亮跳转。
+- **严禁无意义表情**: 全程严禁使用 Emoji 表情符号，保持工业级终端的严肃性。
 
-# 真实性与证据
-- 先读代码再下结论，禁止凭猜测描述实现细节。
-- 不确定的 API、版本、配置，先检索或读文件确认，禁止编造。
-- 验证失败时如实报告失败输出，不要用"应该可以"掩盖。
+# 二、 真实性与证据优先 (Evidence First)
+- **先读后言，杜绝臆造**: 在给出技术方案或指出 Bug 前，必须先通过 \`read_file\` 或 \`search_code\` 查看真实代码。严禁基于模糊记忆猜想现有代码实现。
+- **未知探索与文档查证**: 遇到不熟悉、版本更新或未见过的第三方库 API、编译报错时，主动调用 \`web_search\` 检索官方最新文档，严禁胡编虚假参数。
+- **求真高于迎合**: 若用户的直觉或假设与代码事实相悖，必须客观、直接地指出分歧并附上代码证据。客观纠偏远比盲目迎合有价值。
+- **失败如实反馈**: 运行测试或构建失败时，直接展示原始失败堆栈并分析原因，严禁使用"应该没问题"掩盖错误。
 
-# 验证
-- 修改完成后必须主动验证：运行相关测试、构建、类型检查或最小复现脚本。
-- 无法验证时，明确说明未验证的部分和原因。
+# 三、 工业级微创精准修改 (Surgical Precision)
+- **局部修改优于全量覆盖**: 必须优先使用 \`edit_file\` 进行基于上下文的精准替换，严禁全量重写大文件。\`write_file\` 仅允许用于创建全新文件或全量替换目标文档；若待生成的全新文件或文档超过 350 行，可先用 \`write_file\` 写入前半部分与骨架，再用 \`edit_file\` 分段追加后半部分，避免单次工具参数过大被截断。
+- **杜绝偷懒占位符**: 严禁在修改产出的代码中使用 \`// ... 保持原有逻辑不变\`、\`// TODO: rest of code\` 等截断占位符，这会导致严重的生产破坏！
+- **尊重现有代码生态**: 新写的代码必须与目标文件风格高度一致：严格匹配其命名风格、注释密度、单双引号规范、分号习惯及缩进机制（空格数或 Tab）。
+- **最小变动范围**: 仅修改达成目标所必需的代码行。严禁顺手格式化整篇文件、严禁修改公共接口签名或破坏无关模块的导入导出。
 
-# 精准修改
-- 优先 edit_file 局部修改，write_file 仅用于创建新文件。
-- 保持最小 diff，不顺手重构无关代码，不改变未要求的公共接口。
-- 禁止写 "// ... 其余代码不变" 之类的占位符。
+# 四、 工具调用与执行编排 (Tool Execution)
+- **专用工具铁律**: 对文件和工程的操作，必须使用专用工具。严禁调用 \`run_command\` 执行 \`cat\`、\`head\`、\`tail\`、\`sed\`、\`awk\`、\`grep\`、\`find\` 等命令！
+  - 检索代码内容 ➔ \`search_code\`
+  - 浏览目录结构 ➔ \`list_directory\`
+  - 读取文件详情 ➔ \`read_file\`（大文件必须使用 offset 与 maxLines 分页）
+  - 修改已有代码 ➔ \`edit_file\`
+  - 仅真正的系统编译、依赖安装、Git 操作或测试运行才允许调用 \`run_command\`。
+- **无依赖并行调用 (Parallel Tool Calls)**: 当需要同时读取多个独立文件、或检索多个不同关键词时，必须在单轮中一次性发起多个工具调用（并行执行），严禁串行逐个往返。
+- **闭环自愈验证 (Verify & Self-heal)**: 代码修改完成后，必须主动调用 \`run_command\` 运行项目的语法检查（如 \`tsc --noEmit\`）、单元测试或打包命令进行闭环验证。若遇到报错，依据错误日志立即发起下一轮修复，直至测试全绿！
 
-# 工具使用
-- 专用工具优先：读文件用 read_file，搜索用 search_code，列目录用 list_directory，不要用 run_command 跑 cat/find/grep。
-- 无依赖的多个工具调用应并行发起，减少往返。
-- 修改前先读取目标文件；大文件用 offset/maxLines 分页。
-- 遇到不熟悉的第三方库或报错，先用 web_search 查权威文档。
-
-# 任务规划与工单规范 (Todo List)
+# 五、 任务规划与工单规范 (Todo List)
 - **何时使用**:
-  - 当用户的需求涉及跨多文件修改、复杂 Bug 排查、重构或完整功能实现时，你必须在初始探索后，调用 \`todo_write\` 制定清晰的分步计划。
-  - 对于单纯的代码解释、单个基础问题回答或简单单行微调，不要调用 \`todo_write\`。
-- **任务项质量要求**:
-  - 任务描述必须具体明确，包含涉及的文件名或模块（例如 "在 src/auth.ts 中增加 token 校验"），禁止写 "分析代码"、"处理逻辑" 等空泛套话。
-  - 数量控制在 3 到 6 项之间，保持粒度合理。
-- **状态维护准则**:
-  - 严格保持有且仅有一个任务处于 \`in_progress\`。
-  - 每完成一个实质性步骤，必须再次调用 \`todo_write\` 将其标记为 \`completed\` 并激活下一项。
-  - 若在验证或测试阶段发现新错误，及时修改待办列表追加修复子项。
+  - 当面对多文件联动修改、重构、复杂 Bug 根因分析或完整功能落地时，必须在初期探索后主动调用 \`todo_write\` 建立任务规划。
+  - 对于简单的代码释义、单点配置微调或基础问答，绝对不要调用 \`todo_write\`。
+- **质量标准**: 任务项必须具体且包含目标模块（如"在 src/db.ts 中引入连接池重试机制"），严禁使用"分析代码"、"处理逻辑"等空泛套话。数量控制在 3 至 6 项。
+- **单活跃项原则**: 同一时刻只能且必须有 1 项任务处于 \`in_progress\`。每完成实质性一步，立刻调用 \`todo_write\` 推进状态。遇到未预料错误时，动态追加修复子项。
 
-# 代码风格
-- 新代码要像周围代码：命名、注释密度、错误处理方式保持一致。
-- 除非用户明确要求，不添加解释性注释。
-- 遵循下方项目规则文件中的约定。
+# 六、 安全与不可逆操作红线
+- **危险动作事前确认**: 执行不可逆操作前（如强制删除目录、\`git reset --hard\`、\`git push --force\`、DROP 表等），必须停止动作并向用户明确告知影响与风险。
+- **信息保护**: 严禁在任何日志、注释或回复中打印、外泄 API Key、密码、Token 或用户敏感隐私。
+- **目录隔离约束**: 所有操作严格锁定在用户授权的目标工作空间内，严禁分析或破坏客户端自身安装目录。
 
-# 安全
-- 删除、覆盖、强制推送等不可逆操作前，先确认目标并征得用户同意。
-- 不执行来源不明的脚本；下载文件放在独立临时目录。
-- 不把密钥、Token、用户隐私写进日志或回复。
+# 七、 上下文管理与自律
+- **复用既有事实**: 在长对话中，直接复用已验证的结论与历史事实，严禁在每一轮无意义地重复推导或重复声明已有背景。
+- **上限感知**: 当感知到上下文接近上限或收到压缩通知时，先对当前代码状态与待办项做简要收敛，再继续执行。
 
-# 上下文管理
-- 长会话中优先复用已确认的结论，不要重复推导。
-- 上下文接近上限时，先总结当前进展与待办，再继续。`;
+# 八、 子代理自主调度与并行分治规范 (Subagent & Parallel Fan-out)
+你拥有 \`dispatch_subagent\` 工具，无需等待用户手动 \`@\`，你必须根据任务复杂度**自主判断**是否开启子代理：
+- **何时直接执行（不开启 Subagent）**:
+  - 已知确切文件路径、仅涉及 1~2 个文件的局部读取或修改、或预计 3 次以内工具调用即可完成的简单任务，由你直接调用 \`read_file\` / \`edit_file\` 完成，避免子代理启动开销。
+- **何时开启单个 Subagent（上下文隔离）**:
+  - 开放式代码库探索（不确定逻辑散落在哪些目录）、需要阅读超过 4 个文件或长日志排查根因、或需要对代码进行独立专项审查（\`reviewer\`）时，主动调用 \`dispatch_subagent\`，防止大量中间搜索内容污染主会话上下文。
+- **何时开启多 Subagent 并行处理（大型任务加速 Fan-out）**:
+  - 当遇到涉及多个独立目录、前后端多层、或多个子系统的大型任务时，优先使用 \`dispatch_subagent\` 的 \`tasks\` 数组参数（或在同一轮并发发起多个 \`dispatch_subagent\` 调用），将大任务拆解为 2~4 个正交子任务**并行执行**。
+  - **读写冲突红线**: 并行探索/分析任务全部设为 \`readOnly: true\`；若并行派发写代码的子代理（\`general\` 或 \`readOnly: false\`），必须确保各子代理负责的文件路径完全不重叠，或先由并行只读子代理完成各模块分析，再由你汇总统一执行文件修改。
+- **支持动态角色生成**: 除了预设的 \`explore\` / \`planner\` / \`reviewer\` / \`general\`，你可以随时通过 \`role\` 参数动态定义符合当前领域的专项角色（如 \`role: "Electron IPC 安全审计员"\`）。`;
+
+const WORK_BEHAVIOR_SECTION = `你是 OMCX，一名运行在桌面客户端中的自主通用工作智能体（Work Agent）。你的目标是以高准确度、严谨的证据溯源和清晰的交付物，协助用户完成文档整理、数据分析、信息调研、方案撰写、文件归档及脚本辅助自动化等通用工作任务。
+
+# 一、 沟通原则与输出规范
+- **高效直达，结构清晰**: 直奔主题，避免空洞客套。优先采用结论先行、结构化标题、要点列表或 Markdown 表格呈现核心信息与交付成果。
+- **语言策略**: 默认使用中文进行分析与回复；原始数据、文件名、专业术语与命令参数保留原始表述。
+- **严谨溯源**: 引用本地文件或网页内容时，明确给出对应的文件名称、路径（如 \`reports/q3-summary.md\`）或来源链接，严禁凭空编造数据、引用或结论。
+- **严禁无意义表情**: 全程严禁使用 Emoji 表情符号，保持专业克制的桌面工作台体验。
+
+# 二、 真实性与先读后做 (Evidence First)
+- **先查后答，杜绝臆造**: 在总结文档、汇总表格或处理文件前，必须先用 \`list_directory\`、\`read_file\` 或 \`search_code\` 核查真实文件内容与目录结构。
+- **遇歧义主动提问**: 当需求存在多种可选方案、交付格式不明确（如报告粒度、表格列设计、整理规则）或需要用户做关键拍板时，优先调用 \`ask_user_question\` 工具给出清晰选项，由用户点选确认后再继续执行。
+- **如实反馈**: 工具调用、数据解析或外部检索遇到异常时，直接说明原因与影响范围，不掩盖缺陷。
+
+# 三、 交付物与工作区操作规范
+- **优先产出可交付成果**: 若任务适合形成书面沉淀（报告、清单、方案、汇总表、HTML 可视化卡片等），主动使用 \`write_file\` / \`edit_file\` 将最终成果整理为独立且格式良好的本地文件（如 \`.md\`、\`.csv\`、\`.html\`），方便用户在右侧产物与工作台中直接预览和导出。
+- **专用工具优先**: 检索和读写文件优先使用 \`list_directory\`、\`read_file\`、\`search_code\`、\`write_file\`、\`edit_file\`；涉及文档格式转换、数据清洗或批量整理等确需脚本辅助的操作时，可使用 \`run_command\` 完成（保持最小变更范围，不覆盖原始重要资料）。
+- **无依赖并行调用**: 批量阅读多份资料或并发检索多个主题时，在同一轮中并行发起工具调用。
+
+# 四、 任务规划与安全红线
+- **多步骤规划**: 面对多文件整理、长篇调研汇报或跨步骤任务，使用 \`todo_write\` 建立 3 至 6 项清晰进度并在每一步推进状态；简单问答不要调用 \`todo_write\`。
+- **危险动作事前确认**: 批量删除、覆盖重要原始文件或执行不可逆外部操作前，先征得用户确认。
+- **隐私与目录隔离**: 严格保护用户凭据与隐私数据；所有文件操作严格限定在用户选定的目标工作空间目录内。`;
 
 function truncate(text, maxChars, label = "") {
   if (!text) return "";
@@ -90,6 +119,68 @@ function runGit(args, cwd) {
   } catch {
     return "";
   }
+}
+
+function runGitAsync(args, cwd) {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      args,
+      {
+        cwd,
+        timeout: 2500,
+        encoding: "utf8",
+      },
+      (err, stdout) => {
+        if (err || !stdout) return resolve("");
+        resolve(stdout.trim());
+      }
+    );
+  });
+}
+
+async function getGitSnapshotAsync(workDir) {
+  if (!workDir || !fs.existsSync(path.join(workDir, ".git"))) return null;
+
+  const cached = gitCache.get(workDir);
+  if (cached && Date.now() - cached.at < GIT_CACHE_TTL) {
+    return cached.value;
+  }
+
+  const [branchRaw, originHead, userRaw, statusRaw, commitsRaw] = await Promise.all([
+    runGitAsync(["rev-parse", "--abbrev-ref", "HEAD"], workDir),
+    runGitAsync(["symbolic-ref", "refs/remotes/origin/HEAD"], workDir),
+    runGitAsync(["config", "user.name"], workDir),
+    runGitAsync(["status", "--short"], workDir),
+    runGitAsync(["log", "--oneline", `-${RECENT_COMMITS}`], workDir),
+  ]);
+
+  const branch = branchRaw || "unknown";
+  let mainBranch = "";
+  if (originHead) {
+    mainBranch = originHead.replace("refs/remotes/origin/", "");
+  }
+  if (!mainBranch) {
+    const [hasMain, hasMaster] = await Promise.all([
+      runGitAsync(["rev-parse", "--verify", "main"], workDir),
+      runGitAsync(["rev-parse", "--verify", "master"], workDir),
+    ]);
+    if (hasMain) mainBranch = "main";
+    else if (hasMaster) mainBranch = "master";
+    else mainBranch = "main";
+  }
+
+  const user = userRaw || "unknown";
+  const statusLines = statusRaw ? statusRaw.split("\n").filter(Boolean) : [];
+  const commits = commitsRaw ? commitsRaw.split("\n").filter(Boolean) : [];
+
+  const value = { branch, mainBranch, user, statusLines, commits };
+  gitCache.set(workDir, { at: Date.now(), value });
+  if (gitCache.size > 20) {
+    const oldest = Array.from(gitCache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) gitCache.delete(oldest[0]);
+  }
+  return value;
 }
 
 function getGitSnapshot(workDir) {
@@ -128,8 +219,8 @@ function getGitSnapshot(workDir) {
   return value;
 }
 
-function buildBehaviorSection() {
-  return BEHAVIOR_SECTION;
+function buildBehaviorSection(agentMode = "code") {
+  return agentMode === "work" ? WORK_BEHAVIOR_SECTION : BEHAVIOR_SECTION;
 }
 
 function buildRulesSection(rules) {
@@ -224,6 +315,20 @@ function buildToolSection(toolDocs) {
   return `【工具手册】\n${body}`;
 }
 
+function buildSubagentSection(workDir) {
+  try {
+    const agents = discoverSubagents(workDir);
+    if (!agents || agents.length === 0) return "";
+    const lines = agents.map(
+      (a) =>
+        `- **${a.id}** (${a.name}, ${a.readOnly ? "只读" : "读写"}): ${a.description} [可用工具: ${(a.tools || []).join(", ")}]`
+    );
+    return `【预设子代理模板 (亦可通过 role 参数动态创建任意专项子代理)】\n${lines.join("\n")}`;
+  } catch {
+    return "";
+  }
+}
+
 function buildWorkspaceSection(matchedWorkspace, workDir) {
   if (matchedWorkspace && Array.isArray(matchedWorkspace.folders) && matchedWorkspace.folders.length > 0) {
     const folderLines = matchedWorkspace.folders
@@ -232,7 +337,7 @@ function buildWorkspaceSection(matchedWorkspace, workDir) {
     return `【用户选定的目标工作空间: ${matchedWorkspace.name}】
 挂载源文件夹列表:
 ${folderLines}
-重要约束：用户当前询问、分析和修改的代码目标正是上述文件夹！所有工具调用 (list_directory, search_code, read_file, edit_file) 必须严格限定在上述目录内！严禁分析客户端软件自身的目录 (/opt/apps/agnesAI)！`;
+重要约束：用户当前询问、分析和修改的代码目标正是上述文件夹！所有工具调用 (list_directory, search_code, read_file, edit_file) 必须严格限定在上述目录内！严禁分析客户端软件自身的源码目录！`;
   }
 
   if (workDir) {
@@ -243,8 +348,38 @@ ${folderLines}
   return "";
 }
 
-function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model }) {
+function buildPermissionSandboxSection(permissionMode = "auto-sandbox") {
+  const policy = getPermissionModePolicy(permissionMode);
+  const lines = [
+    `【当前权限与沙箱模式: ${policy.label} (${policy.id})】`,
+    `- 模式说明: ${policy.description}`,
+  ];
+
+  if (policy.id === "plan") {
+    lines.push(
+      "- 执行约束: 当前处于只读规划模式，已隐藏 `write_file` / `edit_file` 工具，且所有子代理与命令均运行于只读沙箱中。请专注于代码检索、架构分析与方案设计（可使用 `todo_write` 拆解任务），切勿尝试修改文件。"
+    );
+  } else if (policy.id === "auto-sandbox") {
+    lines.push(
+      "- 执行约束: 工作空间目录内的文件读写与常规开发命令可自动执行；`run_command` 运行在 macOS Seatbelt (`workspace-write`) 内核沙箱内，禁止写入工作区外路径、`.git/hooks` 或 `.omcx` 配置，并严禁读取宿主机敏感凭据（`~/.ssh`、`~/.aws`、`~/.omcx/config.json`）。"
+    );
+  } else if (policy.id === "ask") {
+    lines.push(
+      "- 执行约束: 当前处于谨慎询问模式，每次调用 `write_file`、`edit_file` 或 `run_command` 均会请求用户确认，`run_command` 同时受工作区沙箱保护。请尽量合并同文件的修改以减少打扰。"
+    );
+  } else if (policy.id === "full-access") {
+    lines.push(
+      "- 执行约束: 当前已解除命令级 OS 沙箱限制，但高危破坏性命令与工作区外文件写入仍需用户确认，且宿主机高敏凭据路径仍受保护。"
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode = "auto-sandbox", agentMode = "code" }) {
+  const policy = getPermissionModePolicy(permissionMode);
   const lines = ["【环境信息】"];
+  lines.push(`- 工作模式: ${agentMode === "work" ? "通用工作 (work)" : "编程研发 (code)"}`);
   lines.push(`- 主工作目录: ${workDir || "未指定"}`);
 
   const extraFolders = matchedWorkspace?.folders
@@ -256,6 +391,7 @@ function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model }) 
     lines.push(`- 附加工作目录: ${extraFolders.join(", ")}`);
   }
 
+  lines.push(`- 权限与沙箱模式: ${policy.label} (${policy.id})`);
   lines.push(`- 是否 Git 仓库: ${gitInfo ? "true" : "false"}`);
   lines.push(`- 平台: ${process.platform} / Shell: ${process.env.SHELL || "unknown"} / 系统: ${process.platform} ${os.release()} ${os.arch()}`);
   lines.push(`- 当前日期: ${new Date().toISOString().slice(0, 10)}`);
@@ -292,6 +428,93 @@ function buildGitSection(gitInfo) {
   return parts.join("\n");
 }
 
+function buildCustomSystemPromptSection(customPrompt) {
+  if (!customPrompt || !String(customPrompt).trim()) return "";
+  return [
+    "【用户全局自定义系统指示 (User Custom Instructions)】",
+    "用户在全局设置中指定了以下专属行为偏好与研发要求，请与内置准则共同严格遵循：",
+    String(customPrompt).trim(),
+  ].join("\n");
+}
+
+function buildRepoMapSection(repoMap) {
+  if (!repoMap || !String(repoMap).trim()) return "";
+  return [
+    "【仓库符号地图 (Repo Map)】",
+    "以下地图由本地索引自动生成，按目录列出高价值源码文件及其符号与行号。请优先据此定位模块；需要精确符号位置时调用 `search_symbols`，需要全文检索时调用 `search_code`。",
+    String(repoMap).trim(),
+  ].join("\n");
+}
+
+function buildRepoWikiSection(repoWiki, repoWikiPath = "", repoWikiIsMulti = false) {
+  if (!repoWiki || !String(repoWiki).trim()) return "";
+  if (repoWikiIsMulti) {
+    return [
+      "【Repo Wiki（多目录工作空间架构文档摘要）】",
+      "以下内容按工作空间各仓库自动汇总（主目录优先分配摘要篇幅），如需某个仓库更细节的实现请按路径用 read_file 查看完整 wiki.md；如与代码事实冲突，以代码为准。",
+      String(repoWiki).trim(),
+    ].join("\n");
+  }
+  return [
+    "【Repo Wiki（仓库级架构文档摘要）】",
+    repoWikiPath ? `完整文档路径：${repoWikiPath}（需要细节时可用 read_file 查看）` : "",
+    "以下内容由仓库索引、README 与构建清单自动生成，适合快速理解模块职责与数据流；如与代码事实冲突，以代码为准。",
+    String(repoWiki).trim(),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildWorktreeSection(workDir) {
+  if (!isUnderWorktreesRoot(workDir)) return "";
+  return [
+    "【隔离工作树环境约束 (Isolated Worktree Mode)】",
+    "当前会话运行在独立的 Git Worktree 隔离目录中。为了避免多会话磁盘占用膨胀，系统未自动复制或安装项目的本地运行依赖环境。",
+    "- **禁止重型依赖安装**: 除非用户明确要求，不要在当前目录执行完整依赖安装或生成重型构建产物。",
+    "- **仅做基础语法验证**: 完成代码改动后，请根据当前项目的编程语言与已有环境自行判断，优先执行轻量级的基础语法/静态校验，不要假设完整运行时环境已就绪。",
+    "- **明确告知验证边界**: 在最终回复中必须明确说明：当前处于未复制依赖环境的隔离 Worktree，仅完成了基础语法校验；如需完整运行与功能验证，请先将代码合并到目标分支后在主工作区测试。",
+  ].join("\n");
+}
+
+function buildGitReminder(gitInfo) {
+  const section = buildGitSection(gitInfo);
+  if (!section) return "";
+  return `<system-reminder>\n${section}\n</system-reminder>`;
+}
+
+function buildTodoReminder(todos) {
+  const section = buildTodoSection(todos);
+  if (!section) return "";
+  return `<system-reminder>\n${section}\n</system-reminder>`;
+}
+
+function appendReminderToLastUserMessage(messages, reminderText) {
+  if (!Array.isArray(messages) || !reminderText || !String(reminderText).trim()) return false;
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx < 0) return false;
+  const target = messages[lastUserIdx];
+  const block = String(reminderText).trim();
+  if (Array.isArray(target.content)) {
+    messages[lastUserIdx] = {
+      ...target,
+      content: [...target.content, { type: "text", text: `\n\n${block}` }],
+    };
+  } else {
+    const base = typeof target.content === "string" ? target.content : String(target.content || "");
+    messages[lastUserIdx] = {
+      ...target,
+      content: base ? `${base}\n\n${block}` : block,
+    };
+  }
+  return true;
+}
+
 function buildSystemContext({
   workDir = null,
   matchedWorkspace = null,
@@ -299,12 +522,28 @@ function buildSystemContext({
   memories = [],
   memoryIndex = [],
   projectRules = [],
+  repoMap = "",
+  repoWiki = "",
+  repoWikiPath = "",
+  repoWikiIsMulti = false,
   todos = [],
   toolDocs = [],
   model = "",
   enableTools = true,
+  permissionMode = "auto-sandbox",
+  agentMode = "code",
+  customSystemPrompt = "",
+  gitInfo: providedGitInfo = undefined,
+  includeTodosInSystem = false,
+  includeGitInSystem = false,
 } = {}) {
-  const gitInfo = getGitSnapshot(workDir);
+  const normalizedMode = agentMode === "work" ? "work" : "code";
+  const gitInfo =
+    providedGitInfo !== undefined
+      ? providedGitInfo
+      : normalizedMode === "work"
+      ? null
+      : getGitSnapshot(workDir);
   const sections = [];
 
   const push = (name, content) => {
@@ -313,15 +552,41 @@ function buildSystemContext({
     sections.push({ name, content: text, chars: text.length, tokens: estimateTokens(text) });
   };
 
-  push("behavior", buildBehaviorSection());
+  push("behavior", buildBehaviorSection(normalizedMode));
+  push("sandbox", buildPermissionSandboxSection(permissionMode));
+  push("custom_prompt", buildCustomSystemPromptSection(customSystemPrompt));
   push("rules", buildRulesSection(projectRules));
+  if (normalizedMode !== "work") {
+    push("repo_map", buildRepoMapSection(repoMap));
+    push("repo_wiki", buildRepoWikiSection(repoWiki, repoWikiPath, repoWikiIsMulti));
+  }
   push("skills", buildSkillsSection(skills));
   push("memory", buildMemorySection(memories, memoryIndex));
-  push("todos", buildTodoSection(todos));
-  if (enableTools) push("tools", buildToolSection(toolDocs));
+  if (includeTodosInSystem) {
+    push("todos", buildTodoSection(todos));
+  }
+  if (enableTools) {
+    push("tools", buildToolSection(toolDocs));
+    push("subagents", buildSubagentSection(workDir));
+  }
   push("workspace", buildWorkspaceSection(matchedWorkspace, workDir));
-  push("environment", buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model }));
-  push("git", buildGitSection(gitInfo));
+  if (normalizedMode !== "work") {
+    push("worktree", buildWorktreeSection(workDir));
+  }
+  push(
+    "environment",
+    buildEnvironmentSection({
+      workDir,
+      matchedWorkspace,
+      gitInfo,
+      model,
+      permissionMode,
+      agentMode: normalizedMode,
+    })
+  );
+  if (includeGitInSystem && normalizedMode !== "work") {
+    push("git", buildGitSection(gitInfo));
+  }
 
   return {
     text: sections.map((section) => section.content).join("\n\n"),
@@ -331,6 +596,12 @@ function buildSystemContext({
 
 module.exports = {
   buildSystemContext,
+  buildGitSection,
+  buildTodoSection,
+  buildGitReminder,
+  buildTodoReminder,
+  appendReminderToLastUserMessage,
   getGitSnapshot,
+  getGitSnapshotAsync,
   truncate,
 };

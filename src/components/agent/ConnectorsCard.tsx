@@ -1,42 +1,33 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Plus, ExternalLink } from 'lucide-react';
+import { ChevronDown, ChevronRight, ExternalLink, Plus } from 'lucide-react';
 import { useChatStore } from '@/stores/chatStore';
+import { useAppStore } from '@/stores/appStore';
 
 export const ConnectorsCard: React.FC = () => {
   const [isOpen, setIsOpen] = useState(true);
-  const { mcpServers } = useChatStore();
+  const mcpServers = useChatStore((s) => s.mcpServers);
+  const setActiveNavTab = useAppStore((s) => s.setActiveNavTab);
+  const setToolsIntent = useAppStore((s) => s.setToolsIntent);
 
-  // 若无自定义 MCP，默认显示预置的 Context7 连接器以完全匹配视觉截图
-  const displayServers = mcpServers.length > 0 ? mcpServers : [
-    {
-      id: 'context7-1',
-      name: 'Context7',
-      command: 'npx',
-      args: ['-y', '@upstash/context7-mcp'],
-      description: '实时代码库与技术文档检索引擎',
-      enabled: true,
-    },
-    {
-      id: 'context7-2',
-      name: 'Context7',
-      command: 'npx',
-      args: ['-y', '@upstash/context7-mcp'],
-      description: '上下文增强组件',
-      enabled: true,
-    },
-  ];
+  // 仅显示当前已启用的可用 MCP
+  const activeServers = mcpServers.filter((s) => s.enabled !== false);
+
+  const openConnectorsPage = (openWizard = false) => {
+    setToolsIntent({ tab: 'mcp', openConnectorWizard: openWizard });
+    setActiveNavTab('tools');
+  };
 
   return (
-    <div className='bg-[#1c1c1c] border border-[#2b2b2b] rounded-2xl overflow-hidden transition-all duration-200 select-none titlebar-no-drag'>
+    <div className='border-b border-[color:var(--ui-divider-hairline)] transition-colors select-none titlebar-no-drag last:border-b-0'>
       {/* 头部标题与折叠开关 */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className='w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/[0.02] transition-colors'
+        className='w-full flex items-center justify-between px-4 py-3 text-left hover:bg-[var(--ui-block-hover-bg)] transition-colors'
       >
-        <span className='font-semibold text-sm text-neutral-200 tracking-wide'>
-          Connectors
+        <span className='font-semibold text-sm text-[var(--ui-text-primary)] tracking-wide'>
+          连接器
         </span>
-        <div className='text-neutral-400'>
+        <div className='text-[var(--ui-text-faint)]'>
           {isOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
         </div>
       </button>
@@ -44,38 +35,56 @@ export const ConnectorsCard: React.FC = () => {
       {/* 折叠内容 */}
       {isOpen && (
         <div className='px-4 pb-3.5 pt-0.5 flex flex-col gap-2'>
-          {displayServers.map((server, idx) => (
-            <div
-              key={`${server.id}-${idx}`}
-              className='flex items-center justify-between py-1.5 px-2 -mx-1.5 rounded-lg hover:bg-white/[0.04] transition-colors cursor-pointer group'
-              title={server.description || server.name}
-            >
-              <div className='flex items-center gap-3 min-w-0'>
-                {/* 参照截图 2 的圆角小矩形 C 图标 */}
-                <div className='w-6 h-6 rounded-md bg-[#2d2d2d] border border-[#3d3d3d] flex items-center justify-center flex-shrink-0 text-neutral-300 font-bold text-xs shadow-sm'>
-                  {server.name.charAt(0).toUpperCase()}
-                </div>
-                <span className='text-xs font-medium text-neutral-200 truncate'>
-                  {server.name}
-                </span>
-              </div>
-
-              {/* 右侧指示器 */}
-              <div className='flex items-center gap-1.5'>
-                <span className='w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0' />
-                <span className='text-[10px] text-neutral-400 font-mono hidden group-hover:inline-block'>
-                  MCP
-                </span>
-              </div>
+          {activeServers.length === 0 ? (
+            <div className='py-2 text-xs text-[var(--ui-text-faint)]'>
+              暂无可用 MCP 服务器
             </div>
-          ))}
+          ) : (
+            activeServers.map((server, idx) => (
+              <div
+                key={`${server.id}-${idx}`}
+                className='flex items-center justify-between py-1.5 px-2 -mx-1.5 rounded-lg hover:bg-[var(--ui-block-hover-bg)] transition-colors cursor-pointer group'
+                title={server.description || server.name}
+              >
+                <div className='flex items-center gap-3 min-w-0'>
+                  <div className='w-6 h-6 rounded-md bg-[var(--ui-chip-bg)] border border-[color:var(--ui-border-hairline)] flex items-center justify-center flex-shrink-0 text-[var(--ui-text-secondary)] font-bold text-xs'>
+                    {server.name.charAt(0).toUpperCase()}
+                  </div>
+                  <span className='text-xs font-medium text-[var(--ui-text-primary)] truncate'>
+                    {server.name}
+                  </span>
+                </div>
+
+                {/* 右侧指示器 */}
+                <div className='flex items-center gap-1.5'>
+                  <span className='w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0' />
+                  <span className='text-[10px] text-[var(--ui-text-faint)] font-mono hidden group-hover:inline-block'>
+                    MCP
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
 
           {/* 底部快速查看提示 */}
-          <div className='pt-1 flex items-center justify-between text-[11px] text-neutral-400 border-t border-[#262626] mt-1'>
-            <span>来源: ~/.omcx/mcp.json</span>
-            <span className='hover:text-neutral-300 cursor-pointer flex items-center gap-0.5'>
-              管理 <ExternalLink size={10} />
-            </span>
+          <div className='pt-1.5 flex items-center justify-between text-[11px] text-[var(--ui-text-muted)] border-t border-[color:var(--ui-divider-hairline)] mt-1'>
+            <span>MCP 连接器 ({activeServers.length})</span>
+            <div className='flex items-center gap-2.5'>
+              <button
+                onClick={() => openConnectorsPage(true)}
+                className='hover:text-[var(--ui-accent-blue)] cursor-pointer flex items-center gap-0.5 transition-colors'
+                title='从预置模板一键添加飞书、钉钉、企业微信、Jira 等连接器'
+              >
+                <Plus size={11} />
+                <span>添加</span>
+              </button>
+              <span
+                onClick={() => openConnectorsPage(false)}
+                className='hover:text-[var(--ui-text-primary)] cursor-pointer flex items-center gap-0.5 transition-colors'
+              >
+                管理 <ExternalLink size={10} />
+              </span>
+            </div>
           </div>
         </div>
       )}

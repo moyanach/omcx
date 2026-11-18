@@ -1,11 +1,14 @@
 const { estimateTokens } = require("./contextCalculator");
+const storageService = require("./storageService");
 
 const DEFAULTS = {
   outputReserve: 4096,
   keepTokens: 20000,
   microRatio: 0.9,
   keepRecentToolResults: 5,
-  toolResultMaxChars: 8000,
+  microBatchMinCount: 4,
+  microBatchMinSavedChars: 12000,
+  toolResultMaxChars: 20000,
   summaryMaxTokens: 4096,
   maxConsecutiveFailures: 3,
 };
@@ -76,6 +79,13 @@ function estimateMessagesTokens(messages = []) {
         // 忽略无法序列化的 tool_calls
       }
     }
+    // 推理随请求回传时同样占用上下文预算，必须计入阈值判断
+    if (typeof message.reasoning_content === "string" && message.reasoning_content) {
+      tokens += estimateTokens(message.reasoning_content);
+    }
+    if (typeof message.reasoning === "string" && message.reasoning) {
+      tokens += estimateTokens(message.reasoning);
+    }
   }
   return tokens;
 }
@@ -108,31 +118,114 @@ function microCompact(messages, cfg = {}) {
   });
   const keepSet = new Set(toolIndexes.slice(-keepRecent));
 
-  let saved = 0;
-  let cleared = 0;
-  const next = messages.map((message, index) => {
-    if (message.role !== "tool" || keepSet.has(index)) return message;
-    const original = typeof message.content === "string" ? message.content : JSON.stringify(message.content || "");
-    if (!original || original.startsWith("[旧工具输出已清理")) return message;
+  const candidates = [];
+  let potentialSaved = 0;
+  messages.forEach((message, index) => {
+    if (message.role !== "tool" || keepSet.has(index)) return;
+    const original =
+      typeof message.content === "string" ? message.content : JSON.stringify(message.content || "");
+    if (!original || original.startsWith("[旧工具输出已清理")) return;
     const replacement = `[旧工具输出已清理，原始 ${original.length} 字符]`;
-    saved += Math.max(0, original.length - replacement.length);
-    cleared += 1;
-    return { ...message, content: replacement };
+    const delta = Math.max(0, original.length - replacement.length);
+    candidates.push({ index, replacement, delta });
+    potentialSaved += delta;
   });
 
-  return { messages: next, saved, cleared };
+  if (candidates.length === 0) {
+    return { messages, saved: 0, cleared: 0, skippedForCache: false };
+  }
+
+  // 滞后批量水位线策略：攒够一批或达到显著回收收益/逼近主压缩阈值再一次性清理，
+  // 避免刚过 microThreshold 后每新增 1 轮就向前改写 1 条中间消息导致 Prompt Cache 逐轮雪崩。
+  if (cfg.batchWatermark) {
+    const minCount = Number(cfg.microBatchMinCount) || DEFAULTS.microBatchMinCount;
+    const minSavedChars =
+      Number(cfg.microBatchMinSavedChars) || DEFAULTS.microBatchMinSavedChars;
+    const urgent = Boolean(cfg.urgent);
+    if (!urgent && candidates.length < minCount && potentialSaved < minSavedChars) {
+      return { messages, saved: 0, cleared: 0, skippedForCache: true };
+    }
+  }
+
+  const replaceMap = new Map(candidates.map((item) => [item.index, item.replacement]));
+  const next = messages.map((message, index) => {
+    const replacement = replaceMap.get(index);
+    return replacement ? { ...message, content: replacement } : message;
+  });
+
+  return { messages: next, saved: potentialSaved, cleared: candidates.length, skippedForCache: false };
 }
 
-function truncateToolResult(content, maxChars = DEFAULTS.toolResultMaxChars) {
+function resolveToolResultMaxChars(options = {}) {
+  if (typeof options === "number" && Number.isFinite(options) && options > 0) {
+    return Math.floor(options);
+  }
+  const opts = options && typeof options === "object" ? options : {};
+  const configured = Number(opts.configuredMaxChars);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.max(1000, Math.floor(configured));
+  }
+
+  const explicitMax = Number(opts.maxChars);
+  const contextLimit = Number(opts.contextLimit) || 0;
+  let limit;
+  if (Number.isFinite(explicitMax) && explicitMax > 0) {
+    limit = Math.floor(explicitMax);
+  } else if (contextLimit >= 500000) {
+    limit = 40000;
+  } else if (contextLimit >= 180000) {
+    limit = 28000;
+  } else if (contextLimit >= 100000) {
+    limit = 20000;
+  } else if (contextLimit > 0) {
+    limit = 12000;
+  } else {
+    limit = DEFAULTS.toolResultMaxChars;
+  }
+
+  // 文档类工具单页/单段预算默认 24k，除非用户显式设限或小窗口模型，避免外层通道反砍内部预算
+  if (opts.toolName === "read_document" && (!contextLimit || contextLimit >= 100000)) {
+    limit = Math.max(limit, 24000);
+  }
+  return limit;
+}
+
+function buildToolTruncationHint(toolName, omittedChars, headChars, tailChars) {
+  const base = `共省略中间 ${omittedChars} 字符（已保留前 ${headChars} + 后 ${tailChars} 字符）`;
+  switch (toolName) {
+    case "read_file":
+      return `${base}；请使用 offset 与 maxLines 分段读取目标行区间。`;
+    case "read_document":
+      return `${base}；表格请使用 startRow/maxRows 或 mode="aggregate" 聚合分析，PDF/PPT 请用 startPage/endPage 分页读取。`;
+    case "run_command":
+      return `${base}；已优先保留尾部 65% 的退出状态与报错堆栈，如需查看中间输出请配合 grep/tail 过滤重试。`;
+    case "search_code":
+    case "find_references":
+    case "search_symbols":
+      return `${base}；请缩小目录/include 过滤或减小 maxResults 重新检索。`;
+    default:
+      return `${base}；如需完整细节请缩小查询范围或分页读取。`;
+  }
+}
+
+function truncateToolResult(content, maxCharsOrOptions = DEFAULTS.toolResultMaxChars) {
   const text = typeof content === "string" ? content : JSON.stringify(content ?? "");
+  const opts =
+    maxCharsOrOptions && typeof maxCharsOrOptions === "object" ? maxCharsOrOptions : {};
+  const maxChars = resolveToolResultMaxChars(maxCharsOrOptions);
   if (text.length <= maxChars) return text;
 
-  const head = 5000;
-  const tail = 2000;
-  if (maxChars < head + tail) {
+  const toolName = opts.toolName || "";
+  if (maxChars < 400) {
     return `${text.slice(0, maxChars)}\n…[已截断，原始 ${text.length} 字符]`;
   }
-  return `${text.slice(0, head)}\n…[已截断，原始 ${text.length} 字符]…\n${text.slice(-tail)}`;
+
+  // 头部保留 35%（路径/表头/参数），尾部保留 65%（编译测试报错堆栈与执行结果）
+  const headChars = Math.max(100, Math.floor(maxChars * 0.35));
+  const tailChars = Math.max(100, maxChars - headChars);
+  const omittedChars = Math.max(0, text.length - headChars - tailChars);
+  const hint = buildToolTruncationHint(toolName, omittedChars, headChars, tailChars);
+  return `${text.slice(0, headChars)}\n…[已截断，原始 ${text.length} 字符；${hint}]…\n${text.slice(-tailChars)}`;
 }
 
 function truncateMiddle(text, maxChars) {
@@ -246,46 +339,90 @@ function buildTranscript(messages, maxChars) {
   return transcript;
 }
 
+function cleanSummaryText(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  // 复用 storageService 的安全剥离实现：只移除「成对且闭合」的思考标签，
+  // 未闭合标签一律按字面文本保留在正文中，彻底消除“吞尾截断”复发面。
+  const withoutThink = storageService.extractLegacyThinking(raw).content.trim();
+  if (!withoutThink || withoutThink.toLowerCase() === "task ready") {
+    return "";
+  }
+  return withoutThink;
+}
+
 async function summarizeMessages({
   messages,
   modelBaseUrl,
   modelApiKey,
   apiModelId,
   headers = {},
-  maxTokens = DEFAULTS.summaryMaxTokens,
   maxChars = 120000,
+  depth = 0,
 }) {
   const transcript = buildTranscript(messages, maxChars);
   const prompt = buildSummaryPrompt();
 
-  const response = await fetch(`${modelBaseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { ...headers, Accept: "application/json" },
-    body: JSON.stringify({
-      model: apiModelId,
-      messages: [
-        {
-          role: "user",
-          content: `以下是需要压缩的对话记录：\n\n${transcript}\n\n---\n\n${prompt}`,
-        },
-      ],
-      stream: false,
-      max_tokens: maxTokens,
-      temperature: 0.2,
-    }),
-  });
+  try {
+    const response = await fetch(`${modelBaseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { ...headers, Accept: "application/json" },
+      body: JSON.stringify({
+        model: apiModelId,
+        messages: [
+          {
+            role: "user",
+            content: `以下是需要压缩的对话记录：\n\n${transcript}\n\n---\n\n${prompt}`,
+          },
+        ],
+        stream: false,
+        reasoning_effort: "low",
+        temperature: 0.2,
+      }),
+    });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`摘要请求失败 (${response.status}): ${errorText}`);
-  }
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`摘要请求失败 (${response.status}): ${errorText}`);
+    }
 
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content || !String(content).trim()) {
-    throw new Error("摘要请求返回为空");
+    const data = await response.json();
+    const finishReason = data?.choices?.[0]?.finish_reason;
+    const rawContent = data?.choices?.[0]?.message?.content;
+    const cleaned = cleanSummaryText(rawContent);
+
+    if (!cleaned || (finishReason === "length" && cleaned.length < 100)) {
+      throw new Error("摘要生成被截断或返回为空");
+    }
+    return cleaned;
+  } catch (err) {
+    // Map-Reduce 递归二分兜底：当待摘要消息过长导致超限或截断时，自动拆分为两半分别摘要再合并
+    if (depth < 2 && Array.isArray(messages) && messages.length >= 4) {
+      const mid = Math.floor(messages.length / 2);
+      const halfChars = Math.max(15000, Math.floor(maxChars / 2));
+      const [part1, part2] = await Promise.all([
+        summarizeMessages({
+          messages: messages.slice(0, mid),
+          modelBaseUrl,
+          modelApiKey,
+          apiModelId,
+          headers,
+          maxChars: halfChars,
+          depth: depth + 1,
+        }),
+        summarizeMessages({
+          messages: messages.slice(mid),
+          modelBaseUrl,
+          modelApiKey,
+          apiModelId,
+          headers,
+          maxChars: halfChars,
+          depth: depth + 1,
+        }),
+      ]);
+      return `${part1}\n\n### 后续阶段摘要\n${part2}`;
+    }
+    throw err;
   }
-  return String(content).trim();
 }
 
 async function compactMessages({ messages, systemMessage, thresholds, modelCfg, cfg = {} }) {
@@ -306,7 +443,6 @@ async function compactMessages({ messages, systemMessage, thresholds, modelCfg, 
     modelApiKey: modelCfg.apiKey,
     apiModelId: modelCfg.modelId,
     headers: modelCfg.headers,
-    maxTokens: DEFAULTS.summaryMaxTokens,
     maxChars: Math.max(20000, thresholds.threshold * 3.5),
   });
 
@@ -358,6 +494,7 @@ module.exports = {
   getThresholds,
   shouldMicroCompact,
   microCompact,
+  resolveToolResultMaxChars,
   truncateToolResult,
   selectKeepWindow,
   buildSummaryPrompt,

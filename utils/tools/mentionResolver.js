@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { resolveWorkspacePath, isUnderFolder } = require("./pathResolver");
 const { isIgnoredName } = require("./fileIndexer");
+const { discoverSubagents } = require("../../services/subagentService");
 
 const MAX_FILE_CHARS = 160000;
 const MAX_FILE_LINES = 2000;
@@ -191,9 +192,16 @@ function resolveMentionTarget(mention, workDir, allowedFolders) {
   }
 
   let sawOutside = false;
+  let sawSensitive = false;
 
   for (const candidate of buildCandidates(mention)) {
-    const { resolvedPath, isExternal } = resolveWorkspacePath(candidate, workDir, folders);
+    const { resolvedPath, isExternal, isSensitiveBlocked } = resolveWorkspacePath(candidate, workDir, folders, {
+      mode: "read",
+    });
+    if (isSensitiveBlocked) {
+      sawSensitive = true;
+      continue;
+    }
     if (isExternal) {
       sawOutside = true;
       continue;
@@ -219,16 +227,21 @@ function resolveMentionTarget(mention, workDir, allowedFolders) {
     };
   }
 
-  return { ok: false, reason: sawOutside ? "outside" : "missing" };
+  return {
+    ok: false,
+    reason: sawSensitive ? "sensitive" : sawOutside ? "outside" : "missing",
+  };
 }
 
 function buildMentionContext(text, workDir, allowedFolders = [], extraContext = {}) {
   const mentions = extractMentions(text);
-  const result = { block: "", files: [], dirs: [], skills: [], mcps: [], skipped: [] };
+  const result = { block: "", files: [], dirs: [], skills: [], mcps: [], subagents: [], skipped: [], allowedTools: [] };
+  const skillAllowedToolLists = [];
   if (mentions.length === 0) return result;
 
   const skills = Array.isArray(extraContext.skills) ? extraContext.skills : [];
   const mcpServers = Array.isArray(extraContext.mcpServers) ? extraContext.mcpServers : [];
+  const subagents = discoverSubagents(workDir);
 
   const parts = [];
   let totalChars = 0;
@@ -240,6 +253,26 @@ function buildMentionContext(text, workDir, allowedFolders = [], extraContext = 
       continue;
     }
 
+    // 0. 匹配 @agent:id 显式指定子代理
+    if (mention.startsWith("agent:")) {
+      const agentId = mention.slice(6).trim().toLowerCase();
+      const matchedAgent = subagents.find(
+        (a) => a.id.toLowerCase() === agentId || a.name.toLowerCase().includes(agentId)
+      );
+      if (matchedAgent) {
+        const section = [
+          `### 用户显式指定调度的子代理: ${matchedAgent.name} (ID: ${matchedAgent.id})`,
+          `职责说明: ${matchedAgent.description || "无"}`,
+          `权限模式: ${matchedAgent.readOnly ? "只读安全模式" : "完整读写模式"}`,
+          `【执行指示】用户在本次提问中显式点名使用子代理 [${matchedAgent.id}]，请优先调用 \`dispatch_subagent\` 工具（设置 agent="${matchedAgent.id}"）委派相关任务。`,
+        ].join("\n");
+        totalChars += section.length;
+        parts.push(section);
+        result.subagents.push(matchedAgent.id);
+        continue;
+      }
+    }
+
     // A. 匹配 @skill:name 专家技能
     if (mention.startsWith("skill:")) {
       const skillName = mention.slice(6).trim();
@@ -247,10 +280,15 @@ function buildMentionContext(text, workDir, allowedFolders = [], extraContext = 
       if (matchedSkill) {
         const fence = fenceFor(matchedSkill.prompt || "");
         const toolList = (matchedSkill.tools || []).join(", ") || "无特定依赖工具";
+        const allowedList = (matchedSkill.allowedTools || []).join(", ");
+        if (Array.isArray(matchedSkill.allowedTools) && matchedSkill.allowedTools.length > 0) {
+          skillAllowedToolLists.push(matchedSkill.allowedTools);
+        }
         const section = [
           `### 用户显式激活的专家技能: ${matchedSkill.name} (${matchedSkill.scope || "global"})`,
           `描述: ${matchedSkill.description || "无"}`,
           `依赖工具: ${toolList}`,
+          allowedList ? `本次技能允许使用的工具范围: ${allowedList}` : "",
           `【执行指示】用户在本次提问中显式激活此技能，请以此技能最高工作流标准优先开展分析与执行：`,
           `${fence}markdown\n${matchedSkill.prompt || "无额外提示词说明"}\n${fence}`,
         ].join("\n");
@@ -345,6 +383,16 @@ function buildMentionContext(text, workDir, allowedFolders = [], extraContext = 
   }
 
   if (parts.length === 0) return result;
+
+  // 仅当本次激活的所有技能都声明了 allowed-tools 时才收敛工具白名单，
+  // 避免未声明权限的技能意外限制 Agent 能力。
+  if (
+    skillAllowedToolLists.length > 0 &&
+    skillAllowedToolLists.length === result.skills.length
+  ) {
+    const [first, ...rest] = skillAllowedToolLists;
+    result.allowedTools = first.filter((name) => rest.every((list) => list.includes(name)));
+  }
 
   const header = [
     "【用户通过 @ 显式引用的统一上下文资源】",

@@ -1,5 +1,5 @@
 const { z } = require("zod");
-const { StructuredTool } = require("@langchain/core/tools");
+const { StructuredTool } = require("./baseTool");
 
 const TODO_STATUSES = ["pending", "in_progress", "completed"];
 const MAX_TODOS = 50;
@@ -56,10 +56,15 @@ class TodoWriteTool extends StructuredTool {
     }
 
     const completed = normalized.filter((todo) => todo.status === "completed").length;
+    const inProgress = normalized.find((todo) => todo.status === "in_progress") || null;
+    const pendingCount = normalized.filter((todo) => todo.status === "pending").length;
     return JSON.stringify({
       success: true,
       total: normalized.length,
       completed,
+      pending: pendingCount,
+      in_progress: inProgress ? { id: inProgress.id, text: inProgress.text } : null,
+      todos: normalized,
       message: `待办清单已更新：共 ${normalized.length} 项，已完成 ${completed} 项`,
     });
   }
