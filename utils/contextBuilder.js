@@ -348,7 +348,7 @@ ${folderLines}
   return "";
 }
 
-function buildPermissionSandboxSection(permissionMode = "auto-sandbox") {
+function buildPermissionSandboxSection(permissionMode = "auto") {
   const policy = getPermissionModePolicy(permissionMode);
   const lines = [
     `【当前权限与沙箱模式: ${policy.label} (${policy.id})】`,
@@ -359,24 +359,20 @@ function buildPermissionSandboxSection(permissionMode = "auto-sandbox") {
     lines.push(
       "- 执行约束: 当前处于只读规划模式，已隐藏 `write_file` / `edit_file` 工具，且所有子代理与命令均运行于只读沙箱中。请专注于代码检索、架构分析与方案设计（可使用 `todo_write` 拆解任务），切勿尝试修改文件。"
     );
-  } else if (policy.id === "auto-sandbox") {
+  } else if (policy.id === "auto") {
     lines.push(
-      "- 执行约束: 工作空间目录内的文件读写与常规开发命令可自动执行；`run_command` 运行在 macOS Seatbelt (`workspace-write`) 内核沙箱内，禁止写入工作区外路径、`.git/hooks` 或 `.omcx` 配置，并严禁读取宿主机敏感凭据（`~/.ssh`、`~/.aws`、`~/.omcx/config.json`）。"
-    );
-  } else if (policy.id === "ask") {
-    lines.push(
-      "- 执行约束: 当前处于谨慎询问模式，每次调用 `write_file`、`edit_file` 或 `run_command` 均会请求用户确认，`run_command` 同时受工作区沙箱保护。请尽量合并同文件的修改以减少打扰。"
+      "- 执行约束: 工作空间目录内的文件读写与常规开发命令可自动执行；`run_command` 运行在 macOS Seatbelt (`workspace-write`) 内核沙箱内。遇到高危命令、受保护路径或跨目录访问时，系统将交由独立大模型安全裁判自动评估（符合当前任务意图的局部操作自动放行，高风险操作将拦截或转交用户确认），同时严禁读取宿主机敏感凭据（`~/.ssh`、`~/.aws`、`~/.omcx/config.json`）。"
     );
   } else if (policy.id === "full-access") {
     lines.push(
-      "- 执行约束: 当前已解除命令级 OS 沙箱限制，但高危破坏性命令与工作区外文件写入仍需用户确认，且宿主机高敏凭据路径仍受保护。"
+      "- 执行约束: 当前已解除命令级 OS 沙箱限制，但高危破坏性命令与工作区外文件写入仍保留人工确认最后防线，且宿主机高敏凭据路径仍受保护。"
     );
   }
 
   return lines.join("\n");
 }
 
-function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode = "auto-sandbox", agentMode = "code" }) {
+function buildEnvironmentSection({ workDir, matchedWorkspace, gitInfo, model, permissionMode = "auto", agentMode = "code" }) {
   const policy = getPermissionModePolicy(permissionMode);
   const lines = ["【环境信息】"];
   lines.push(`- 工作模式: ${agentMode === "work" ? "通用工作 (work)" : "编程研发 (code)"}`);

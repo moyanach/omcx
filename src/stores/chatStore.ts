@@ -46,7 +46,14 @@ export interface Message {
   reasoning?: string;
 }
 
-export type PermissionMode = "plan" | "auto-sandbox" | "ask" | "full-access";
+export type PermissionMode = "plan" | "auto" | "full-access" | "auto-sandbox" | "ask";
+
+export function normalizeClientPermissionMode(mode?: string | null): "plan" | "auto" | "full-access" {
+  const raw = String(mode || "").trim().toLowerCase();
+  if (raw === "plan") return "plan";
+  if (raw === "full-access") return "full-access";
+  return "auto";
+}
 export type ReasoningEffort = "off" | "low" | "medium" | "high" | "max";
 export type AgentMode = "code" | "work";
 

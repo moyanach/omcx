@@ -9,6 +9,7 @@ import type {
   AgentMode,
   Message,
 } from "../chatStore";
+import { normalizeClientPermissionMode } from "../chatStore";
 
 // 会话切换序号：用于丢弃并发切换时旧请求的迟到响应
 let activeSessionSwitchSeq = 0;
@@ -93,7 +94,7 @@ export const createSessionSlice: StateCreator<
   activeWorkspaceId: null,
   workspaces: [],
   models: [],
-  defaultPermissionMode: "auto-sandbox",
+  defaultPermissionMode: "auto",
   defaultAgentMode: "code",
   isWorkspaceModalOpen: false,
   activeEditingWorkspace: null,
@@ -363,7 +364,7 @@ export const createSessionSlice: StateCreator<
           model: s.model || "",
           workspaceId: s.workspace_id || s.workspaceId || undefined,
           workDir: s.work_dir || s.workDir || undefined,
-          permissionMode: (s.permission_mode || s.permissionMode || "auto-sandbox") as PermissionMode,
+          permissionMode: normalizeClientPermissionMode(s.permission_mode || s.permissionMode),
           reasoningEffort: (s.reasoning_effort || s.reasoningEffort || "medium") as ReasoningEffort,
           agentMode: ((s.agent_mode || s.agentMode) === "work" ? "work" : "code") as AgentMode,
           sessionType:
@@ -415,13 +416,8 @@ export const createSessionSlice: StateCreator<
       if (window.electronAPI?.getConfig) {
         try {
           const savedPermMode = await window.electronAPI.getConfig("default_permission_mode");
-          if (
-            savedPermMode === "plan" ||
-            savedPermMode === "auto-sandbox" ||
-            savedPermMode === "ask" ||
-            savedPermMode === "full-access"
-          ) {
-            set({ defaultPermissionMode: savedPermMode });
+          if (savedPermMode) {
+            set({ defaultPermissionMode: normalizeClientPermissionMode(savedPermMode) });
           }
           const savedAgentMode = await window.electronAPI.getConfig("default_agent_mode");
           if (savedAgentMode === "work" || savedAgentMode === "code") {
@@ -470,7 +466,7 @@ export const createSessionSlice: StateCreator<
       model: options?.model || fallbackModel,
       workspaceId: targetWorkspaceId || undefined,
       workDir: targetWorkDir || undefined,
-      permissionMode: get().defaultPermissionMode || "auto-sandbox",
+      permissionMode: normalizeClientPermissionMode(get().defaultPermissionMode),
       reasoningEffort: "medium",
       agentMode: get().defaultAgentMode || "code",
       sessionType: "chat",
@@ -541,10 +537,9 @@ export const createSessionSlice: StateCreator<
       model,
       workspaceId,
       workDir: workDir || undefined,
-      permissionMode:
-        workspaceSessions[0]?.permissionMode ||
-        get().defaultPermissionMode ||
-        "auto-sandbox",
+      permissionMode: normalizeClientPermissionMode(
+        workspaceSessions[0]?.permissionMode || get().defaultPermissionMode
+      ),
       reasoningEffort: workspaceSessions[0]?.reasoningEffort || "medium",
       agentMode: get().defaultAgentMode || "code",
     };
@@ -923,22 +918,23 @@ export const createSessionSlice: StateCreator<
   },
 
   setSessionPermissionMode: async (sessionId, mode) => {
+    const normalized = normalizeClientPermissionMode(mode);
     set((state) => ({
-      defaultPermissionMode: mode,
+      defaultPermissionMode: normalized,
       sessions: state.sessions.map((s) =>
-        s.id === sessionId ? { ...s, permissionMode: mode, updatedAt: Date.now() } : s
+        s.id === sessionId ? { ...s, permissionMode: normalized, updatedAt: Date.now() } : s
       ),
     }));
     if (window.electronAPI?.dbUpdateSessionPermissionMode) {
       try {
-        await window.electronAPI.dbUpdateSessionPermissionMode(sessionId, mode);
+        await window.electronAPI.dbUpdateSessionPermissionMode(sessionId, normalized);
       } catch (err) {
         console.error("更新会话权限模式失败:", err);
       }
     }
     if (window.electronAPI?.setConfig) {
       try {
-        await window.electronAPI.setConfig("default_permission_mode", mode);
+        await window.electronAPI.setConfig("default_permission_mode", normalized);
       } catch (err) {
         console.error("保存默认权限模式失败:", err);
       }
@@ -1005,7 +1001,7 @@ export const createSessionSlice: StateCreator<
       model: rawSession.model || "",
       workspaceId: rawSession.workspace_id || rawSession.workspaceId || undefined,
       workDir: rawSession.work_dir || rawSession.workDir || undefined,
-      permissionMode: (rawSession.permission_mode || rawSession.permissionMode || "auto-sandbox") as PermissionMode,
+      permissionMode: normalizeClientPermissionMode(rawSession.permission_mode || rawSession.permissionMode),
       reasoningEffort: (rawSession.reasoning_effort || rawSession.reasoningEffort || "medium") as ReasoningEffort,
       agentMode: ((rawSession.agent_mode || rawSession.agentMode) === "work" ? "work" : "code") as AgentMode,
       sessionType: "chat",

@@ -2,7 +2,6 @@ import React from "react";
 import {
   Compass,
   ShieldCheck,
-  ShieldQuestion,
   ShieldAlert,
   Brain,
   Zap,
@@ -35,34 +34,23 @@ export const PERMISSION_MODE_OPTIONS: Array<{
     iconClass: "text-[var(--ui-accent-sky)]",
   },
   {
-    id: "auto-sandbox",
-    label: "工作区沙箱",
-    shortLabel: "工作区沙箱",
-    sandboxTag: "Seatbelt 写隔离",
+    id: "auto",
+    label: "自动模式",
+    shortLabel: "自动模式",
+    sandboxTag: "Seatbelt 写隔离 + AI 裁决",
     recommended: true,
-    description: "工作区内文件读写与常规命令自动放行，内核级拦截越界写入与敏感凭据读取",
+    description: "工作区内读写与命令自动放行；敏感或危险操作由大模型安全评估，判定高风险时人工确认兜底",
     icon: ShieldCheck,
     badgeClass:
       "bg-[var(--ui-accent-emerald-soft)] text-[var(--ui-accent-emerald)] border-[color:var(--ui-accent-emerald-border)]",
     iconClass: "text-[var(--ui-accent-emerald)]",
   },
   {
-    id: "ask",
-    label: "询问确认",
-    shortLabel: "询问确认",
-    sandboxTag: "Seatbelt 写隔离",
-    description: "每次修改文件或执行命令前请求确认，命令同样受工作区沙箱边界保护",
-    icon: ShieldQuestion,
-    badgeClass:
-      "bg-[var(--ui-accent-amber-soft)] text-[var(--ui-accent-amber)] border-[color:var(--ui-accent-amber-border)]",
-    iconClass: "text-[var(--ui-accent-amber)]",
-  },
-  {
     id: "full-access",
     label: "完全访问",
     shortLabel: "完全访问",
     sandboxTag: "关闭命令沙箱",
-    description: "解除命令级 OS 沙箱限制，仅对高危破坏性命令与工作区外写入请求确认",
+    description: "解除命令级 OS 沙箱限制，对高危破坏性命令与工作区外写入保留人工确认最后防线",
     icon: ShieldAlert,
     badgeClass:
       "bg-[var(--ui-accent-rose-soft)] text-[var(--ui-accent-rose)] border-[color:var(--ui-accent-rose-border)]",

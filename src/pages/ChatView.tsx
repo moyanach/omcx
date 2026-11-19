@@ -541,13 +541,16 @@ const ChatView: React.FC = () => {
                                 ? '高危命令拦截 · 请确认操作风险'
                                 : pendingPermission.kind === 'protected_write'
                                 ? '受保护配置拦截 · 请求修改敏感工程配置'
-                                : pendingPermission.kind === 'ask_write' || pendingPermission.kind === 'ask_command'
-                                ? '询问确认模式 · 请确认是否执行此操作'
                                 : '越界访问拦截 · 请求访问工作空间外部路径'}
                             </span>
                             <span className='px-1.5 py-0.2 rounded text-[10px] bg-[var(--ui-accent-amber-soft)] text-[var(--ui-accent-amber)] font-mono flex-shrink-0'>
                               {pendingPermission.action}
                             </span>
+                            {pendingPermission.aiReview && (
+                              <span className='px-1.5 py-0.2 rounded text-[10px] bg-rose-500/15 text-rose-500 border border-rose-500/30 font-medium flex-shrink-0'>
+                                AI 安全裁判建议拦截 ({pendingPermission.aiReview.risk || 'high'})
+                              </span>
+                            )}
                           </span>
                           <span className='text-[11px] text-[var(--ui-text-secondary)] font-mono truncate' title={pendingPermission.command || pendingPermission.path}>
                             {pendingPermission.command ? `$ ${pendingPermission.command}` : pendingPermission.path}
@@ -635,7 +638,7 @@ const ChatView: React.FC = () => {
                   containerWidth={0}
                   workDir={activeSession?.workDir || null}
                   onSelectWorkDir={handleSelectWorkDir}
-                  permissionMode={activeSession?.permissionMode || 'auto-sandbox'}
+                  permissionMode={activeSession?.permissionMode || 'auto'}
                   onChangePermissionMode={(mode) => {
                     if (activeSessionId) {
                       setSessionPermissionMode(activeSessionId, mode);

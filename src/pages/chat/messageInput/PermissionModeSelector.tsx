@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
-import { type PermissionMode } from "@/stores/chatStore";
+import { type PermissionMode, normalizeClientPermissionMode } from "@/stores/chatStore";
 import { PERMISSION_MODE_OPTIONS } from "./constants";
 
 interface PermissionModeSelectorProps {
@@ -18,8 +18,9 @@ export const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
   const [permMenuOpen, setPermMenuOpen] = useState(false);
   const [permMenuPos, setPermMenuPos] = useState({ left: 24, bottom: 60 });
 
+  const resolvedMode = normalizeClientPermissionMode(permissionMode);
   const activePermOption =
-    PERMISSION_MODE_OPTIONS.find((opt) => opt.id === permissionMode) ||
+    PERMISSION_MODE_OPTIONS.find((opt) => opt.id === resolvedMode) ||
     PERMISSION_MODE_OPTIONS[1];
   const ActivePermIcon = activePermOption.icon;
 
@@ -94,7 +95,7 @@ export const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
                       <div className="flex flex-col gap-0.5">
                         {PERMISSION_MODE_OPTIONS.map((opt) => {
                           const Icon = opt.icon;
-                          const isSelected = opt.id === permissionMode;
+                          const isSelected = opt.id === resolvedMode;
                           return (
                             <button
                               key={opt.id}

@@ -42,7 +42,7 @@ export const AutomationRuleModal: React.FC<Props> = ({
   const [prompt, setPrompt] = useState('');
   const [workDir, setWorkDir] = useState('');
   const [agentMode, setAgentMode] = useState<'work' | 'code'>('work');
-  const [permissionMode, setPermissionMode] = useState<'auto-sandbox' | 'plan'>('auto-sandbox');
+  const [permissionMode, setPermissionMode] = useState<'auto' | 'plan'>('auto');
   const [model, setModel] = useState('');
   const [webhookTargetId, setWebhookTargetId] = useState('');
   const [notifyOn, setNotifyOn] = useState<'always' | 'on_error' | 'never'>('always');
@@ -68,7 +68,7 @@ export const AutomationRuleModal: React.FC<Props> = ({
       setPrompt(editingRule.prompt || '');
       setWorkDir(editingRule.work_dir || '');
       setAgentMode(editingRule.agent_mode === 'code' ? 'code' : 'work');
-      setPermissionMode(editingRule.permission_mode === 'plan' ? 'plan' : 'auto-sandbox');
+      setPermissionMode(editingRule.permission_mode === 'plan' ? 'plan' : 'auto');
       setModel(editingRule.model || '');
       setWebhookTargetId(editingRule.webhook_target_id || '');
       setNotifyOn(editingRule.notify_on || 'always');
@@ -96,7 +96,7 @@ export const AutomationRuleModal: React.FC<Props> = ({
       setPrompt('');
       setWorkDir(defaultWorkDir || '');
       setAgentMode('work');
-      setPermissionMode('auto-sandbox');
+      setPermissionMode('auto');
       setModel('');
       setWebhookTargetId('');
       setNotifyOn('always');
@@ -493,7 +493,7 @@ export const AutomationRuleModal: React.FC<Props> = ({
                 onChange={(e) => setPermissionMode(e.target.value as any)}
                 className='w-full h-8 px-2 rounded-lg text-xs bg-[var(--ui-card-bg)] border border-[color:var(--ui-border-subtle)] text-[var(--ui-text-primary)] outline-none'
               >
-                <option value='auto-sandbox'>沙箱读写 (工作区内)</option>
+                <option value='auto'>自动模式 (沙箱隔离 + AI 安全评估)</option>
                 <option value='plan'>只读巡检 (Plan)</option>
               </select>
             </div>

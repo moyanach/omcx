@@ -265,7 +265,7 @@ async function runAgentTurn(payload = {}, options = {}) {
       session?.permission_mode ||
       session?.permissionMode ||
       storageService.getConfig("default_permission_mode") ||
-      PERMISSION_MODES.AUTO_SANDBOX
+      PERMISSION_MODES.AUTO
   );
 
   const resolvedAgentMode =
@@ -330,6 +330,22 @@ async function runAgentTurn(payload = {}, options = {}) {
   };
   activeStreamSessions.set(sessionId, sessionAbort);
 
+  const extractLatestUserIntent = () => {
+    if (!Array.isArray(messages)) return "";
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (!m || m.role !== "user") continue;
+      if (typeof m.content === "string") return m.content.slice(0, 1500);
+      if (Array.isArray(m.content)) {
+        return m.content
+          .map((part) => (typeof part === "string" ? part : part?.text || ""))
+          .join("\n")
+          .slice(0, 1500);
+      }
+    }
+    return "";
+  };
+
   const checkPermissionFn = createPermissionChecker({
     sessionId,
     event,
@@ -342,6 +358,9 @@ async function runAgentTurn(payload = {}, options = {}) {
     writableFolders,
     sessionAbort,
     storageService,
+    workDir: sessionWorkDir || "",
+    currentModelId: model || apiModelId || "",
+    getUserIntent: extractLatestUserIntent,
   });
 
   const askUserFn = createQuestionAsker({

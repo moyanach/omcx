@@ -58,6 +58,23 @@ function isDangerousCommand(cmd) {
   return DANGEROUS_COMMAND_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+/**
+ * 不可逾越的系统毁灭性硬红线（大模型安全裁判与自动模式均无权放行）
+ */
+const CATASTROPHIC_COMMAND_PATTERNS = [
+  /(?:^|[;&|]\s*)(?:sudo\s+)?rm\s+(?:-[a-zA-Z]+\s+)*(?:\/\s*$|\/\*|\~\s*$|\~\s*\/\*|\$HOME\s*$)/i,
+  /\b(?:mkfs(?:\.[a-z0-9]+)?|fdisk|parted|diskutil\s+eraseDisk)\b/i,
+  /\bdd\b[^\n]*\bof=\/dev\/(?:r?disk|sd|nvme|vd|hd)/i,
+  /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
+  /(?:^|[;&|]\s*)(?:sudo\s+)?(?:shutdown|reboot|halt|poweroff)\b/i,
+];
+
+function isCatastrophicCommand(cmd) {
+  const text = String(cmd || "").trim();
+  if (!text) return false;
+  return CATASTROPHIC_COMMAND_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 // ─── 工具: run_command ───────────────────────────────────────
 
 class RunCommandTool extends StructuredTool {
@@ -152,6 +169,16 @@ class RunCommandTool extends StructuredTool {
         }
       }
       targetCwd = resolved.resolvedPath;
+    }
+
+    if (isCatastrophicCommand(command)) {
+      return JSON.stringify({
+        success: false,
+        command,
+        description,
+        exitCode: -1,
+        error: `系统安全红线已硬性拦截毁灭性系统命令: ${command}`,
+      });
     }
 
     const dangerous = isDangerousCommand(command);
@@ -288,4 +315,6 @@ class RunCommandTool extends StructuredTool {
 
 module.exports = {
   RunCommandTool,
+  isDangerousCommand,
+  isCatastrophicCommand,
 };

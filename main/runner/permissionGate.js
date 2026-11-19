@@ -5,6 +5,9 @@ const {
   asyncStatSafe,
   notifyDesktopIfBackground,
   clearAppBadge,
+  getModelConfig,
+  pickLiteModel,
+  getSafetyClassifierService,
 } = require("../shared");
 
 function supersedeSessionPermissions(sessionId, replyStream, event) {
@@ -41,6 +44,10 @@ function createPermissionChecker({
   writableFolders,
   sessionAbort,
   storageService,
+  workDir = "",
+  currentModelId = "",
+  getUserIntent = null,
+  safetyClassifier = null,
 }) {
   return async (targetPath, actionDesc, meta = {}) => {
     if (customCheckPermission) {
@@ -54,8 +61,65 @@ function createPermissionChecker({
     ) {
       return true;
     }
+
+    const activeMode =
+      sessionAbort?.toolContext?.permissionMode || resolvedPermissionMode || PERMISSION_MODES.AUTO;
+    const isAutoMode =
+      activeMode === PERMISSION_MODES.AUTO ||
+      activeMode === "auto" ||
+      activeMode === "auto-sandbox" ||
+      activeMode === "ask";
+
+    // 自动模式 (auto)：先交由独立大模型安全裁判评估；
+    // - allow -> 静默放行，不弹窗打扰用户
+    // - deny  -> 方案 B：若有桌面交互窗口则降级弹出人工确认卡片（附 AI 风险原因），无交互窗口则直接拦截
+    let aiReview = null;
+    if (isAutoMode && !meta?.skipAiClassifier) {
+      try {
+        const classifier = safetyClassifier || getSafetyClassifierService();
+        let modelConfig = null;
+        try {
+          const liteOrCurrentId = pickLiteModel(currentModelId);
+          const rawCfg = getModelConfig(liteOrCurrentId);
+          if (rawCfg) {
+            modelConfig = {
+              baseUrl: rawCfg.modelBaseUrl || rawCfg.baseUrl || "",
+              apiKey: rawCfg.modelApiKey || rawCfg.apiKey || "",
+              modelId: rawCfg.apiModelId || rawCfg.modelId || liteOrCurrentId || "",
+              provider: rawCfg.provider || "openai",
+            };
+          }
+        } catch {}
+        const userIntent = typeof getUserIntent === "function" ? getUserIntent() : "";
+        const verdict = await classifier.evaluateActionSafety({
+          targetPath,
+          actionDesc,
+          meta,
+          userIntent,
+          workDir,
+          allowedFolders,
+          modelConfig,
+          storageService,
+        });
+        if (verdict && verdict.allow) {
+          return true;
+        }
+        aiReview = {
+          decision: "deny",
+          risk: verdict?.risk || "high",
+          reason: verdict?.reason || "AI 安全评估认为该操作存在潜在风险，需人工确认",
+        };
+      } catch (err) {
+        aiReview = {
+          decision: "deny",
+          risk: "high",
+          reason: `AI 安全评估异常 (${err?.message || "unknown"})，已降级为人工确认`,
+        };
+      }
+    }
+
     if (!event?.sender) {
-      return resolvedPermissionMode === PERMISSION_MODES.FULL_ACCESS;
+      return activeMode === PERMISSION_MODES.FULL_ACCESS;
     }
     const reqId = `perm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     return new Promise((resolve) => {
@@ -95,18 +159,19 @@ function createPermissionChecker({
                 writableFolders.push(folderToTrust);
               }
             }
-          } else if (decision === "switch_auto_sandbox") {
-            if (sessionAbort.toolContext) {
-              sessionAbort.toolContext.permissionMode = PERMISSION_MODES.AUTO_SANDBOX;
+          } else if (decision === "switch_auto_sandbox" || decision === "switch_auto") {
+            const nextMode = PERMISSION_MODES.AUTO || "auto";
+            if (sessionAbort?.toolContext) {
+              sessionAbort.toolContext.permissionMode = nextMode;
             }
             const targetSess = storageService.getSessions().find((s) => s.id === sessionId);
             if (targetSess) {
-              targetSess.permission_mode = PERMISSION_MODES.AUTO_SANDBOX;
+              targetSess.permission_mode = nextMode;
               storageService.saveSession(targetSess);
             }
             event?.reply?.("session-permission-mode-updated", {
               sessionId,
-              permissionMode: PERMISSION_MODES.AUTO_SANDBOX,
+              permissionMode: nextMode,
             });
           }
         }
@@ -154,7 +219,9 @@ function createPermissionChecker({
         kind,
         command: meta?.command || undefined,
         allowSwitchAutoSandbox: Boolean(meta?.allowSwitchAutoSandbox),
+        aiReview: aiReview || undefined,
         reason:
+          aiReview?.reason ||
           meta?.reason ||
           "该路径位于当前已选定的工作空间源文件夹之外，请确认是否允许 Agent 访问该外部路径",
       });

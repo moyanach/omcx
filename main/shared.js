@@ -67,6 +67,7 @@ const MODULES = {
   documentService: "../services/documentService",
   automationService: "../services/automationService",
   webhookService: "../services/webhookService",
+  safetyClassifierService: "../services/safetyClassifierService",
   cronParser: "../utils/cronParser",
 };
 
@@ -105,6 +106,7 @@ const getWorkspaceRefreshService = () => lazyRequire(MODULES.workspaceRefreshSer
 const getDocumentService = () => lazyRequire(MODULES.documentService);
 const getAutomationService = () => lazyRequire(MODULES.automationService);
 const getWebhookService = () => lazyRequire(MODULES.webhookService);
+const getSafetyClassifierService = () => lazyRequire(MODULES.safetyClassifierService);
 const getCronParser = () => lazyRequire(MODULES.cronParser);
 
 // ─── 运行时全局可变状态（统一收敛到 shared，避免模块循环依赖） ───
@@ -906,6 +908,7 @@ module.exports = {
   getDocumentService,
   getAutomationService,
   getWebhookService,
+  getSafetyClassifierService,
   getCronParser,
   initWorkspaceRefreshBridge,
   activeStreamSnapshotFlushers,

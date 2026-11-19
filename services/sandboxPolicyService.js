@@ -1,11 +1,12 @@
 /**
  * sandboxPolicyService — Agent 权限模式与沙箱安全策略核心引擎
  *
- * 对标主流 Agent (Claude Code / Cursor / Codex CLI) 的 4 档权限模式：
- * 1. plan         — 只读规划模式：禁止写文件工具，命令在只读 OS 沙箱中执行
- * 2. auto-sandbox — 工作区沙箱模式（默认推荐）：工作区内自动读写，命令在工作区写沙箱内自动隔离执行
- * 3. ask          — 询问确认模式：每次写文件或执行命令前弹窗确认，命令仍在工作区写沙箱中保护执行
- * 4. full-access  — 完全访问模式：关闭 OS 沙箱限制，仅对高危破坏性命令与外部目录保留确认
+ * 对标主流 Agent (Claude Code Auto Mode / Codex CLI) 的 3 档权限模式：
+ * 1. plan        — 只读规划模式：禁止写文件工具，命令在只读 OS 沙箱中执行
+ * 2. auto        — 自动模式（默认推荐）：工作区内自动读写，命令在工作区写沙箱内自动隔离执行；
+ *                  遇到高危命令、受保护路径或沙箱边界操作时，先由独立大模型安全裁判评估，安全则自动放行，
+ *                  判定高风险或拒绝时降级由人工确认兜底
+ * 3. full-access — 完全访问模式：关闭 OS 沙箱限制，对高危破坏性命令与外部目录保留人工最后防线
  */
 
 const fs = require("fs");
@@ -18,19 +19,20 @@ const LOCAL_OMCX_FALLBACK = path.join(process.cwd(), ".omcx_local");
 
 const PERMISSION_MODES = {
   PLAN: "plan",
-  AUTO_SANDBOX: "auto-sandbox",
-  ASK: "ask",
+  AUTO: "auto",
+  // 历史枚举别名（向下兼容 auto-sandbox 与 ask，统一映射到 auto）
+  AUTO_SANDBOX: "auto",
+  ASK: "auto",
   FULL_ACCESS: "full-access",
 };
 
 const VALID_PERMISSION_MODES = new Set([
   PERMISSION_MODES.PLAN,
-  PERMISSION_MODES.AUTO_SANDBOX,
-  PERMISSION_MODES.ASK,
+  PERMISSION_MODES.AUTO,
   PERMISSION_MODES.FULL_ACCESS,
 ]);
 
-const DEFAULT_PERMISSION_MODE = PERMISSION_MODES.AUTO_SANDBOX;
+const DEFAULT_PERMISSION_MODE = PERMISSION_MODES.AUTO;
 
 const PERMISSION_MODE_META = {
   [PERMISSION_MODES.PLAN]: {
@@ -41,28 +43,19 @@ const PERMISSION_MODE_META = {
     allowFileWrite: false,
     confirmFileWrite: false,
     confirmCommand: false,
+    useAiSafetyClassifier: false,
     useOsSandbox: true,
     osSandboxWriteMode: "read-only",
   },
-  [PERMISSION_MODES.AUTO_SANDBOX]: {
-    id: PERMISSION_MODES.AUTO_SANDBOX,
-    label: "工作区沙箱",
-    shortLabel: "工作区沙箱",
-    description: "工作区内自动读写，命令在 OS 沙箱内安全隔离执行（推荐）",
+  [PERMISSION_MODES.AUTO]: {
+    id: PERMISSION_MODES.AUTO,
+    label: "自动模式",
+    shortLabel: "自动模式",
+    description: "工作区内自动读写与隔离执行，危险操作由大模型安全评估，高危拦截时人工兜底（推荐）",
     allowFileWrite: true,
     confirmFileWrite: false,
     confirmCommand: false,
-    useOsSandbox: true,
-    osSandboxWriteMode: "workspace-write",
-  },
-  [PERMISSION_MODES.ASK]: {
-    id: PERMISSION_MODES.ASK,
-    label: "询问确认",
-    shortLabel: "询问确认",
-    description: "每次修改文件或执行命令前请求确认，命令受沙箱保护",
-    allowFileWrite: true,
-    confirmFileWrite: true,
-    confirmCommand: true,
+    useAiSafetyClassifier: true,
     useOsSandbox: true,
     osSandboxWriteMode: "workspace-write",
   },
@@ -70,10 +63,11 @@ const PERMISSION_MODE_META = {
     id: PERMISSION_MODES.FULL_ACCESS,
     label: "完全访问",
     shortLabel: "完全访问",
-    description: "关闭 OS 沙箱限制，仅对高危命令与跨工作区写入弹窗确认",
+    description: "关闭 OS 沙箱限制，对高危命令与跨工作区写入保留人工确认最后防线",
     allowFileWrite: true,
     confirmFileWrite: false,
     confirmCommand: false,
+    useAiSafetyClassifier: false,
     useOsSandbox: false,
     osSandboxWriteMode: "none",
   },
@@ -81,6 +75,9 @@ const PERMISSION_MODE_META = {
 
 function normalizePermissionMode(mode) {
   const raw = String(mode || "").trim().toLowerCase();
+  if (raw === "auto-sandbox" || raw === "ask") {
+    return PERMISSION_MODES.AUTO;
+  }
   if (VALID_PERMISSION_MODES.has(raw)) {
     return raw;
   }

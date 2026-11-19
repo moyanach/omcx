@@ -346,3 +346,139 @@ test("repoIndexService 异步扫描与符号/引用检索正确返回结果", as
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("3 档权限模式 (plan / auto / full-access)、灾难命令硬拦截与安全裁判方案 B 裁决流", async () => {
+  const {
+    PERMISSION_MODES,
+    normalizePermissionMode,
+    getPermissionModePolicy,
+  } = require("../services/sandboxPolicyService");
+  const {
+    DEFAULT_CLASSIFIER_MAX_TOKENS,
+    DEFAULT_CLASSIFIER_TIMEOUT_MS,
+    parseClassifierDecision,
+    evaluateActionSafety,
+  } = require("../services/safetyClassifierService");
+  const { createPermissionChecker } = require("../main/runner/permissionGate");
+  const { isCatastrophicCommand, isDangerousCommand } = require("../utils/tools/shellTools");
+  const { pendingPermissions } = require("../main/shared");
+
+  // 1) auto-sandbox 与 ask 自动兼容归一到 auto
+  assert.equal(normalizePermissionMode("auto-sandbox"), "auto");
+  assert.equal(normalizePermissionMode("ask"), "auto");
+  assert.equal(normalizePermissionMode("auto"), "auto");
+  assert.equal(normalizePermissionMode("plan"), "plan");
+  assert.equal(normalizePermissionMode("full-access"), "full-access");
+  assert.equal(getPermissionModePolicy("auto-sandbox").id, "auto");
+  assert.equal(getPermissionModePolicy("auto").useAiSafetyClassifier, true);
+
+  // 2) 放宽预算常量校验 (maxTokens=1024, timeout=45000)
+  assert.equal(DEFAULT_CLASSIFIER_MAX_TOKENS, 1024);
+  assert.equal(DEFAULT_CLASSIFIER_TIMEOUT_MS, 45000);
+
+  // 3) 灾难性系统命令硬拦截
+  assert.equal(isCatastrophicCommand("rm -rf /"), true);
+  assert.equal(isCatastrophicCommand("sudo rm -rf ~"), true);
+  assert.equal(isCatastrophicCommand("mkfs.ext4 /dev/sda1"), true);
+  assert.equal(isCatastrophicCommand("rm -rf ./dist"), false);
+  assert.equal(isDangerousCommand("rm -rf ./dist"), true);
+
+  // 4) 安全裁判输出解析（兼容 <think> 思考块与 JSON 围栏）
+  const allowVerdict = parseClassifierDecision(
+    '<think>用户要求清理构建目录</think>```json\n{"decision":"allow","risk":"low","reason":"清理当前构建产物 dist"}\n```'
+  );
+  assert.equal(allowVerdict.allow, true);
+  assert.equal(allowVerdict.risk, "low");
+
+  const denyVerdict = await evaluateActionSafety({
+    targetPath: "/opt/app",
+    actionDesc: "执行高危命令",
+    meta: { kind: "dangerous_command", command: "git push --force origin main" },
+    userIntent: "仅运行单元测试",
+    workDir: "/opt/app",
+    modelConfig: {
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "sk-test",
+      modelId: "lite-judge",
+      provider: "openai",
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: '{"decision":"deny","risk":"high","reason":"与跑单测意图无关的强推主干"}',
+            },
+          },
+        ],
+      }),
+    }),
+  });
+  assert.equal(denyVerdict.allow, false);
+  assert.equal(denyVerdict.reason, "与跑单测意图无关的强推主干");
+
+  // 5) permissionGate 方案 B：auto 模式下 AI allow 直接静默通过（不弹窗）；AI deny 则降级触发人工确认弹窗并附带 aiReview
+  const emittedEvents = [];
+  const fakeEvent = {
+    sender: {
+      isDestroyed: () => false,
+      once: () => {},
+      removeListener: () => {},
+    },
+  };
+  const replyStream = (type, data) => {
+    emittedEvents.push({ type, data });
+    if (type === "permission") {
+      const pending = pendingPermissions.get(data.id);
+      if (pending) {
+        pending.settle({ allow: false, decision: "deny" });
+      }
+    }
+  };
+
+  let nextAiDecision = { allow: true, decision: "allow", risk: "low", reason: "局部构建目录清理" };
+  const checker = createPermissionChecker({
+    sessionId: "sess_auto_judge",
+    event: fakeEvent,
+    replyStream,
+    customCheckPermission: null,
+    isBuiltinTrustedPath: () => false,
+    resolvedPermissionMode: PERMISSION_MODES.AUTO,
+    PERMISSION_MODES,
+    allowedFolders: ["/opt/app"],
+    writableFolders: ["/opt/app"],
+    sessionAbort: { toolContext: { permissionMode: "auto" } },
+    storageService: { getSessions: () => [], saveSession: () => {} },
+    workDir: "/opt/app",
+    currentModelId: "test-model",
+    getUserIntent: () => "清理 dist 目录并重新打包",
+    safetyClassifier: {
+      evaluateActionSafety: async () => nextAiDecision,
+    },
+  });
+
+  // 5a) AI allow -> 静默返回 true，不发 permission 事件
+  const passResult = await checker("/opt/app ($ rm -rf ./dist)", "执行高危命令", {
+    kind: "dangerous_command",
+    command: "rm -rf ./dist",
+  });
+  assert.equal(passResult, true);
+  assert.equal(emittedEvents.length, 0);
+
+  // 5b) AI deny -> 方案 B 降级触发前端 permission 弹窗并携带 aiReview
+  nextAiDecision = {
+    allow: false,
+    decision: "deny",
+    risk: "high",
+    reason: "未授权强制重置主干分支",
+  };
+  const fallbackResult = await checker("/opt/app ($ git reset --hard)", "执行高危命令", {
+    kind: "dangerous_command",
+    command: "git reset --hard",
+  });
+  assert.equal(fallbackResult, false);
+  assert.equal(emittedEvents.length, 1);
+  assert.equal(emittedEvents[0].type, "permission");
+  assert.equal(emittedEvents[0].data.aiReview.reason, "未授权强制重置主干分支");
+});

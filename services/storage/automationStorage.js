@@ -52,10 +52,7 @@ function mapAutomationRow(r) {
     prompt: String(r.prompt || ""),
     work_dir: r.work_dir ?? r.workDir ?? null,
     agent_mode: (r.agent_mode ?? r.agentMode) === "code" ? "code" : "work",
-    permission_mode:
-      r.permission_mode === "plan" || r.permission_mode === "auto-sandbox"
-        ? r.permission_mode
-        : "auto-sandbox",
+    permission_mode: r.permission_mode === "plan" ? "plan" : "auto",
     model: String(r.model || ""),
     webhook_target_id: r.webhook_target_id ?? r.webhookTargetId ?? null,
     notify_on:
@@ -196,7 +193,7 @@ function createAutomationStorage({ memoryState, getConfig, setConfig, dbEngine }
       permission_mode:
         (input.permission_mode ?? input.permissionMode ?? existing?.permission_mode) === "plan"
           ? "plan"
-          : "auto-sandbox",
+          : "auto",
       model: String(input.model ?? existing?.model ?? ""),
       webhook_target_id:
         input.webhook_target_id !== undefined

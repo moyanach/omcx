@@ -9,7 +9,7 @@ export interface AutomationRule {
   prompt: string;
   work_dir: string | null;
   agent_mode: 'work' | 'code';
-  permission_mode: 'plan' | 'auto-sandbox';
+  permission_mode: 'plan' | 'auto' | 'auto-sandbox';
   model: string;
   webhook_target_id: string | null;
   notify_on: 'always' | 'on_error' | 'never';
@@ -73,7 +73,7 @@ export interface AutomationPreset {
   interval_minutes: number;
   cron_expr: string;
   agent_mode: 'work' | 'code';
-  permission_mode: 'plan' | 'auto-sandbox';
+  permission_mode: 'plan' | 'auto';
   prompt: string;
 }
 
@@ -86,7 +86,7 @@ export const AUTOMATION_PRESETS: AutomationPreset[] = [
     interval_minutes: 1440,
     cron_expr: '0 9 * * 1-5',
     agent_mode: 'work',
-    permission_mode: 'auto-sandbox',
+    permission_mode: 'auto',
     prompt:
       '请检查当前工作目录下的近期改动记录、文档与待办事项，整理一份简洁的《每日工作简报》（包含昨日进展、今日建议优先事项、潜在阻塞点），并将结果保存为工作区内的日报 Markdown 文件。',
   },
