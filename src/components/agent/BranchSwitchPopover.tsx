@@ -24,6 +24,7 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   onBranchSwitched: (newBranch: string) => void;
+  zIndexClass?: string;
 }
 
 export const BranchSwitchPopover: React.FC<Props> = ({
@@ -34,6 +35,7 @@ export const BranchSwitchPopover: React.FC<Props> = ({
   isOpen,
   onClose,
   onBranchSwitched,
+  zIndexClass = 'z-[99999]',
 }) => {
   const [branches, setBranches] = useState<BranchItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -120,15 +122,16 @@ export const BranchSwitchPopover: React.FC<Props> = ({
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        e.stopPropagation();
         onClose();
       }
     };
 
     window.addEventListener('mousedown', handleClickOutside);
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
     return () => {
       window.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [isOpen, onClose, anchorEl]);
 
@@ -274,7 +277,7 @@ export const BranchSwitchPopover: React.FC<Props> = ({
         bottom: coords.bottom,
         width: 290,
       }}
-      className='z-[99999] rounded-2xl bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-2xl backdrop-blur-2xl flex flex-col overflow-hidden text-xs select-none animate-in fade-in zoom-in-95 duration-150'
+      className={`${zIndexClass} rounded-2xl bg-[var(--ui-popover-bg)] border border-[color:var(--ui-border-subtle)] shadow-2xl backdrop-blur-2xl flex flex-col overflow-hidden text-xs select-none animate-in fade-in zoom-in-95 duration-150`}
     >
       {/* 1. 顶部搜索框 (完全对齐参考截图) */}
       <div className='p-2.5 border-b border-[color:var(--ui-divider-hairline)]'>

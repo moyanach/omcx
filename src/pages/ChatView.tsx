@@ -13,6 +13,7 @@ import {
 import ChatHeader from '@/pages/chat/ChatHeader';
 import MessageList from '@/pages/chat/MessageList';
 import MessageInput from '@/pages/chat/MessageInput';
+import { ChatMascot } from '@/pages/chat/ChatMascot';
 import SessionInspectorColumn from '@/components/agent/SessionInspectorColumn';
 import WebWorkspaceDrawer from '@/components/browser/WebWorkspaceDrawer';
 import EditWorkspaceModal, { WorkspaceData } from '@/components/agent/EditWorkspaceModal';
@@ -127,6 +128,8 @@ const ChatView: React.FC = () => {
   attachmentsRef.current = attachments;
   const fileMentionMapRef = useRef(fileMentionMap);
   fileMentionMapRef.current = fileMentionMap;
+  const chatStageRef = useRef<HTMLDivElement>(null);
+  const inputAnchorRef = useRef<HTMLDivElement>(null);
 
   const showToast = (msg: string, duration = 3000) => {
     setToastMsg(msg);
@@ -510,7 +513,7 @@ const ChatView: React.FC = () => {
           <div className='flex-1 min-h-0 flex overflow-hidden bg-transparent'>
             {/* 左侧：消息与输入直接平铺在单层会话背景上，避免与外层和右栏产生多重叠加 */}
             <div className='flex-1 min-h-0 flex flex-col overflow-hidden bg-[var(--ui-panel-bg)] backdrop-blur-xl backdrop-saturate-150'>
-              <div className='flex-1 min-h-0 flex flex-col overflow-hidden relative'>
+              <div ref={chatStageRef} className='flex-1 min-h-0 flex flex-col overflow-hidden relative'>
                 <MessageList
                   messages={activeMessages}
                   isGenerating={isGenerating}
@@ -629,51 +632,65 @@ const ChatView: React.FC = () => {
                   />
                 )}
 
-                <MessageInput
-                  value={input}
-                  onChange={setInput}
-                  onSend={handleSend}
+                <div ref={inputAnchorRef} className='w-full flex-shrink-0'>
+                  <MessageInput
+                    value={input}
+                    onChange={setInput}
+                    onSend={handleSend}
+                    isGenerating={isGenerating}
+                    disabled={!activeSessionId}
+                    containerWidth={0}
+                    workDir={activeSession?.workDir || null}
+                    onSelectWorkDir={handleSelectWorkDir}
+                    permissionMode={activeSession?.permissionMode || 'auto'}
+                    onChangePermissionMode={(mode) => {
+                      if (activeSessionId) {
+                        setSessionPermissionMode(activeSessionId, mode);
+                      }
+                    }}
+                    attachments={attachments}
+                    onChangeAttachments={setAttachments}
+                    onNotify={showToast}
+                    onCancel={cancelMessage}
+                    selectedModel={selectedModel}
+                    chatModels={availableChatModels}
+                    onChangeModel={(val) => {
+                      setSelectedModel(val);
+                      if (activeSessionId) {
+                        updateSessionModel(activeSessionId, val);
+                      }
+                    }}
+                    promptQueue={activePromptQueue}
+                    onRunQueuedNow={handleRunQueuedNow}
+                    onSteerQueuedNow={handleSteerQueued}
+                    onSteerCurrent={handleSteerCurrent}
+                    onEditQueued={handleEditQueued}
+                    onMoveQueuedToTop={(id) => {
+                      if (activeSessionId) moveQueuedPromptToTop(activeSessionId, id);
+                    }}
+                    onRemoveQueued={(id) => {
+                      if (activeSessionId) removeQueuedPrompt(activeSessionId, id);
+                    }}
+                    onClearQueue={() => {
+                      if (activeSessionId) clearPromptQueue(activeSessionId);
+                    }}
+                    mentionMap={fileMentionMap}
+                    onChangeMentionMap={setFileMentionMap}
+                    onFileIndexChange={setWorkspaceFiles}
+                    focusRequest={inputFocusRequest}
+                  />
+                </div>
+
+                <ChatMascot
+                  containerRef={chatStageRef}
+                  inputAnchorRef={inputAnchorRef}
+                  mode={activeSession?.agentMode === 'work' ? 'work' : 'code'}
+                  sessionId={activeSessionId}
                   isGenerating={isGenerating}
-                  disabled={!activeSessionId}
-                  containerWidth={0}
-                  workDir={activeSession?.workDir || null}
-                  onSelectWorkDir={handleSelectWorkDir}
-                  permissionMode={activeSession?.permissionMode || 'auto'}
-                  onChangePermissionMode={(mode) => {
-                    if (activeSessionId) {
-                      setSessionPermissionMode(activeSessionId, mode);
-                    }
-                  }}
-                  attachments={attachments}
-                  onChangeAttachments={setAttachments}
+                  messages={activeMessages}
+                  toolCalls={activeToolCalls}
+                  hasPendingAttention={Boolean(pendingPermission || pendingQuestion)}
                   onNotify={showToast}
-                  onCancel={cancelMessage}
-                  selectedModel={selectedModel}
-                  chatModels={availableChatModels}
-                  onChangeModel={(val) => {
-                    setSelectedModel(val);
-                    if (activeSessionId) {
-                      updateSessionModel(activeSessionId, val);
-                    }
-                  }}
-                  promptQueue={activePromptQueue}
-                  onRunQueuedNow={handleRunQueuedNow}
-                  onSteerQueuedNow={handleSteerQueued}
-                  onSteerCurrent={handleSteerCurrent}
-                  onEditQueued={handleEditQueued}
-                  onMoveQueuedToTop={(id) => {
-                    if (activeSessionId) moveQueuedPromptToTop(activeSessionId, id);
-                  }}
-                  onRemoveQueued={(id) => {
-                    if (activeSessionId) removeQueuedPrompt(activeSessionId, id);
-                  }}
-                  onClearQueue={() => {
-                    if (activeSessionId) clearPromptQueue(activeSessionId);
-                  }}
-                  mentionMap={fileMentionMap}
-                  onChangeMentionMap={setFileMentionMap}
-                  onFileIndexChange={setWorkspaceFiles}
-                  focusRequest={inputFocusRequest}
                 />
               </div>
             </div>

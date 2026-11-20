@@ -16,6 +16,10 @@ const {
   gitMergeBranch,
   gitPush,
 } = require("../services/workspaceGitService");
+const {
+  inspectGitDirectories,
+  createMultiWorktrees,
+} = require("../services/gitWorktreeService");
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
@@ -163,5 +167,84 @@ test("gitMergeBranch 默认允许 Fast-Forward 保持多分支在同一水平线
     assert.equal(parents.length, 3);
   } finally {
     fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("gitWorktreeService 多目录检测分支与按目录独立 base 创建 Worktree", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "omcx-multi-wt-test-"));
+  const prevHome = process.env.OMCX_HOME;
+  process.env.OMCX_HOME = path.join(rootDir, "omcx-home");
+  try {
+    const repoA = path.join(rootDir, "service-a");
+    const repoB = path.join(rootDir, "service-b");
+    const nonGit = path.join(rootDir, "docs");
+    fs.mkdirSync(repoA, { recursive: true });
+    fs.mkdirSync(repoB, { recursive: true });
+    fs.mkdirSync(nonGit, { recursive: true });
+
+    // 初始化 repoA：main + dev-a（带独特提交）
+    git(repoA, "init", "-b", "main");
+    git(repoA, "config", "user.email", "test@omcx.local");
+    git(repoA, "config", "user.name", "OMCX Tester");
+    fs.writeFileSync(path.join(repoA, "a.txt"), "main-a\n");
+    git(repoA, "add", ".");
+    git(repoA, "commit", "-m", "init a");
+    git(repoA, "checkout", "-b", "dev-a");
+    fs.writeFileSync(path.join(repoA, "a.txt"), "dev-a-content\n");
+    git(repoA, "add", ".");
+    git(repoA, "commit", "-m", "feat a on dev-a");
+    const devAHead = git(repoA, "rev-parse", "HEAD");
+    git(repoA, "checkout", "main");
+
+    // 初始化 repoB：main + release-b（带独特提交）
+    git(repoB, "init", "-b", "main");
+    git(repoB, "config", "user.email", "test@omcx.local");
+    git(repoB, "config", "user.name", "OMCX Tester");
+    fs.writeFileSync(path.join(repoB, "b.txt"), "main-b\n");
+    git(repoB, "add", ".");
+    git(repoB, "commit", "-m", "init b");
+    git(repoB, "checkout", "-b", "release-b");
+    fs.writeFileSync(path.join(repoB, "b.txt"), "release-b-content\n");
+    git(repoB, "add", ".");
+    git(repoB, "commit", "-m", "feat b on release-b");
+    const releaseBHead = git(repoB, "rev-parse", "HEAD");
+    git(repoB, "checkout", "main");
+
+    // 1. inspectGitDirectories 应同时返回各目录的 currentBranch 与全量 branches
+    const inspectRes = await inspectGitDirectories([
+      { path: repoA, name: "service-a", isPrimary: true },
+      { path: repoB, name: "service-b", isPrimary: false },
+      { path: nonGit, name: "docs", isPrimary: false },
+    ]);
+    assert.equal(inspectRes.success, true);
+    assert.equal(inspectRes.folders.length, 3);
+    assert.equal(inspectRes.folders[0].isGit, true);
+    assert.equal(inspectRes.folders[0].currentBranch, "main");
+    assert.deepEqual(inspectRes.folders[0].branches.sort(), ["dev-a", "main"]);
+    assert.equal(inspectRes.folders[1].isGit, true);
+    assert.deepEqual(inspectRes.folders[1].branches.sort(), ["main", "release-b"]);
+    assert.equal(inspectRes.folders[2].isGit, false);
+
+    // 2. createMultiWorktrees 支持每个目录使用各自独立的 base 分支
+    const createRes = await createMultiWorktrees({
+      folders: [
+        { path: repoA, name: "service-a", isPrimary: true, base: "dev-a" },
+        { path: repoB, name: "service-b", isPrimary: false, base: "release-b" },
+      ],
+      branch: "feat/multi-base-test",
+    });
+    assert.equal(createRes.success, true, createRes.error);
+    assert.equal(createRes.items.length, 2);
+
+    const wtA = createRes.items.find((i) => i.name === "service-a");
+    const wtB = createRes.items.find((i) => i.name === "service-b");
+    assert.equal(wtA.sourceBranch, "dev-a");
+    assert.equal(wtB.sourceBranch, "release-b");
+    assert.equal(git(wtA.worktreePath, "rev-parse", "HEAD"), devAHead);
+    assert.equal(git(wtB.worktreePath, "rev-parse", "HEAD"), releaseBHead);
+  } finally {
+    if (prevHome === undefined) delete process.env.OMCX_HOME;
+    else process.env.OMCX_HOME = prevHome;
+    fs.rmSync(rootDir, { recursive: true, force: true });
   }
 });

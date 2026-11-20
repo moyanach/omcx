@@ -41,6 +41,10 @@ export const AppearanceSettingsSection: React.FC<AppearanceSettingsSectionProps>
   const [currentTheme, setCurrentTheme] = useState<ThemeMode>("system");
   const [appearance, setAppearanceState] = useState<AppearanceConfig>(getAppearance());
   const setStoreTheme = useAppStore((s) => s.setTheme);
+  const mascotEnabled = useAppStore((s) => s.mascotEnabled);
+  const setMascotEnabled = useAppStore((s) => s.setMascotEnabled);
+  const mascotPosition = useAppStore((s) => s.mascotPosition);
+  const resetMascotPosition = useAppStore((s) => s.resetMascotPosition);
 
   // 字体设置（界面字体 / 终端字体 / 终端字号）
   const [fontSettings, setFontSettingsState] = useState<FontSettings>(getFontSettings());
@@ -365,6 +369,42 @@ export const AppearanceSettingsSection: React.FC<AppearanceSettingsSectionProps>
                       </span>
                     </span>
                   </label>
+
+                  {/* 对话状态吉祥物开关与默认位置复位 */}
+                  <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-[#171717] border border-[#2b2b2b] select-none">
+                    <label className="flex items-start gap-2.5 cursor-pointer flex-1 min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={mascotEnabled}
+                        onChange={(e) => {
+                          setMascotEnabled(e.target.checked);
+                          showToast(e.target.checked ? "已开启对话状态吉祥物" : "已关闭对话状态吉祥物");
+                        }}
+                        className="mt-0.5 accent-blue-600 cursor-pointer"
+                      />
+                      <span className="flex flex-col gap-0.5 min-w-0">
+                        <span className="text-xs font-medium text-neutral-200">
+                          显示对话状态吉祥物
+                        </span>
+                        <span className="text-[11px] text-neutral-500">
+                          默认停靠在输入框右上角外沿，随思考、调用工具、输出与待确认状态做出轻量动作；支持自由拖拽与随时关闭
+                        </span>
+                      </span>
+                    </label>
+                    {mascotPosition && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetMascotPosition();
+                          showToast("已重置吉祥物至默认位置");
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#252525] hover:bg-[#303030] text-neutral-300 text-[11px] font-medium border border-[#353535] flex items-center gap-1.5 transition-colors cursor-pointer flex-shrink-0"
+                      >
+                        <RotateCcw size={12} />
+                        <span>重置位置</span>
+                      </button>
+                    )}
+                  </div>
 
                   {(appearance.surfaceOpacity < 60 || appearance.bgBlur < 6) && (
                     <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[var(--ui-accent-amber-soft)] border border-[color:var(--ui-accent-amber-border)] text-[11px] text-[var(--ui-accent-amber)] leading-relaxed">

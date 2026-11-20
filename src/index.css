@@ -610,3 +610,211 @@ select:focus-visible {
   box-shadow: 0 0 0 2px var(--ui-focus-ring);
 }
 
+/* ─── 对话状态吉祥物动画 ─── */
+.omcx-mascot-root {
+  transform-origin: center bottom;
+}
+
+.omcx-mascot-eyes {
+  transform-box: fill-box;
+  transform-origin: center center;
+}
+
+.omcx-mascot-body {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+}
+
+.omcx-mascot-antenna-left,
+.omcx-mascot-antenna-right {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+}
+
+/* idle: 轻微呼吸悬浮 + 间歇眨眼 */
+@keyframes omcx-mascot-breathe {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-1.5px);
+  }
+}
+
+@keyframes omcx-mascot-blink {
+  0%, 44%, 48%, 92%, 96%, 100% {
+    transform: scaleY(1);
+  }
+  46%, 94% {
+    transform: scaleY(0.18);
+  }
+}
+
+.omcx-mascot-idle {
+  animation: omcx-mascot-breathe 3.4s ease-in-out infinite;
+}
+
+.omcx-mascot-idle .omcx-mascot-eyes {
+  animation: omcx-mascot-blink 5.6s ease-in-out infinite;
+}
+
+/* thinking: 机身轻柔摇摆 + 眼睛左右扫视 + 天线脉冲 */
+@keyframes omcx-mascot-think-sway {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  25% {
+    transform: translateY(-1.5px) rotate(-3deg);
+  }
+  75% {
+    transform: translateY(-1.5px) rotate(3deg);
+  }
+}
+
+@keyframes omcx-mascot-scan-eyes {
+  0%, 100% {
+    transform: translateX(0px);
+  }
+  25% {
+    transform: translateX(-1.4px);
+  }
+  75% {
+    transform: translateX(1.4px);
+  }
+}
+
+@keyframes omcx-mascot-antenna-pulse {
+  0%, 100% {
+    opacity: 0.45;
+    transform: scaleY(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scaleY(1.25);
+  }
+}
+
+.omcx-mascot-thinking {
+  animation: omcx-mascot-think-sway 2.1s ease-in-out infinite;
+}
+
+.omcx-mascot-thinking .omcx-mascot-eyes {
+  animation: omcx-mascot-scan-eyes 1.6s ease-in-out infinite;
+}
+
+.omcx-mascot-thinking .omcx-mascot-antenna-left,
+.omcx-mascot-thinking .omcx-mascot-antenna-right {
+  animation: omcx-mascot-antenna-pulse 1.1s ease-in-out infinite;
+}
+
+/* tool: 忙碌微振前倾 + 天线交替指示 */
+@keyframes omcx-mascot-tool-busy {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  25% {
+    transform: translateY(-1px) rotate(-4deg);
+  }
+  50% {
+    transform: translateY(0.5px) rotate(0deg);
+  }
+  75% {
+    transform: translateY(-1px) rotate(4deg);
+  }
+}
+
+@keyframes omcx-mascot-antenna-alt {
+  0%, 100% {
+    opacity: 0.35;
+    transform: scaleY(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scaleY(1.3);
+  }
+}
+
+.omcx-mascot-tool .omcx-mascot-body {
+  animation: omcx-mascot-tool-busy 0.75s ease-in-out infinite;
+}
+
+.omcx-mascot-tool .omcx-mascot-antenna-left {
+  animation: omcx-mascot-antenna-alt 0.6s ease-in-out infinite;
+}
+
+.omcx-mascot-tool .omcx-mascot-antenna-right {
+  animation: omcx-mascot-antenna-alt 0.6s ease-in-out 0.3s infinite;
+}
+
+/* streaming: 轻快打字弹跳律动 */
+@keyframes omcx-mascot-typing-bounce {
+  0%, 100% {
+    transform: translateY(0px) scaleY(1);
+  }
+  50% {
+    transform: translateY(-2.5px) scaleY(1.03);
+  }
+}
+
+.omcx-mascot-streaming {
+  animation: omcx-mascot-typing-bounce 0.55s ease-in-out infinite;
+}
+
+.omcx-mascot-streaming .omcx-mascot-antenna-left,
+.omcx-mascot-streaming .omcx-mascot-antenna-right {
+  animation: omcx-mascot-antenna-pulse 0.9s ease-in-out infinite;
+}
+
+/* attention: 琥珀提醒轻跳 */
+@keyframes omcx-mascot-attention-hop {
+  0%, 60%, 100% {
+    transform: translateY(0px);
+  }
+  15% {
+    transform: translateY(-4px);
+  }
+  30% {
+    transform: translateY(0px);
+  }
+  45% {
+    transform: translateY(-2.5px);
+  }
+}
+
+.omcx-mascot-attention {
+  animation: omcx-mascot-attention-hop 1.5s ease-in-out infinite;
+}
+
+.omcx-mascot-attention .omcx-mascot-antenna-left,
+.omcx-mascot-attention .omcx-mascot-antenna-right {
+  animation: omcx-mascot-antenna-pulse 0.7s ease-in-out infinite;
+}
+
+/* done: 完成庆祝跳跃 */
+@keyframes omcx-mascot-done-jump {
+  0%, 100% {
+    transform: translateY(0px) scale(1);
+  }
+  30% {
+    transform: translateY(-5px) scale(1.06);
+  }
+  55% {
+    transform: translateY(0px) scale(0.98);
+  }
+  75% {
+    transform: translateY(-2.5px) scale(1.03);
+  }
+}
+
+.omcx-mascot-done {
+  animation: omcx-mascot-done-jump 1.2s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .omcx-mascot-root,
+  .omcx-mascot-root * {
+    animation: none !important;
+  }
+}
+
+

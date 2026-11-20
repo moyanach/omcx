@@ -535,15 +535,28 @@ async function inspectGitDirectories(folders = []) {
       });
       continue;
     }
-    const headRes = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], repoRoot);
-    const currentBranch = headRes.ok ? headRes.stdout.trim() : "";
+    const [headRes, branchesRes] = await Promise.all([
+      runGit(["rev-parse", "--abbrev-ref", "HEAD"], repoRoot),
+      runGit(["for-each-ref", "--format=%(refname:short)", "refs/heads"], repoRoot),
+    ]);
+    const rawCurrent = headRes.ok ? headRes.stdout.trim() : "";
+    const currentBranch = rawCurrent && rawCurrent !== "HEAD" ? rawCurrent : "";
+    const branches = branchesRes.ok
+      ? branchesRes.stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+      : currentBranch
+        ? [currentBranch]
+        : [];
     results.push({
       path: folderPath,
       name: folder?.name || path.basename(folderPath),
       isPrimary: Boolean(folder?.isPrimary),
       isGit: true,
       repoRoot,
-      currentBranch: currentBranch && currentBranch !== "HEAD" ? currentBranch : "",
+      currentBranch,
+      branches,
     });
   }
   return { success: true, folders: results };
@@ -555,7 +568,7 @@ async function createMultiWorktrees({ folders = [], branch = "", base = "HEAD" }
     return { success: false, error: "请至少选择一个目录" };
   }
 
-  const baseRef = safeBranchName(base) || "HEAD";
+  const globalBaseRef = safeBranchName(base) || "HEAD";
   let branchName = safeBranchName(branch);
   if (branch && !branchName) {
     return { success: false, error: `无效的分支名：${branch}` };
@@ -568,6 +581,7 @@ async function createMultiWorktrees({ folders = [], branch = "", base = "HEAD" }
   const rootDir = worktreesRoot();
   const seenRepoRoots = new Set();
   const seenTargets = new Set();
+  const folderBaseMap = new Map();
   for (const folder of selected) {
     const repoRoot = await getRepoRoot(folder.path);
     if (!repoRoot) {
@@ -585,11 +599,21 @@ async function createMultiWorktrees({ folders = [], branch = "", base = "HEAD" }
     }
     seenRepoRoots.add(normalizedRepo);
 
-    const verifyBase = await runGit(["rev-parse", "--verify", `${baseRef}^{commit}`], repoRoot);
+    const rawFolderBase = typeof folder.base === "string" ? folder.base.trim() : "";
+    const folderBaseRef = rawFolderBase ? safeBranchName(rawFolderBase) : globalBaseRef;
+    if (rawFolderBase && !folderBaseRef) {
+      return {
+        success: false,
+        error: `目录「${folder.name || folder.path}」指定的基准分支无效：${rawFolderBase}`,
+      };
+    }
+    folderBaseMap.set(folder.path, folderBaseRef);
+
+    const verifyBase = await runGit(["rev-parse", "--verify", `${folderBaseRef}^{commit}`], repoRoot);
     if (!verifyBase.ok) {
       return {
         success: false,
-        error: `目录「${folder.name || folder.path}」中基引用不存在：${baseRef}`,
+        error: `目录「${folder.name || folder.path}」中基引用不存在：${folderBaseRef}`,
       };
     }
 
@@ -633,7 +657,7 @@ async function createMultiWorktrees({ folders = [], branch = "", base = "HEAD" }
   for (const folder of selected) {
     const res = await createWorktree(folder.path, {
       branch: branchName,
-      base: baseRef,
+      base: folderBaseMap.get(folder.path) || globalBaseRef,
       name: folder.name,
     });
     if (!res?.success) {

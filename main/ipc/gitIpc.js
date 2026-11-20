@@ -154,7 +154,7 @@ function registerGitIpc() {
       notifyGitMutation(
         workDir,
         await getWorkspaceGitService().gitCreateBranchAt(workDir, branchName, startPoint),
-        { areas: ["git", "worktrees"] }
+        { invalidateFiles: true, areas: ["files", "git", "worktrees"] }
       )
     )
   );

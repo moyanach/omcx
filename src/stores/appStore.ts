@@ -15,6 +15,14 @@ const DEFAULT_INSPECTOR_WIDTH = 325;
 const MIN_INSPECTOR_WIDTH = 260;
 const MAX_INSPECTOR_WIDTH = 560;
 
+const MASCOT_ENABLED_KEY = "omcx.mascot_enabled";
+const MASCOT_POSITION_KEY = "omcx.mascot_position";
+
+export interface MascotPosition {
+  right: number;
+  bottom: number;
+}
+
 const clampLeftSidebarWidth = (width: number) =>
   Math.max(
     MIN_LEFT_SIDEBAR_WIDTH,
@@ -60,6 +68,37 @@ const readInspectorWidth = () => {
   }
 };
 
+const readMascotEnabled = (): boolean => {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = window.localStorage.getItem(MASCOT_ENABLED_KEY);
+    return raw === null ? true : raw !== "false";
+  } catch {
+    return true;
+  }
+};
+
+const readMascotPosition = (): MascotPosition | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(MASCOT_POSITION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed.right === "number" &&
+      Number.isFinite(parsed.right) &&
+      typeof parsed.bottom === "number" &&
+      Number.isFinite(parsed.bottom)
+    ) {
+      return { right: parsed.right, bottom: parsed.bottom };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
 interface AppState {
   activeView: View;
   setActiveView: (view: View) => void;
@@ -91,6 +130,12 @@ interface AppState {
   /** 定时任务收件箱未读结果数量 */
   unreadAutomationRuns: number;
   setUnreadAutomationRuns: (count: number) => void;
+  /** 常驻对话状态吉祥物开关与自定义拖拽位置（null = 默认停靠输入框右上角） */
+  mascotEnabled: boolean;
+  setMascotEnabled: (enabled: boolean) => void;
+  mascotPosition: MascotPosition | null;
+  setMascotPosition: (pos: MascotPosition | null) => void;
+  resetMascotPosition: () => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -147,4 +192,28 @@ export const useAppStore = create<AppState>((set) => ({
   setToolsIntent: (intent) => set({ toolsIntent: intent }),
   unreadAutomationRuns: 0,
   setUnreadAutomationRuns: (count) => set({ unreadAutomationRuns: Math.max(0, Number(count) || 0) }),
+  mascotEnabled: readMascotEnabled(),
+  setMascotEnabled: (enabled) => {
+    set({ mascotEnabled: Boolean(enabled) });
+    try {
+      window.localStorage.setItem(MASCOT_ENABLED_KEY, String(Boolean(enabled)));
+    } catch {}
+  },
+  mascotPosition: readMascotPosition(),
+  setMascotPosition: (pos) => {
+    set({ mascotPosition: pos });
+    try {
+      if (pos) {
+        window.localStorage.setItem(MASCOT_POSITION_KEY, JSON.stringify(pos));
+      } else {
+        window.localStorage.removeItem(MASCOT_POSITION_KEY);
+      }
+    } catch {}
+  },
+  resetMascotPosition: () => {
+    set({ mascotPosition: null });
+    try {
+      window.localStorage.removeItem(MASCOT_POSITION_KEY);
+    } catch {}
+  },
 }));

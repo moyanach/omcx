@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useAppStore } from "@/stores/appStore";
+import { OmcxMascotIcon } from "@/components/common/OmcxMascotIcon";
 
 export interface EmptySessionWelcomeProps {
   onPrefillPrompt: (text: string, options?: { trigger?: "@" | "/" }) => void;
@@ -113,63 +114,6 @@ function formatDayKey(date: Date): string {
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
-
-/** OMCX 双引擎像素轨道小徽章 */
-const OmcxModeBadge: React.FC<{ mode: "code" | "work" }> = ({ mode }) => {
-  const isWork = mode === "work";
-  const primary = isWork ? "var(--ui-accent-purple, #c084fc)" : "var(--ui-accent-blue, #60a5fa)";
-  const accent = isWork ? "var(--ui-accent-amber, #fbbf24)" : "var(--ui-accent-sky, #38bdf8)";
-
-  return (
-    <div className="relative inline-flex items-center justify-center select-none">
-      <svg
-        width="34"
-        height="26"
-        viewBox="0 0 34 26"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        aria-hidden="true"
-      >
-        {/* 顶角天线 / 脉冲点 */}
-        <rect x="7" y="1" width="2" height="3" rx="0.8" fill={accent} opacity="0.85" />
-        <rect x="25" y="1" width="2" height="3" rx="0.8" fill={accent} opacity="0.85" />
-        {/* 机身主体 */}
-        <rect x="4" y="4" width="26" height="16" rx="4" fill={primary} opacity="0.92" />
-        {/* 内嵌屏幕 */}
-        <rect x="7" y="7" width="20" height="10" rx="2.5" fill="rgba(15, 23, 42, 0.22)" />
-        {/* 像素眼睛 / 核心标识 */}
-        {isWork ? (
-          <>
-            <rect x="10.5" y="10" width="3" height="4" rx="1" fill="#ffffff" />
-            <rect x="20.5" y="10" width="3" height="4" rx="1" fill="#ffffff" />
-            <rect x="15.5" y="12.5" width="3" height="1.5" rx="0.75" fill={accent} />
-          </>
-        ) : (
-          <>
-            <path
-              d="M12 10L10 12L12 14"
-              stroke="#ffffff"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <path
-              d="M22 10L24 12L22 14"
-              stroke="#ffffff"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <rect x="16" y="9.5" width="2" height="5" rx="1" fill={accent} />
-          </>
-        )}
-        {/* 底座支撑脚 */}
-        <rect x="8" y="20" width="4" height="4" rx="1" fill={primary} opacity="0.72" />
-        <rect x="22" y="20" width="4" height="4" rx="1" fill={primary} opacity="0.72" />
-      </svg>
-    </div>
-  );
-};
 
 export const EmptySessionWelcome: React.FC<EmptySessionWelcomeProps> = ({
   onPrefillPrompt,
@@ -341,7 +285,7 @@ export const EmptySessionWelcome: React.FC<EmptySessionWelcomeProps> = ({
     <div className="my-auto mx-auto w-full max-w-[560px] py-5 px-2 flex flex-col gap-3.5 select-none animate-in fade-in duration-200">
       {/* 1. 顶部身份区：OMCX 徽章与模式定位 */}
       <div className="flex flex-col items-center text-center gap-1.5 pb-0.5">
-        <OmcxModeBadge mode={agentMode} />
+        <OmcxMascotIcon mode={agentMode} state="idle" width={34} height={26} />
         <div className="flex items-center gap-2 mt-0.5">
           <h2 className="text-[17px] font-semibold tracking-tight text-[var(--ui-text-primary)]">
             {agentMode === "work" ? "不止于编码 · 通用工作台" : "工程编码与自主工作台"}
